@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from html import escape
 
 import pandas as pd
 import streamlit as st
@@ -38,6 +39,196 @@ PAGES = [
     "Import/Export",
     "Settings",
 ]
+
+NAV_SECTIONS = {
+    "Overview": ["Dashboard", "Health Insights"],
+    "Records": ["Health Timeline", "Medications", "Allergies", "Labs", "Appointments", "Reminders", "Wearables"],
+    "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
+    "Admin": ["Profiles", "Settings"],
+}
+
+PAGE_DESCRIPTIONS = {
+    "Dashboard": "A quick operational view of medications, allergies, labs, reminders, appointments, and recent notes.",
+    "Profiles": "Manage family member profiles and local profile access settings.",
+    "Health Timeline": "Record symptoms, observations, body systems, and dated health notes.",
+    "Medications": "Track current and past medications, dose details, reasons, and notes.",
+    "Allergies": "Keep allergy, reaction, and severity information easy to scan.",
+    "Labs": "Review lab results, flags, reference ranges, and simple trends.",
+    "Appointments": "Track provider visits, status, location, and preparation notes.",
+    "Reminders": "Manage follow-up items and routine health tasks.",
+    "Wearables": "Import and review manually recorded wearable metrics.",
+    "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
+    "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
+    "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
+    "Import/Export": "Import CSV records and manage local JSON backups.",
+    "Settings": "Manage local profile protection and optional BigModel API settings.",
+}
+
+SINGULAR_TITLES = {
+    "Allergies": "Allergy",
+    "Medications": "Medication",
+    "Labs": "Lab",
+    "Health Timeline": "Timeline entry",
+    "Appointments": "Appointment",
+    "Reminders": "Reminder",
+    "Wearables": "Wearable record",
+}
+
+APP_CSS = """
+<style>
+:root {
+    --phr-bg: #f6f8f7;
+    --phr-panel: #ffffff;
+    --phr-border: #d9e1dd;
+    --phr-text: #17211d;
+    --phr-muted: #5f6f68;
+    --phr-accent: #16705c;
+    --phr-accent-soft: #e4f2ed;
+    --phr-warn: #a86112;
+    --phr-danger: #b42318;
+}
+
+.stApp {
+    background: var(--phr-bg);
+    color: var(--phr-text);
+}
+
+.block-container {
+    padding-top: 1.4rem;
+    padding-bottom: 3rem;
+    max-width: 1180px;
+}
+
+h1, h2, h3 {
+    letter-spacing: 0;
+}
+
+h1 {
+    font-size: 2rem;
+    line-height: 1.15;
+}
+
+h2 {
+    font-size: 1.35rem;
+}
+
+h3 {
+    font-size: 1.05rem;
+}
+
+.phr-topbar {
+    border-bottom: 1px solid var(--phr-border);
+    padding-bottom: 0.85rem;
+    margin-bottom: 1rem;
+}
+
+.phr-topbar h1 {
+    margin: 0 0 0.25rem 0;
+}
+
+.phr-kicker {
+    color: var(--phr-accent);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.35rem;
+}
+
+.phr-subtitle {
+    color: var(--phr-muted);
+    font-size: 0.98rem;
+    max-width: 760px;
+}
+
+.phr-profile-strip {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    align-items: center;
+    background: var(--phr-panel);
+    border: 1px solid var(--phr-border);
+    border-radius: 8px;
+    padding: 0.8rem 0.95rem;
+    margin: 0.5rem 0 1.1rem 0;
+}
+
+.phr-profile-name {
+    font-weight: 700;
+}
+
+.phr-pill {
+    border: 1px solid var(--phr-border);
+    background: #f9fbfa;
+    border-radius: 999px;
+    padding: 0.18rem 0.62rem;
+    color: var(--phr-muted);
+    font-size: 0.82rem;
+}
+
+.phr-dashboard-note {
+    background: var(--phr-panel);
+    border-left: 4px solid var(--phr-accent);
+    border-radius: 8px;
+    padding: 0.8rem 1rem;
+    margin-bottom: 1rem;
+    color: var(--phr-muted);
+}
+
+[data-testid="stMetric"] {
+    background: var(--phr-panel);
+    border: 1px solid var(--phr-border);
+    border-radius: 8px;
+    padding: 0.95rem 1rem;
+}
+
+[data-testid="stMetricLabel"] {
+    color: var(--phr-muted);
+}
+
+[data-testid="stMetricValue"] {
+    color: var(--phr-text);
+    font-weight: 750;
+}
+
+.stButton > button,
+.stDownloadButton > button,
+[data-testid="stFormSubmitButton"] button {
+    border-radius: 8px;
+    border: 1px solid var(--phr-accent);
+    color: #ffffff;
+    background: var(--phr-accent);
+    font-weight: 650;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+[data-testid="stFormSubmitButton"] button:hover {
+    border-color: #0d5948;
+    background: #0d5948;
+    color: #ffffff;
+}
+
+[data-testid="stExpander"] {
+    background: var(--phr-panel);
+    border: 1px solid var(--phr-border);
+    border-radius: 8px;
+}
+
+[data-testid="stDataFrame"] {
+    border: 1px solid var(--phr-border);
+    border-radius: 8px;
+}
+
+input, textarea, [data-baseweb="select"] {
+    border-radius: 8px;
+}
+
+small, .caption {
+    color: var(--phr-muted);
+}
+</style>
+"""
 
 FIELD_CONFIGS = {
     "allergies": {
@@ -132,6 +323,53 @@ FIELD_CONFIGS = {
 
 def format_label(name: str) -> str:
     return name.replace("_", " ").title()
+
+
+def apply_global_styles() -> None:
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
+
+def page_header(title: str, description: str | None = None, kicker: str = "Local personal health record") -> None:
+    description = description or PAGE_DESCRIPTIONS.get(title, "")
+    st.markdown(
+        f"""
+        <div class="phr-topbar">
+            <div class="phr-kicker">{escape(kicker)}</div>
+            <h1>{escape(title)}</h1>
+            <div class="phr-subtitle">{escape(description)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def selected_profile_banner(person: dict | None) -> None:
+    if not person:
+        return
+    details = []
+    if person.get("relationship"):
+        details.append(str(person["relationship"]))
+    if person.get("date_of_birth"):
+        details.append(f"DOB {person['date_of_birth']}")
+    if person.get("sex"):
+        details.append(str(person["sex"]))
+    detail_html = "".join(f'<span class="phr-pill">{escape(detail)}</span>' for detail in details)
+    st.markdown(
+        f"""
+        <div class="phr-profile-strip">
+            <span class="phr-profile-name">{escape(str(person['name']))}</span>
+            {detail_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def page_navigation() -> str:
+    section_names = list(NAV_SECTIONS)
+    section = st.sidebar.selectbox("Section", section_names, key="nav_section")
+    pages = NAV_SECTIONS[section]
+    return st.sidebar.selectbox("Page", pages, key=f"nav_page_{section}")
 
 
 def show_errors(errors: list[str]) -> None:
@@ -294,7 +532,7 @@ def ai_settings() -> None:
 
 
 def page_profiles(person: dict | None) -> None:
-    st.header("Profiles")
+    page_header("Profiles")
     with st.expander("Add profile", expanded=not bool(person)):
         with st.form("add_profile"):
             data = profile_form(key_prefix="add_profile")
@@ -349,9 +587,10 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
 
 def generic_record_page(table: str, person: dict) -> None:
     config = FIELD_CONFIGS[table]
-    st.header(config["title"])
+    page_header(config["title"])
 
-    with st.expander(f"Add {config['title'][:-1] if config['title'].endswith('s') else config['title']}", expanded=True):
+    singular_title = SINGULAR_TITLES.get(config["title"], config["title"])
+    with st.expander(f"Add {singular_title}", expanded=True):
         with st.form(f"add_{table}"):
             data = {name: input_field(name, kind, key=f"add_{table}_{name}") for name, kind in config["fields"]}
             if st.form_submit_button("Add record"):
@@ -431,16 +670,23 @@ def generic_record_page(table: str, person: dict) -> None:
 
 
 def page_dashboard(person: dict) -> None:
-    st.header("Dashboard")
+    page_header("Dashboard")
     data = services.dashboard_data(int(person["id"]))
-    st.subheader(data["person"]["name"])
-    st.write(data["person"].get("notes") or "No profile notes.")
+    st.markdown(
+        f"""
+        <div class="phr-dashboard-note">
+            <strong>{escape(str(data["person"]["name"]))}</strong><br>
+            {escape(str(data["person"].get("notes") or "No profile notes."))}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     cols = st.columns(4)
     cols[0].metric("Active medications", len(data["active_medications"]))
     cols[1].metric("Allergies", len(data["allergies"]))
     cols[2].metric("Latest labs", len(data["latest_labs"]))
     cols[3].metric("Overdue reminders", len(data["overdue_reminders"]))
-    for title, rows in [
+    dashboard_sections = [
         ("Allergies", data["allergies"]),
         ("Active Medications", data["active_medications"]),
         ("Latest Labs", data["latest_labs"]),
@@ -448,13 +694,15 @@ def page_dashboard(person: dict) -> None:
         ("Upcoming Appointments", data["upcoming_appointments"]),
         ("Overdue Reminders", data["overdue_reminders"]),
         ("Recent Wearable Summary", data["wearable_summary"]),
-    ]:
-        st.subheader(title)
-        dataframe(rows)
+    ]
+    section_map = dict(dashboard_sections)
+    section = st.selectbox("Dashboard section", list(section_map), key="dashboard_section")
+    st.subheader(section)
+    dataframe(section_map[section])
 
 
 def page_provider_summary(person: dict) -> None:
-    st.header("Provider Summary")
+    page_header("Provider Summary")
     start, end = date_range_controls("provider")
     include_labs = st.checkbox("Include labs", value=True)
     include_timeline = st.checkbox("Include health timeline", value=True)
@@ -465,14 +713,14 @@ def page_provider_summary(person: dict) -> None:
 
 
 def page_emergency_snapshot(person: dict) -> None:
-    st.header("Emergency Snapshot")
+    page_header("Emergency Snapshot")
     markdown = services.generate_emergency_snapshot(int(person["id"]))
     st.download_button("Download Markdown", markdown, file_name="emergency_snapshot.md", mime="text/markdown")
     st.markdown(markdown)
 
 
 def page_import_export(person: dict | None) -> None:
-    st.header("Import/Export")
+    page_header("Import/Export")
     if person:
         st.subheader("CSV Imports")
         labs_file = st.file_uploader("Import labs CSV", type=["csv"])
@@ -495,7 +743,7 @@ def page_import_export(person: dict | None) -> None:
 
 
 def page_insights(person: dict) -> None:
-    st.header("Health Insights")
+    page_header("Health Insights")
     start, end = date_range_controls("insights")
     include_medications = st.checkbox("Include medications", value=True)
     include_allergies = st.checkbox("Include allergies", value=True)
@@ -542,15 +790,18 @@ def page_insights(person: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
+    apply_global_styles()
     db.init_db()
-    st.title("Family Personal Health Record")
-    st.caption("Local-first private prototype")
 
     with st.sidebar:
-        st.header("Navigation")
-        page = st.radio("Page", PAGES)
+        st.markdown("### Family PHR")
+        st.caption("Local-first private prototype")
+        st.divider()
+        page = page_navigation()
         st.divider()
         _, person = selected_profile_sidebar()
+        if person:
+            st.caption(f"Active profile: {person['name']}")
 
     if page == "Profiles":
         page_profiles(person)
@@ -560,7 +811,8 @@ def main() -> None:
             page_import_export(person)
         return
     if page == "Settings":
-        st.header("Settings")
+        page_header("Settings")
+        selected_profile_banner(person)
         password_settings(person)
         ai_settings()
         st.info("Future TODO: encryption at rest, audit logging, stronger authentication, family sharing permissions, provider sharing, consent tracking, and FHIR/SMART integration.")
@@ -568,6 +820,8 @@ def main() -> None:
     if not security.health_data_visible(person):
         unlock_screen(person)
         return
+
+    selected_profile_banner(person)
 
     if page == "Dashboard":
         page_dashboard(person)
