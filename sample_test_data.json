@@ -1,0 +1,417 @@
+{
+  "version": 1,
+  "tables": {
+    "people": [
+      {
+        "id": 1,
+        "name": "Alex Rivera",
+        "date_of_birth": "1982-06-14",
+        "sex": "Female",
+        "relationship": "Self",
+        "emergency_contact": "Jordan Rivera, spouse, 555-0101",
+        "notes": "Fictional sample patient. Tracks blood pressure, allergies, labs, sleep, activity, and follow-up reminders.",
+        "profile_password_enabled": 0,
+        "profile_password_hash": null,
+        "profile_password_hint": null,
+        "created_at": "2026-04-28T09:00:00",
+        "updated_at": "2026-04-28T09:00:00"
+      },
+      {
+        "id": 2,
+        "name": "Maya Rivera",
+        "date_of_birth": "2013-11-02",
+        "sex": "Female",
+        "relationship": "Child",
+        "emergency_contact": "Alex Rivera, parent, 555-0102",
+        "notes": "Fictional sample child profile for family record testing.",
+        "profile_password_enabled": 0,
+        "profile_password_hash": null,
+        "profile_password_hint": null,
+        "created_at": "2026-04-28T09:05:00",
+        "updated_at": "2026-04-28T09:05:00"
+      }
+    ],
+    "allergies": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "allergen": "Penicillin",
+        "reaction": "Rash and swelling",
+        "severity": "Moderate",
+        "notes": "Avoid unless reviewed by clinician.",
+        "created_at": "2026-04-28T09:10:00",
+        "updated_at": "2026-04-28T09:10:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "allergen": "Shellfish",
+        "reaction": "Hives",
+        "severity": "Mild",
+        "notes": "No respiratory symptoms recorded.",
+        "created_at": "2026-04-28T09:11:00",
+        "updated_at": "2026-04-28T09:11:00"
+      },
+      {
+        "id": 3,
+        "person_id": 2,
+        "allergen": "Peanuts",
+        "reaction": "Hives and stomach pain",
+        "severity": "Moderate",
+        "notes": "School nurse has action plan copy.",
+        "created_at": "2026-04-28T09:12:00",
+        "updated_at": "2026-04-28T09:12:00"
+      }
+    ],
+    "medications": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "name": "Lisinopril",
+        "dose": "10 mg",
+        "frequency": "Once daily",
+        "start_date": "2025-08-15",
+        "end_date": null,
+        "status": "Active",
+        "reason": "Blood pressure",
+        "notes": "Takes in the morning.",
+        "created_at": "2026-04-28T09:15:00",
+        "updated_at": "2026-04-28T09:15:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "name": "Vitamin D3",
+        "dose": "2000 IU",
+        "frequency": "Once daily",
+        "start_date": "2025-12-01",
+        "end_date": null,
+        "status": "Active",
+        "reason": "Low vitamin D history",
+        "notes": "",
+        "created_at": "2026-04-28T09:16:00",
+        "updated_at": "2026-04-28T09:16:00"
+      },
+      {
+        "id": 3,
+        "person_id": 1,
+        "name": "Ibuprofen",
+        "dose": "400 mg",
+        "frequency": "As needed",
+        "start_date": "2026-02-01",
+        "end_date": "2026-02-10",
+        "status": "Completed",
+        "reason": "Knee soreness",
+        "notes": "Used briefly after hiking.",
+        "created_at": "2026-04-28T09:17:00",
+        "updated_at": "2026-04-28T09:17:00"
+      },
+      {
+        "id": 4,
+        "person_id": 2,
+        "name": "Cetirizine",
+        "dose": "5 mg",
+        "frequency": "Once daily as needed",
+        "start_date": "2026-03-15",
+        "end_date": null,
+        "status": "Active",
+        "reason": "Seasonal allergies",
+        "notes": "Used during spring pollen season.",
+        "created_at": "2026-04-28T09:18:00",
+        "updated_at": "2026-04-28T09:18:00"
+      }
+    ],
+    "lab_results": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "test_name": "LDL Cholesterol",
+        "result_value": "132",
+        "numeric_value": 132.0,
+        "unit": "mg/dL",
+        "reference_low": 0.0,
+        "reference_high": 100.0,
+        "flag": "High",
+        "lab_date": "2026-01-15",
+        "notes": "Fasting panel.",
+        "created_at": "2026-04-28T09:20:00",
+        "updated_at": "2026-04-28T09:20:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "test_name": "Hemoglobin A1c",
+        "result_value": "5.7",
+        "numeric_value": 5.7,
+        "unit": "%",
+        "reference_low": 4.0,
+        "reference_high": 5.6,
+        "flag": "High",
+        "lab_date": "2026-01-15",
+        "notes": "Borderline elevated in this fictional sample.",
+        "created_at": "2026-04-28T09:21:00",
+        "updated_at": "2026-04-28T09:21:00"
+      },
+      {
+        "id": 3,
+        "person_id": 1,
+        "test_name": "Hemoglobin A1c",
+        "result_value": "5.5",
+        "numeric_value": 5.5,
+        "unit": "%",
+        "reference_low": 4.0,
+        "reference_high": 5.6,
+        "flag": "Normal",
+        "lab_date": "2026-04-05",
+        "notes": "Improved follow-up value.",
+        "created_at": "2026-04-28T09:22:00",
+        "updated_at": "2026-04-28T09:22:00"
+      },
+      {
+        "id": 4,
+        "person_id": 1,
+        "test_name": "Vitamin D",
+        "result_value": "24",
+        "numeric_value": 24.0,
+        "unit": "ng/mL",
+        "reference_low": 30.0,
+        "reference_high": 100.0,
+        "flag": "Low",
+        "lab_date": "2026-04-05",
+        "notes": "Reference range included for insight testing.",
+        "created_at": "2026-04-28T09:23:00",
+        "updated_at": "2026-04-28T09:23:00"
+      },
+      {
+        "id": 5,
+        "person_id": 2,
+        "test_name": "Hemoglobin",
+        "result_value": "12.8",
+        "numeric_value": 12.8,
+        "unit": "g/dL",
+        "reference_low": null,
+        "reference_high": null,
+        "flag": "Unknown",
+        "lab_date": "2026-03-10",
+        "notes": "Missing reference range to test data-gap insights.",
+        "created_at": "2026-04-28T09:24:00",
+        "updated_at": "2026-04-28T09:24:00"
+      }
+    ],
+    "health_entries": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "entry_date": "2026-02-12",
+        "title": "Knee soreness after hike",
+        "body_system": "Musculoskeletal",
+        "body_part": "Right knee",
+        "severity": 4,
+        "note": "Improved with rest over several days.",
+        "created_at": "2026-04-28T09:30:00",
+        "updated_at": "2026-04-28T09:30:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "entry_date": "2026-03-20",
+        "title": "Mild shortness of breath during stairs",
+        "body_system": "Respiratory",
+        "body_part": "Chest",
+        "severity": 3,
+        "note": "Resolved after rest. No chest pain recorded.",
+        "created_at": "2026-04-28T09:31:00",
+        "updated_at": "2026-04-28T09:31:00"
+      },
+      {
+        "id": 3,
+        "person_id": 1,
+        "entry_date": "2026-04-18",
+        "title": "Headache after poor sleep",
+        "body_system": "Neurologic",
+        "body_part": "Head",
+        "severity": 5,
+        "note": "Tracked hydration and sleep.",
+        "created_at": "2026-04-28T09:32:00",
+        "updated_at": "2026-04-28T09:32:00"
+      },
+      {
+        "id": 4,
+        "person_id": 2,
+        "entry_date": "2026-04-10",
+        "title": "Seasonal congestion",
+        "body_system": "ENT",
+        "body_part": "Nose",
+        "severity": 3,
+        "note": "Worse after outdoor soccer practice.",
+        "created_at": "2026-04-28T09:33:00",
+        "updated_at": "2026-04-28T09:33:00"
+      }
+    ],
+    "appointments": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "appointment_date": "2026-05-08",
+        "title": "Primary care follow-up",
+        "provider": "Dr. Lee",
+        "location": "Downtown Family Clinic",
+        "status": "Scheduled",
+        "notes": "Discuss LDL, vitamin D, and home blood pressure readings.",
+        "created_at": "2026-04-28T09:40:00",
+        "updated_at": "2026-04-28T09:40:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "appointment_date": "2026-06-02",
+        "title": "Nutrition consult",
+        "provider": "Registered Dietitian",
+        "location": "Telehealth",
+        "status": "Scheduled",
+        "notes": "Bring recent labs and food log.",
+        "created_at": "2026-04-28T09:41:00",
+        "updated_at": "2026-04-28T09:41:00"
+      },
+      {
+        "id": 3,
+        "person_id": 2,
+        "appointment_date": "2026-05-15",
+        "title": "Allergy check-in",
+        "provider": "Dr. Singh",
+        "location": "Pediatric Allergy Center",
+        "status": "Scheduled",
+        "notes": "Review peanut allergy plan.",
+        "created_at": "2026-04-28T09:42:00",
+        "updated_at": "2026-04-28T09:42:00"
+      }
+    ],
+    "reminders": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "reminder_type": "Lab",
+        "title": "Repeat lipid panel",
+        "due_date": "2026-05-20",
+        "status": "Upcoming",
+        "notes": "Ask whether fasting is required.",
+        "created_at": "2026-04-28T09:45:00",
+        "updated_at": "2026-04-28T09:45:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "reminder_type": "Follow-up",
+        "title": "Send home BP log",
+        "due_date": "2026-04-20",
+        "status": "Upcoming",
+        "notes": "Intentionally overdue for dashboard testing.",
+        "created_at": "2026-04-28T09:46:00",
+        "updated_at": "2026-04-28T09:46:00"
+      },
+      {
+        "id": 3,
+        "person_id": 2,
+        "reminder_type": "School",
+        "title": "Update school allergy form",
+        "due_date": "2026-05-01",
+        "status": "Upcoming",
+        "notes": "Bring updated form to nurse.",
+        "created_at": "2026-04-28T09:47:00",
+        "updated_at": "2026-04-28T09:47:00"
+      }
+    ],
+    "wearable_records": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "metric_type": "Steps",
+        "value": 6200.0,
+        "unit": "steps",
+        "timestamp": "2026-04-20",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:50:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "metric_type": "Steps",
+        "value": 8100.0,
+        "unit": "steps",
+        "timestamp": "2026-04-21",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:51:00"
+      },
+      {
+        "id": 3,
+        "person_id": 1,
+        "metric_type": "Sleep",
+        "value": 6.2,
+        "unit": "hours",
+        "timestamp": "2026-04-20",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:52:00"
+      },
+      {
+        "id": 4,
+        "person_id": 1,
+        "metric_type": "Sleep",
+        "value": 7.1,
+        "unit": "hours",
+        "timestamp": "2026-04-21",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:53:00"
+      },
+      {
+        "id": 5,
+        "person_id": 1,
+        "metric_type": "Weight",
+        "value": 172.0,
+        "unit": "lb",
+        "timestamp": "2026-04-01",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:54:00"
+      },
+      {
+        "id": 6,
+        "person_id": 1,
+        "metric_type": "Weight",
+        "value": 169.5,
+        "unit": "lb",
+        "timestamp": "2026-04-24",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:55:00"
+      },
+      {
+        "id": 7,
+        "person_id": 1,
+        "metric_type": "Blood Pressure Systolic",
+        "value": 128.0,
+        "unit": "mmHg",
+        "timestamp": "2026-04-24",
+        "source": "Home cuff",
+        "created_at": "2026-04-28T09:56:00"
+      },
+      {
+        "id": 8,
+        "person_id": 1,
+        "metric_type": "Blood Pressure Diastolic",
+        "value": 82.0,
+        "unit": "mmHg",
+        "timestamp": "2026-04-24",
+        "source": "Home cuff",
+        "created_at": "2026-04-28T09:57:00"
+      },
+      {
+        "id": 9,
+        "person_id": 2,
+        "metric_type": "Steps",
+        "value": 10400.0,
+        "unit": "steps",
+        "timestamp": "2026-04-22",
+        "source": "Manual",
+        "created_at": "2026-04-28T09:58:00"
+      }
+    ]
+  }
+}
