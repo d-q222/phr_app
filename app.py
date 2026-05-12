@@ -448,9 +448,22 @@ def require_profile(person: dict | None) -> bool:
 
 def dataframe(rows: list[dict]) -> None:
     if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
     else:
         st.info("No records yet.")
+
+
+def toggle_add_form(key: str) -> None:
+    st.session_state[key] = not st.session_state.get(key, False)
+
+
+def close_form(key: str) -> None:
+    st.session_state[key] = False
+
+
+def record_label(row: dict) -> str:
+    label = row.get("title") or row.get("name") or row.get("test_name") or row.get("allergen") or row.get("metric_type")
+    return f"{label or 'Record'} (ID {row['id']})"
 
 
 def profile_form(existing: dict | None = None, key_prefix: str = "profile") -> dict:
@@ -533,13 +546,31 @@ def ai_settings() -> None:
 
 def page_profiles(person: dict | None) -> None:
     page_header("Profiles")
-    with st.expander("Add profile", expanded=not bool(person)):
+    people = services.list_people()
+    dataframe(people)
+
+    add_profile_key = "show_add_profile_form"
+    if add_profile_key not in st.session_state:
+        st.session_state[add_profile_key] = False
+
+    if st.button("Add profile", key="toggle_add_profile", on_click=toggle_add_form, args=(add_profile_key,)):
+        pass
+
+    if st.session_state[add_profile_key]:
         with st.form("add_profile"):
             data = profile_form(key_prefix="add_profile")
             enable_password = st.checkbox("Enable profile password")
             password = st.text_input("Password", type="password") if enable_password else ""
             hint = st.text_input("Password hint") if enable_password else ""
-            if st.form_submit_button("Create profile"):
+            submit_col, cancel_col = st.columns([1, 1])
+            with submit_col:
+                submitted = st.form_submit_button("Create profile")
+            with cancel_col:
+                cancelled = st.form_submit_button("Cancel")
+            if cancelled:
+                close_form(add_profile_key)
+                st.rerun()
+            if submitted:
                 errors = validation.validate_person(data)
                 if enable_password and not password:
                     errors.append("Password is required when password protection is enabled.")
@@ -552,28 +583,56 @@ def page_profiles(person: dict | None) -> None:
                         data["profile_password_hint"] = hint
                     services.create_person(clean_payload(data))
                     st.success("Profile created.")
+                    st.session_state[add_profile_key] = False
                     st.rerun()
 
-    people = services.list_people()
-    dataframe(people)
-    for row in people:
-        with st.expander(f"Edit {row['name']}"):
-            with st.form(f"edit_profile_{row['id']}"):
-                data = profile_form(row, key_prefix=f"edit_profile_{row['id']}")
-                submitted = st.form_submit_button("Save changes")
-                if submitted:
-                    errors = validation.validate_person(data)
-                    if errors:
-                        show_errors(errors)
-                    else:
-                        services.update_person(int(row["id"]), clean_payload(data))
-                        st.success("Profile updated.")
-                        st.rerun()
-            if st.button("Delete profile", key=f"delete_profile_{row['id']}"):
-                services.delete_person(int(row["id"]))
-                st.warning("Profile deleted.")
+    if not people:
+        return
+
+    profile_edit_reset_key = "edit_profile_selection_reset"
+    if profile_edit_reset_key not in st.session_state:
+        st.session_state[profile_edit_reset_key] = 0
+    profile_options = [""] + [str(row["id"]) for row in people]
+    profile_labels = {"": "Select a profile to edit"}
+    profile_labels.update({str(row["id"]): record_label(row) for row in people})
+    selected_profile_id = st.selectbox(
+        "Edit profile",
+        profile_options,
+        format_func=lambda value: profile_labels[value],
+        key=f"edit_profile_selection_{st.session_state[profile_edit_reset_key]}",
+    )
+    if not selected_profile_id:
+        return
+
+    row = next(item for item in people if str(item["id"]) == selected_profile_id)
+    with st.form(f"edit_profile_{row['id']}"):
+        data = profile_form(row, key_prefix=f"edit_profile_{row['id']}")
+        save_col, delete_col, cancel_col = st.columns([1, 1, 1])
+        with save_col:
+            submitted = st.form_submit_button("Save changes")
+        with delete_col:
+            deleted = st.form_submit_button("Delete profile")
+        with cancel_col:
+            cancelled = st.form_submit_button("Cancel")
+        if cancelled:
+            st.session_state[profile_edit_reset_key] += 1
+            st.rerun()
+        if deleted:
+            services.delete_person(int(row["id"]))
+            st.warning("Profile deleted.")
+            st.session_state[profile_edit_reset_key] += 1
+            st.rerun()
+        if submitted:
+            errors = validation.validate_person(data)
+            if errors:
+                show_errors(errors)
+            else:
+                services.update_person(int(row["id"]), clean_payload(data))
+                st.success("Profile updated.")
+                st.session_state[profile_edit_reset_key] += 1
                 st.rerun()
-            password_settings(row)
+    with st.expander("Profile password"):
+        password_settings(row)
 
 
 def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
@@ -588,19 +647,6 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
 def generic_record_page(table: str, person: dict) -> None:
     config = FIELD_CONFIGS[table]
     page_header(config["title"])
-
-    singular_title = SINGULAR_TITLES.get(config["title"], config["title"])
-    with st.expander(f"Add {singular_title}", expanded=True):
-        with st.form(f"add_{table}"):
-            data = {name: input_field(name, kind, key=f"add_{table}_{name}") for name, kind in config["fields"]}
-            if st.form_submit_button("Add record"):
-                errors = config["validator"](data)
-                if errors:
-                    show_errors(errors)
-                else:
-                    services.create_item(table, int(person["id"]), clean_payload(data))
-                    st.success("Record added.")
-                    st.rerun()
 
     filters = {}
     start = end = None
@@ -626,6 +672,35 @@ def generic_record_page(table: str, person: dict) -> None:
 
     dataframe(rows)
 
+    singular_title = SINGULAR_TITLES.get(config["title"], config["title"])
+    add_form_key = f"show_add_{table}_form"
+    if add_form_key not in st.session_state:
+        st.session_state[add_form_key] = False
+
+    if st.button(f"Add {singular_title}", key=f"toggle_add_{table}", on_click=toggle_add_form, args=(add_form_key,)):
+        pass
+
+    if st.session_state[add_form_key]:
+        with st.form(f"add_{table}"):
+            data = {name: input_field(name, kind, key=f"add_{table}_{name}") for name, kind in config["fields"]}
+            submit_col, cancel_col = st.columns([1, 1])
+            with submit_col:
+                submitted = st.form_submit_button("Add record")
+            with cancel_col:
+                cancelled = st.form_submit_button("Cancel")
+            if cancelled:
+                close_form(add_form_key)
+                st.rerun()
+            if submitted:
+                errors = config["validator"](data)
+                if errors:
+                    show_errors(errors)
+                else:
+                    services.create_item(table, int(person["id"]), clean_payload(data))
+                    st.success("Record added.")
+                    st.session_state[add_form_key] = False
+                    st.rerun()
+
     if table == "lab_results":
         numeric_rows = [row for row in rows if row.get("numeric_value") is not None]
         if numeric_rows:
@@ -639,34 +714,74 @@ def generic_record_page(table: str, person: dict) -> None:
         st.line_chart(chart_data[chart_data["metric_type"] == metric], x="timestamp", y="value")
         dataframe(services.wearable_summary(int(person["id"])))
 
-    for row in rows:
-        label = row.get("title") or row.get("name") or row.get("test_name") or row.get("allergen") or row.get("metric_type") or f"Record {row['id']}"
-        with st.expander(f"Edit {label}"):
-            with st.form(f"edit_{table}_{row['id']}"):
-                data = {name: input_field(name, kind, row.get(name), key=f"edit_{table}_{row['id']}_{name}") for name, kind in config["fields"]}
-                if st.form_submit_button("Save changes"):
-                    errors = config["validator"](data)
-                    if errors:
-                        show_errors(errors)
-                    else:
-                        services.update_item(table, int(row["id"]), clean_payload(data))
-                        st.success("Record updated.")
-                        st.rerun()
-            cols = st.columns(3)
-            if table == "reminders":
-                with cols[0]:
-                    if st.button("Mark complete", key=f"complete_{row['id']}"):
-                        services.update_item("reminders", int(row["id"]), {"status": "Completed"})
-                        st.rerun()
-                with cols[1]:
-                    if st.button("Dismiss", key=f"dismiss_{row['id']}"):
-                        services.update_item("reminders", int(row["id"]), {"status": "Dismissed"})
-                        st.rerun()
-            with cols[-1]:
-                if st.button("Delete", key=f"delete_{table}_{row['id']}"):
-                    services.delete_item(table, int(row["id"]))
-                    st.warning("Record deleted.")
-                    st.rerun()
+    if not rows:
+        return
+
+    edit_reset_key = f"edit_{table}_selection_reset"
+    if edit_reset_key not in st.session_state:
+        st.session_state[edit_reset_key] = 0
+    edit_options = [""] + [str(row["id"]) for row in rows]
+    edit_labels = {"": "Select a record to edit"}
+    edit_labels.update({str(row["id"]): record_label(row) for row in rows})
+    selected_record_id = st.selectbox(
+        "Edit existing record",
+        edit_options,
+        format_func=lambda value: edit_labels[value],
+        key=f"edit_{table}_selection_{st.session_state[edit_reset_key]}",
+    )
+    if not selected_record_id:
+        return
+
+    row = next(item for item in rows if str(item["id"]) == selected_record_id)
+    with st.form(f"edit_{table}_{row['id']}"):
+        data = {name: input_field(name, kind, row.get(name), key=f"edit_{table}_{row['id']}_{name}") for name, kind in config["fields"]}
+        if table == "reminders":
+            save_col, complete_col, dismiss_col, delete_col, cancel_col = st.columns([1, 1, 1, 1, 1])
+            with save_col:
+                submitted = st.form_submit_button("Save changes")
+            with complete_col:
+                completed = st.form_submit_button("Mark complete")
+            with dismiss_col:
+                dismissed = st.form_submit_button("Dismiss")
+            with delete_col:
+                deleted = st.form_submit_button("Delete")
+            with cancel_col:
+                cancelled = st.form_submit_button("Cancel")
+        else:
+            save_col, delete_col, cancel_col = st.columns([1, 1, 1])
+            with save_col:
+                submitted = st.form_submit_button("Save changes")
+            with delete_col:
+                deleted = st.form_submit_button("Delete")
+            with cancel_col:
+                cancelled = st.form_submit_button("Cancel")
+            completed = dismissed = False
+
+        if cancelled:
+            st.session_state[edit_reset_key] += 1
+            st.rerun()
+        if completed:
+            services.update_item("reminders", int(row["id"]), {"status": "Completed"})
+            st.session_state[edit_reset_key] += 1
+            st.rerun()
+        if dismissed:
+            services.update_item("reminders", int(row["id"]), {"status": "Dismissed"})
+            st.session_state[edit_reset_key] += 1
+            st.rerun()
+        if deleted:
+            services.delete_item(table, int(row["id"]))
+            st.warning("Record deleted.")
+            st.session_state[edit_reset_key] += 1
+            st.rerun()
+        if submitted:
+            errors = config["validator"](data)
+            if errors:
+                show_errors(errors)
+            else:
+                services.update_item(table, int(row["id"]), clean_payload(data))
+                st.success("Record updated.")
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
 
 
 def page_dashboard(person: dict) -> None:
