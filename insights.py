@@ -9,6 +9,7 @@ from collections import Counter
 from datetime import date, timedelta
 
 import ai_config
+import db
 import services
 
 
@@ -88,28 +89,29 @@ def collect_health_context(
     include_appointments: bool = True,
     include_reminders: bool = True,
     include_wearables: bool = True,
+    db_path=db.DB_PATH,
 ) -> dict:
     start_date, end_date = date_range if date_range else (None, None)
-    context = {"person": services.get_person(person_id), "date_range": date_range}
+    context = {"person": services.get_person(person_id, db_path=db_path), "date_range": date_range}
     if include_medications:
-        context["medications"] = services.list_items("medications", person_id, order_by="name", descending=False)
+        context["medications"] = services.list_items("medications", person_id, order_by="name", descending=False, db_path=db_path)
     if include_allergies:
-        context["allergies"] = services.list_items("allergies", person_id, order_by="allergen", descending=False)
+        context["allergies"] = services.list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path)
     if include_labs:
-        context["labs"] = services.filter_labs(person_id, start_date, end_date)
+        context["labs"] = services.filter_labs(person_id, start_date, end_date, db_path=db_path)
     if include_health_entries:
-        context["health_entries"] = services.filter_health_entries(person_id, start_date, end_date)
+        context["health_entries"] = services.filter_health_entries(person_id, start_date, end_date, db_path=db_path)
     if include_appointments:
-        context["appointments"] = services.upcoming_appointments(person_id)
+        context["appointments"] = services.upcoming_appointments(person_id, db_path=db_path)
     if include_reminders:
-        context["reminders"] = services.list_items("reminders", person_id, order_by="due_date", descending=False)
+        context["reminders"] = services.list_items("reminders", person_id, order_by="due_date", descending=False, db_path=db_path)
     if include_wearables:
         filters = {}
         if start_date:
             filters["timestamp__gte"] = start_date
         if end_date:
             filters["timestamp__lte"] = end_date
-        context["wearables"] = services.list_items("wearable_records", person_id, filters, "timestamp", True)
+        context["wearables"] = services.list_items("wearable_records", person_id, filters, "timestamp", True, db_path=db_path)
     return context
 
 

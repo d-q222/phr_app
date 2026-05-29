@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import tempfile
+import uuid
 from datetime import date
 from html import escape
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -21,6 +25,10 @@ from models import (
     REMINDER_STATUSES,
     WEARABLE_METRIC_TYPES,
 )
+
+SAMPLE_DATA_PATH = Path(__file__).resolve().parent / "sample_test_data.json"
+DEMO_MODE_KEY = "demo_mode_enabled"
+DEMO_DB_PATH_KEY = "demo_db_path"
 
 
 PAGES = [
@@ -93,6 +101,35 @@ APP_CSS = """
     color: var(--phr-text);
 }
 
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stDecoration"] {
+    background: var(--phr-bg);
+    color: var(--phr-text);
+}
+
+[data-testid="stSidebar"],
+[data-testid="stSidebarContent"] {
+    background: #eef4f1;
+    color: var(--phr-text);
+}
+
+.stMarkdown,
+.stMarkdown p,
+.stMarkdown li,
+.stMarkdown span,
+[data-testid="stMarkdownContainer"],
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span,
+[data-testid="stWidgetLabel"],
+[data-testid="stWidgetLabel"] p,
+label,
+p {
+    color: var(--phr-text);
+}
+
 .block-container {
     padding-top: 1.4rem;
     padding-bottom: 3rem;
@@ -147,6 +184,7 @@ h3 {
     flex-wrap: wrap;
     align-items: center;
     background: var(--phr-panel);
+    color: var(--phr-text);
     border: 1px solid var(--phr-border);
     border-radius: 8px;
     padding: 0.8rem 0.95rem;
@@ -177,6 +215,7 @@ h3 {
 
 [data-testid="stMetric"] {
     background: var(--phr-panel);
+    color: var(--phr-text);
     border: 1px solid var(--phr-border);
     border-radius: 8px;
     padding: 0.95rem 1rem;
@@ -209,8 +248,15 @@ h3 {
     color: #ffffff;
 }
 
+.stButton > button p,
+.stDownloadButton > button p,
+[data-testid="stFormSubmitButton"] button p {
+    color: #ffffff;
+}
+
 [data-testid="stExpander"] {
     background: var(--phr-panel);
+    color: var(--phr-text);
     border: 1px solid var(--phr-border);
     border-radius: 8px;
 }
@@ -220,8 +266,40 @@ h3 {
     border-radius: 8px;
 }
 
-input, textarea, [data-baseweb="select"] {
+input,
+textarea,
+[data-baseweb="input"],
+[data-baseweb="textarea"],
+[data-baseweb="select"],
+[data-baseweb="select"] > div {
+    background: var(--phr-panel);
+    color: var(--phr-text);
+    border-color: var(--phr-border);
     border-radius: 8px;
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: var(--phr-muted);
+    opacity: 1;
+}
+
+[data-baseweb="select"] *,
+[data-baseweb="popover"] *,
+[role="listbox"] *,
+[role="option"] * {
+    color: var(--phr-text);
+}
+
+[data-baseweb="popover"],
+[role="listbox"],
+[role="option"] {
+    background: var(--phr-panel);
+    color: var(--phr-text);
+}
+
+[role="option"]:hover {
+    background: var(--phr-accent-soft);
 }
 
 small, .caption {
@@ -372,6 +450,56 @@ def page_navigation() -> str:
     return st.sidebar.selectbox("Page", pages, key=f"nav_page_{section}")
 
 
+def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str = SAMPLE_DATA_PATH) -> int | None:
+    payload = json.loads(Path(sample_data_path).read_text(encoding="utf-8"))
+    tables = payload.get("tables", payload)
+    db.init_db(demo_db_path)
+    db.import_all_tables(tables, clear_existing=True, db_path=demo_db_path)
+    people = services.list_people(db_path=demo_db_path)
+    return int(people[0]["id"]) if people else None
+
+
+def is_demo_mode() -> bool:
+    return bool(st.session_state.get(DEMO_MODE_KEY) and st.session_state.get(DEMO_DB_PATH_KEY))
+
+
+def active_db_path() -> Path | str:
+    if is_demo_mode():
+        return st.session_state.get(DEMO_DB_PATH_KEY, db.DB_PATH)
+    return db.DB_PATH
+
+
+def start_demo_mode() -> None:
+    demo_db_path = Path(tempfile.gettempdir()) / f"phr_demo_{uuid.uuid4().hex}.db"
+    create_demo_database(demo_db_path)
+    st.session_state[DEMO_MODE_KEY] = True
+    st.session_state[DEMO_DB_PATH_KEY] = str(demo_db_path)
+
+
+def exit_demo_mode() -> None:
+    demo_db_path = st.session_state.get(DEMO_DB_PATH_KEY)
+    st.session_state.pop(DEMO_MODE_KEY, None)
+    st.session_state.pop(DEMO_DB_PATH_KEY, None)
+    if demo_db_path:
+        try:
+            Path(demo_db_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def demo_mode_controls() -> None:
+    if is_demo_mode():
+        st.success("Demo mode active")
+        st.caption("Using session-only sample data.")
+        if st.button("Exit demo mode", key="exit_demo_mode"):
+            exit_demo_mode()
+            st.rerun()
+        return
+    if st.button("Demo mode", key="start_demo_mode"):
+        start_demo_mode()
+        st.rerun()
+
+
 def show_errors(errors: list[str]) -> None:
     for error in errors:
         st.error(error)
@@ -417,10 +545,12 @@ def input_field(name: str, kind, default=None, key: str | None = None):
     return st.text_input(label, value=str(default or ""), key=key)
 
 
-def selected_profile_sidebar() -> tuple[str, dict | None]:
-    people = services.list_people()
+def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> tuple[str, dict | None]:
+    people = services.list_people(db_path=db_path)
     names = [f"{person['name']} (ID {person['id']})" for person in people]
-    selection = st.sidebar.selectbox("Selected profile", names or ["No profile selected"])
+    label = "Demo profile" if demo_mode else "Selected profile"
+    key = "demo_selected_profile" if demo_mode else "selected_profile"
+    selection = st.sidebar.selectbox(label, names or ["No profile selected"], key=key)
     if not people:
         return selection, None
     index = names.index(selection)
@@ -477,7 +607,7 @@ def profile_form(existing: dict | None = None, key_prefix: str = "profile") -> d
     }
 
 
-def password_settings(person: dict) -> None:
+def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     st.subheader("Profile Password")
     if person.get("profile_password_enabled"):
         st.info("Password protection is enabled for this profile.")
@@ -488,6 +618,7 @@ def password_settings(person: dict) -> None:
             services.update_person(
                 int(person["id"]),
                 {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
+                db_path=db_path,
             )
             security.unlock_profile(int(person["id"]))
             st.success("Password removed.")
@@ -507,6 +638,7 @@ def password_settings(person: dict) -> None:
                         "profile_password_hash": security.hash_password(password),
                         "profile_password_hint": hint,
                     },
+                    db_path=db_path,
                 )
                 security.lock_profile(int(person["id"]))
                 st.success("Password saved. Profile is now locked.")
@@ -544,10 +676,13 @@ def ai_settings() -> None:
                     st.code(detail)
 
 
-def page_profiles(person: dict | None) -> None:
+def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
     page_header("Profiles")
-    people = services.list_people()
+    people = services.list_people(db_path=db_path)
     dataframe(people)
+    if demo_mode:
+        st.info("Demo profiles are loaded from sample data and are separate from your saved profiles. Exit demo mode to manage real profiles.")
+        return
 
     add_profile_key = "show_add_profile_form"
     if add_profile_key not in st.session_state:
@@ -581,7 +716,7 @@ def page_profiles(person: dict | None) -> None:
                         data["profile_password_enabled"] = 1
                         data["profile_password_hash"] = security.hash_password(password)
                         data["profile_password_hint"] = hint
-                    services.create_person(clean_payload(data))
+                    services.create_person(clean_payload(data), db_path=db_path)
                     st.success("Profile created.")
                     st.session_state[add_profile_key] = False
                     st.rerun()
@@ -618,7 +753,7 @@ def page_profiles(person: dict | None) -> None:
             st.session_state[profile_edit_reset_key] += 1
             st.rerun()
         if deleted:
-            services.delete_person(int(row["id"]))
+            services.delete_person(int(row["id"]), db_path=db_path)
             st.warning("Profile deleted.")
             st.session_state[profile_edit_reset_key] += 1
             st.rerun()
@@ -627,12 +762,12 @@ def page_profiles(person: dict | None) -> None:
             if errors:
                 show_errors(errors)
             else:
-                services.update_person(int(row["id"]), clean_payload(data))
+                services.update_person(int(row["id"]), clean_payload(data), db_path=db_path)
                 st.success("Profile updated.")
                 st.session_state[profile_edit_reset_key] += 1
                 st.rerun()
     with st.expander("Profile password"):
-        password_settings(row)
+        password_settings(row, db_path=db_path)
 
 
 def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
@@ -644,9 +779,11 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
     return start or None, end or None
 
 
-def generic_record_page(table: str, person: dict) -> None:
+def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
     config = FIELD_CONFIGS[table]
     page_header(config["title"])
+    if demo_mode:
+        st.caption("Demo changes stay in this Streamlit session and do not affect saved profiles.")
 
     filters = {}
     start = end = None
@@ -655,20 +792,20 @@ def generic_record_page(table: str, person: dict) -> None:
         body_system = st.selectbox("Body system", ["", *BODY_SYSTEMS])
         body_part = st.text_input("Body part")
         search = st.text_input("Search title/notes")
-        rows = services.filter_health_entries(int(person["id"]), start, end, body_system or None, body_part or None, search or None)
+        rows = services.filter_health_entries(int(person["id"]), start, end, body_system or None, body_part or None, search or None, db_path=db_path)
     elif table == "lab_results":
         start, end = date_range_controls("labs")
         test_search = st.text_input("Test search")
         flag = st.selectbox("Lab flag", ["", *LAB_FLAGS])
-        rows = services.filter_labs(int(person["id"]), start, end, test_search or None, flag or None)
+        rows = services.filter_labs(int(person["id"]), start, end, test_search or None, flag or None, db_path=db_path)
     elif table == "medications":
         status = st.selectbox("Medication status", ["", *MEDICATION_STATUSES])
-        rows = services.medication_filters(int(person["id"]), status or None)
+        rows = services.medication_filters(int(person["id"]), status or None, db_path=db_path)
     elif table == "reminders":
         status = st.selectbox("Reminder status", ["", *REMINDER_STATUSES])
-        rows = services.reminder_filters(int(person["id"]), status or None)
+        rows = services.reminder_filters(int(person["id"]), status or None, db_path=db_path)
     else:
-        rows = services.list_items(table, int(person["id"]), filters, config["order_by"], descending=table not in {"allergies", "medications"})
+        rows = services.list_items(table, int(person["id"]), filters, config["order_by"], descending=table not in {"allergies", "medications"}, db_path=db_path)
 
     dataframe(rows)
 
@@ -696,7 +833,7 @@ def generic_record_page(table: str, person: dict) -> None:
                 if errors:
                     show_errors(errors)
                 else:
-                    services.create_item(table, int(person["id"]), clean_payload(data))
+                    services.create_item(table, int(person["id"]), clean_payload(data), db_path=db_path)
                     st.success("Record added.")
                     st.session_state[add_form_key] = False
                     st.rerun()
@@ -712,7 +849,7 @@ def generic_record_page(table: str, person: dict) -> None:
         chart_data = pd.DataFrame(rows).sort_values("timestamp")
         metric = st.selectbox("Trend metric", sorted(chart_data["metric_type"].unique()))
         st.line_chart(chart_data[chart_data["metric_type"] == metric], x="timestamp", y="value")
-        dataframe(services.wearable_summary(int(person["id"])))
+        dataframe(services.wearable_summary(int(person["id"]), db_path=db_path))
 
     if not rows:
         return
@@ -761,15 +898,15 @@ def generic_record_page(table: str, person: dict) -> None:
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if completed:
-            services.update_item("reminders", int(row["id"]), {"status": "Completed"})
+            services.update_item("reminders", int(row["id"]), {"status": "Completed"}, db_path=db_path)
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if dismissed:
-            services.update_item("reminders", int(row["id"]), {"status": "Dismissed"})
+            services.update_item("reminders", int(row["id"]), {"status": "Dismissed"}, db_path=db_path)
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if deleted:
-            services.delete_item(table, int(row["id"]))
+            services.delete_item(table, int(row["id"]), db_path=db_path)
             st.warning("Record deleted.")
             st.session_state[edit_reset_key] += 1
             st.rerun()
@@ -778,15 +915,15 @@ def generic_record_page(table: str, person: dict) -> None:
             if errors:
                 show_errors(errors)
             else:
-                services.update_item(table, int(row["id"]), clean_payload(data))
+                services.update_item(table, int(row["id"]), clean_payload(data), db_path=db_path)
                 st.success("Record updated.")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()
 
 
-def page_dashboard(person: dict) -> None:
+def page_dashboard(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Dashboard")
-    data = services.dashboard_data(int(person["id"]))
+    data = services.dashboard_data(int(person["id"]), db_path=db_path)
     st.markdown(
         f"""
         <div class="phr-dashboard-note">
@@ -816,48 +953,50 @@ def page_dashboard(person: dict) -> None:
     dataframe(section_map[section])
 
 
-def page_provider_summary(person: dict) -> None:
+def page_provider_summary(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Provider Summary")
     start, end = date_range_controls("provider")
     include_labs = st.checkbox("Include labs", value=True)
     include_timeline = st.checkbox("Include health timeline", value=True)
     include_wearables = st.checkbox("Include wearables", value=True)
-    markdown = services.generate_provider_summary(int(person["id"]), start, end, include_labs, include_timeline, include_wearables)
+    markdown = services.generate_provider_summary(int(person["id"]), start, end, include_labs, include_timeline, include_wearables, db_path=db_path)
     st.download_button("Download Markdown", markdown, file_name="provider_summary.md", mime="text/markdown")
     st.markdown(markdown)
 
 
-def page_emergency_snapshot(person: dict) -> None:
+def page_emergency_snapshot(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Emergency Snapshot")
-    markdown = services.generate_emergency_snapshot(int(person["id"]))
+    markdown = services.generate_emergency_snapshot(int(person["id"]), db_path=db_path)
     st.download_button("Download Markdown", markdown, file_name="emergency_snapshot.md", mime="text/markdown")
     st.markdown(markdown)
 
 
-def page_import_export(person: dict | None) -> None:
+def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
     page_header("Import/Export")
+    if demo_mode:
+        st.caption("Imports and restores in demo mode modify only the session demo database.")
     if person:
         st.subheader("CSV Imports")
         labs_file = st.file_uploader("Import labs CSV", type=["csv"])
         if labs_file and st.button("Import labs"):
-            st.write(imports_exports.import_labs_csv(labs_file, int(person["id"])))
+            st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
         wearable_file = st.file_uploader("Import wearables CSV", type=["csv"])
         if wearable_file and st.button("Import wearables"):
-            st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"])))
+            st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
         st.download_button("Download sample labs CSV", imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
         st.download_button("Download sample wearables CSV", imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
     st.subheader("JSON Backup")
-    backup = imports_exports.export_json_backup()
+    backup = imports_exports.export_json_backup(db_path=db_path)
     st.download_button("Export JSON backup", backup, "phr_backup.json", "application/json")
     backup_file = st.file_uploader("Restore JSON backup", type=["json"])
     clear_existing = st.checkbox("Clear existing records before restore")
     if backup_file and st.button("Restore backup"):
-        imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing)
+        imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
         st.success("Backup restored.")
         st.rerun()
 
 
-def page_insights(person: dict) -> None:
+def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Health Insights")
     start, end = date_range_controls("insights")
     include_medications = st.checkbox("Include medications", value=True)
@@ -890,6 +1029,7 @@ def page_insights(person: dict) -> None:
         include_appointments,
         include_reminders,
         include_wearables,
+        db_path=db_path,
     )
     if st.button("Generate rule-based report"):
         st.markdown(insights.generate_rule_based_insights(context, focus_area))
@@ -912,23 +1052,31 @@ def main() -> None:
         st.markdown("### Family PHR")
         st.caption("Local-first private prototype")
         st.divider()
+        demo_mode_controls()
+        st.divider()
         page = page_navigation()
         st.divider()
-        _, person = selected_profile_sidebar()
+        demo_mode = is_demo_mode()
+        current_db_path = active_db_path()
+        _, person = selected_profile_sidebar(current_db_path, demo_mode=demo_mode)
         if person:
-            st.caption(f"Active profile: {person['name']}")
+            label = "Demo profile" if demo_mode else "Active profile"
+            st.caption(f"{label}: {person['name']}")
 
     if page == "Profiles":
-        page_profiles(person)
+        page_profiles(person, current_db_path, demo_mode=demo_mode)
         return
     if not require_profile(person):
         if page == "Import/Export":
-            page_import_export(person)
+            page_import_export(person, current_db_path, demo_mode=demo_mode)
         return
     if page == "Settings":
         page_header("Settings")
         selected_profile_banner(person)
-        password_settings(person)
+        if demo_mode:
+            st.info("Profile password settings are not available in demo mode. Exit demo mode to manage saved profiles.")
+        else:
+            password_settings(person, db_path=current_db_path)
         ai_settings()
         st.info("Future TODO: encryption at rest, audit logging, stronger authentication, family sharing permissions, provider sharing, consent tracking, and FHIR/SMART integration.")
         return
@@ -939,29 +1087,29 @@ def main() -> None:
     selected_profile_banner(person)
 
     if page == "Dashboard":
-        page_dashboard(person)
+        page_dashboard(person, db_path=current_db_path)
     elif page == "Import/Export":
-        page_import_export(person)
+        page_import_export(person, current_db_path, demo_mode=demo_mode)
     elif page == "Health Timeline":
-        generic_record_page("health_entries", person)
+        generic_record_page("health_entries", person, current_db_path, demo_mode=demo_mode)
     elif page == "Medications":
-        generic_record_page("medications", person)
+        generic_record_page("medications", person, current_db_path, demo_mode=demo_mode)
     elif page == "Allergies":
-        generic_record_page("allergies", person)
+        generic_record_page("allergies", person, current_db_path, demo_mode=demo_mode)
     elif page == "Labs":
-        generic_record_page("lab_results", person)
+        generic_record_page("lab_results", person, current_db_path, demo_mode=demo_mode)
     elif page == "Appointments":
-        generic_record_page("appointments", person)
+        generic_record_page("appointments", person, current_db_path, demo_mode=demo_mode)
     elif page == "Reminders":
-        generic_record_page("reminders", person)
+        generic_record_page("reminders", person, current_db_path, demo_mode=demo_mode)
     elif page == "Wearables":
-        generic_record_page("wearable_records", person)
+        generic_record_page("wearable_records", person, current_db_path, demo_mode=demo_mode)
     elif page == "Provider Summary":
-        page_provider_summary(person)
+        page_provider_summary(person, db_path=current_db_path)
     elif page == "Emergency Snapshot":
-        page_emergency_snapshot(person)
+        page_emergency_snapshot(person, db_path=current_db_path)
     elif page == "Health Insights":
-        page_insights(person)
+        page_insights(person, db_path=current_db_path)
 
 
 if __name__ == "__main__":
