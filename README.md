@@ -22,6 +22,7 @@ This application is for personal organization and education only. It is not a me
 - Filters for dates, body system, body part, medication status, lab flag, reminder status, and keyword search where useful.
 - CSV import for labs and wearable records.
 - JSON backup export and restore.
+- FHIR R4 and R5 Bundle export/import for EHR interoperability.
 - Markdown provider summary and emergency snapshot downloads.
 - Rule-based Health Insights report with safety language.
 - Optional Zhipu AI safety-checked insights only when a Zhipu AI API key is configured and the user clicks the AI button.
@@ -82,6 +83,21 @@ Steps,7500,steps,2026-04-28,Manual
 ## JSON Backup
 
 Use the Import/Export page to download a full JSON backup of all MVP tables. Restore can insert records into the current database or clear existing records first.
+
+## FHIR Interoperability
+
+Use the Import/Export page to export or import HL7 FHIR JSON Bundles. The app supports R4 and R5 Bundle export/import while keeping the local SQLite schema unchanged.
+
+Current mappings:
+
+- `people` -> `Patient`
+- `allergies` -> `AllergyIntolerance`
+- `medications` -> `MedicationStatement`
+- `lab_results`, `health_entries`, and `wearable_records` -> `Observation`
+- `appointments` -> `Appointment`
+- `reminders` -> `Task`
+
+Exports include human-readable text fields where local records do not have clinical terminology codes. Some EHRs may require additional implementation-guide profiles, OAuth/SMART authorization, or coded vocabularies before accepting imported data.
 
 ## Provider Summary And Emergency Snapshot
 

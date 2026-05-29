@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 import db
+import fhir
 import services
 from validation import normalize_optional_number, validate_lab, validate_wearable
 
@@ -69,6 +70,14 @@ def import_json_backup(payload_text: str, clear_existing: bool = False, db_path:
     payload = json.loads(payload_text)
     tables = payload.get("tables", payload)
     db.import_all_tables(tables, clear_existing=clear_existing, db_path=db_path)
+
+
+def export_fhir_bundle(version: str = "R4", person_id: int | None = None, db_path: Path | str = db.DB_PATH) -> str:
+    return fhir.export_bundle(version, person_id=person_id, db_path=db_path)
+
+
+def import_fhir_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str = db.DB_PATH) -> dict:
+    return fhir.import_bundle(payload_text, clear_existing=clear_existing, db_path=db_path)
 
 
 def provider_summary_markdown(person_id: int, **kwargs) -> str:

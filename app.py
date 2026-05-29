@@ -12,6 +12,7 @@ import streamlit as st
 
 import ai_config
 import db
+import fhir
 import imports_exports
 import insights
 import security
@@ -985,6 +986,28 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
             st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
         st.download_button("Download sample labs CSV", imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
         st.download_button("Download sample wearables CSV", imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
+
+    st.subheader("FHIR Interoperability")
+    fhir_version = st.selectbox("FHIR version", fhir.SUPPORTED_FHIR_VERSIONS, key="fhir_version")
+    export_scope = "All profiles"
+    if person:
+        export_scope = st.selectbox("FHIR export scope", ["Selected profile", "All profiles"], key="fhir_export_scope")
+    export_person_id = int(person["id"]) if person and export_scope == "Selected profile" else None
+    fhir_bundle = imports_exports.export_fhir_bundle(fhir_version, person_id=export_person_id, db_path=db_path)
+    st.download_button(
+        f"Export FHIR {fhir_version} Bundle",
+        fhir_bundle,
+        file_name=f"phr_fhir_{fhir_version.lower()}_bundle.json",
+        mime=fhir.FHIR_MIME_TYPE,
+    )
+    fhir_file = st.file_uploader("Import FHIR Bundle", type=["json"], key="fhir_bundle_upload")
+    clear_existing_fhir = st.checkbox("Clear existing records before FHIR import", key="fhir_clear_existing")
+    if fhir_file and st.button("Import FHIR Bundle"):
+        result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
+        st.write(result)
+        st.success("FHIR import completed.")
+        st.rerun()
+
     st.subheader("JSON Backup")
     backup = imports_exports.export_json_backup(db_path=db_path)
     st.download_button("Export JSON backup", backup, "phr_backup.json", "application/json")

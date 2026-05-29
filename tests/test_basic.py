@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import db  # noqa: E402
 import ai_config  # noqa: E402
 import app  # noqa: E402
+import fhir  # noqa: E402
 import imports_exports  # noqa: E402
 import insights  # noqa: E402
 import security  # noqa: E402
@@ -164,6 +165,90 @@ def test_demo_database_loads_sample_data_without_touching_real_profiles(tmp_path
     assert demo_labs
     assert demo_context["person"]["name"] == "Alex Rivera"
     assert services.list_items("lab_results", real_person_id, db_path=real_db_path) == []
+
+
+def test_fhir_r4_and_r5_export_and_import_round_trip(tmp_path):
+    source_db_path = tmp_path / "source.db"
+    target_db_path = tmp_path / "target.db"
+    db.init_db(source_db_path)
+    db.init_db(target_db_path)
+    person_id = services.create_person(
+        {
+            "name": "FHIR Person",
+            "date_of_birth": "1990-01-02",
+            "sex": "Female",
+            "relationship": "Self",
+            "emergency_contact": "FHIR Contact",
+        },
+        db_path=source_db_path,
+    )
+    services.create_item("allergies", person_id, {"allergen": "Peanuts", "reaction": "Hives", "severity": "Moderate"}, db_path=source_db_path)
+    services.create_item(
+        "medications",
+        person_id,
+        {"name": "Med A", "dose": "10 mg", "frequency": "Daily", "status": "Active", "start_date": "2026-01-01"},
+        db_path=source_db_path,
+    )
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "LDL", "numeric_value": 120, "unit": "mg/dL", "flag": "High", "lab_date": "2026-02-01"},
+        db_path=source_db_path,
+    )
+    services.create_item(
+        "health_entries",
+        person_id,
+        {"entry_date": "2026-02-03", "title": "Headache", "body_system": "Neurologic", "severity": 4, "note": "Mild afternoon headache."},
+        db_path=source_db_path,
+    )
+    services.create_item(
+        "appointments",
+        person_id,
+        {"appointment_date": "2026-02-04", "title": "Primary care follow-up", "provider": "Dr. Example", "status": "Scheduled"},
+        db_path=source_db_path,
+    )
+    services.create_item(
+        "reminders",
+        person_id,
+        {"reminder_type": "Lab", "title": "Repeat LDL", "due_date": "2026-03-01", "status": "Upcoming"},
+        db_path=source_db_path,
+    )
+    services.create_item(
+        "wearable_records",
+        person_id,
+        {"metric_type": "Steps", "value": 7500, "unit": "steps", "timestamp": "2026-02-02", "source": "Manual"},
+        db_path=source_db_path,
+    )
+
+    r4_bundle = json.loads(fhir.export_bundle("R4", db_path=source_db_path))
+    r5_bundle = json.loads(fhir.export_bundle("R5", db_path=source_db_path))
+    r4_medication = next(entry["resource"] for entry in r4_bundle["entry"] if entry["resource"]["resourceType"] == "MedicationStatement")
+    r5_medication = next(entry["resource"] for entry in r5_bundle["entry"] if entry["resource"]["resourceType"] == "MedicationStatement")
+
+    assert r4_bundle["resourceType"] == "Bundle"
+    assert r5_bundle["resourceType"] == "Bundle"
+    assert r4_medication["medicationCodeableConcept"]["text"] == "Med A"
+    assert r5_medication["medication"]["concept"]["text"] == "Med A"
+
+    patient_full_url = next(entry["fullUrl"] for entry in r5_bundle["entry"] if entry["resource"]["resourceType"] == "Patient")
+    for entry in r5_bundle["entry"]:
+        resource = entry["resource"]
+        for key in ["patient", "subject", "for"]:
+            if resource.get(key, {}).get("reference"):
+                resource[key]["reference"] = patient_full_url
+
+    result = fhir.import_bundle(json.dumps(r5_bundle), db_path=target_db_path)
+    imported_person = services.list_people(db_path=target_db_path)[0]
+
+    assert result["skipped"] == []
+    assert imported_person["name"] == "FHIR Person"
+    assert services.list_items("allergies", int(imported_person["id"]), db_path=target_db_path)[0]["allergen"] == "Peanuts"
+    assert services.list_items("medications", int(imported_person["id"]), db_path=target_db_path)[0]["name"] == "Med A"
+    assert services.list_items("lab_results", int(imported_person["id"]), db_path=target_db_path)[0]["test_name"] == "LDL"
+    assert services.list_items("health_entries", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Headache"
+    assert services.list_items("appointments", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Primary care follow-up"
+    assert services.list_items("reminders", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Repeat LDL"
+    assert services.list_items("wearable_records", int(imported_person["id"]), db_path=target_db_path)[0]["metric_type"] == "Steps"
 
 
 def test_ai_insight_prompt_requires_safe_unobtrusive_suggestions(monkeypatch):
