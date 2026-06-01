@@ -22,6 +22,16 @@ PRIVACY_NOTICE = (
     "Do not include information you do not want sent to the API."
 )
 
+EXAMPLE_QUESTIONS = [
+    "Summarize my recent labs.",
+    "What medications am I currently taking?",
+    "What should I ask my doctor?",
+    "Are any reminders overdue?",
+    "Make a provider visit summary.",
+    "Explain this lab result in plain language.",
+    "What changed recently in this profile?",
+]
+
 CHAT_CONTEXT_LIMITS = {
     "allergies": 8,
     "active_medications": 10,
@@ -359,21 +369,19 @@ def _render_message(role: str, content: str) -> None:
         st.markdown(f"**{speaker}:** {content}")
 
 
-def _example_questions() -> None:
-    with st.expander("Example questions"):
-        st.markdown(
-            "\n".join(
-                [
-                    "- Summarize my recent labs.",
-                    "- What medications am I currently taking?",
-                    "- What should I ask my doctor?",
-                    "- Are any reminders overdue?",
-                    "- Make a provider visit summary.",
-                    "- Explain this lab result in plain language.",
-                    "- What changed recently in this profile?",
-                ]
-            )
-        )
+def _example_questions(draft_key: str) -> None:
+    selection_key = f"example_question_{draft_key}"
+    selected = st.pills(
+        "Example questions",
+        EXAMPLE_QUESTIONS,
+        format_func=lambda question: f"💬 {question.rstrip('.?')}",
+        key=selection_key,
+        width="content",
+    )
+    if selected and st.session_state.get(f"{selection_key}_applied") != selected:
+        st.session_state[draft_key] = selected
+        st.session_state[f"{selection_key}_applied"] = selected
+        st.rerun()
 
 
 def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
@@ -382,13 +390,15 @@ def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
         st.error("No selected profile was found. Select or create a profile before using AI Chat.")
         return
 
-    st.warning(PRIVACY_NOTICE)
-    _example_questions()
-
     history_key = _history_key(person_id, db_path)
+    draft_key = f"{history_key}_draft"
     st.session_state.setdefault(history_key, [])
+    st.session_state.setdefault(draft_key, "")
 
-    if st.button("Clear chat", key=f"clear_{history_key}"):
+    st.warning(f"⚠️ {PRIVACY_NOTICE}")
+    _example_questions(draft_key)
+
+    if st.button("🧹 Clear chat", key=f"clear_{history_key}"):
         st.session_state[history_key] = []
         st.rerun()
 
@@ -400,7 +410,11 @@ def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
     for message in st.session_state[history_key]:
         _render_message(message["role"], message["content"])
 
-    prompt = st.chat_input("Ask about the selected profile's health records") if hasattr(st, "chat_input") else st.text_input("Ask about the selected profile's health records")
+    prompt = (
+        st.chat_input("Ask about the selected profile's health records", key=draft_key)
+        if hasattr(st, "chat_input")
+        else st.text_input("Ask about the selected profile's health records", key=draft_key)
+    )
     if not prompt:
         return
 
