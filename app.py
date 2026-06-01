@@ -58,6 +58,59 @@ NAV_SECTIONS = {
     "Admin": ["Profiles", "Settings"],
 }
 
+PAGE_EMOJIS = {
+    "Dashboard": "📊",
+    "Profiles": "👤",
+    "Health Timeline": "🗓️",
+    "Medications": "💊",
+    "Allergies": "⚠️",
+    "Labs": "🧪",
+    "Appointments": "📅",
+    "Reminders": "🔔",
+    "Wearables": "⌚",
+    "Provider Summary": "📝",
+    "Emergency Snapshot": "🚑",
+    "Health Insights": "💡",
+    "AI Chat": "💬",
+    "Import/Export": "🔄",
+    "Settings": "⚙️",
+}
+
+ACTION_EMOJIS = {
+    "Exit demo mode": "↩️",
+    "Demo mode": "🧪",
+    "Unlock profile": "🔓",
+    "Lock profile": "🔒",
+    "Remove password": "🗑️",
+    "Save password": "💾",
+    "Save API key": "🔑",
+    "Test BigModel API key": "🧪",
+    "Add profile": "➕",
+    "Create profile": "✅",
+    "Cancel": "✖️",
+    "Save changes": "💾",
+    "Delete profile": "🗑️",
+    "Add record": "➕",
+    "Mark complete": "✅",
+    "Dismiss": "↩️",
+    "Delete": "🗑️",
+    "Download Markdown": "⬇️",
+    "Download sample labs CSV": "⬇️",
+    "Download sample wearables CSV": "⬇️",
+    "Import labs": "⬆️",
+    "Import wearables": "⬆️",
+    "Import FHIR Bundle": "⬆️",
+    "Export JSON backup": "📤",
+    "Restore backup": "♻️",
+    "Generate rule-based report": "📄",
+    "Generate AI safety-checked insights": "✨",
+}
+
+ACTION_PREFIX_EMOJIS = {
+    "Add ": "➕",
+    "Export FHIR ": "📤",
+}
+
 PAGE_DESCRIPTIONS = {
     "Dashboard": "A quick operational view of medications, allergies, labs, reminders, appointments, and recent notes.",
     "Profiles": "Manage family member profiles and local profile access settings.",
@@ -258,6 +311,41 @@ h3 {
     color: #ffffff;
 }
 
+.st-key-nav_menu .stButton {
+    margin-bottom: 0.1rem;
+}
+
+.st-key-nav_menu .stButton > button {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    color: var(--phr-text);
+    justify-content: flex-start;
+    min-height: 2rem;
+    padding: 0.3rem 0.55rem;
+    text-align: left;
+    width: 100%;
+}
+
+.st-key-nav_menu .stButton > button:hover {
+    background: #dfeae5;
+    border: 0;
+    color: var(--phr-text);
+}
+
+.st-key-nav_menu .stButton > button:disabled {
+    background: #c6ded5;
+    border: 0;
+    color: var(--phr-accent);
+    cursor: default;
+    font-weight: 700;
+    opacity: 1;
+}
+
+.st-key-nav_menu .stButton > button p {
+    color: inherit;
+}
+
 [data-testid="stExpander"] {
     background: var(--phr-panel);
     color: var(--phr-text);
@@ -448,10 +536,43 @@ def selected_profile_banner(person: dict | None) -> None:
 
 
 def page_navigation() -> str:
-    section_names = list(NAV_SECTIONS)
-    section = st.sidebar.selectbox("Section", section_names, key="nav_section")
-    pages = NAV_SECTIONS[section]
-    return st.sidebar.selectbox("Page", pages, key=f"nav_page_{section}")
+    current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
+
+    with st.sidebar.container(key="nav_menu"):
+        st.caption("Navigation")
+        for section, pages in NAV_SECTIONS.items():
+            st.markdown(f"**{section}**")
+            for page in pages:
+                is_current = page == current_page
+                if st.button(
+                    page_button_label(page),
+                    key=f"nav_page_{page}",
+                    type="primary" if is_current else "secondary",
+                    disabled=is_current,
+                    use_container_width=True,
+                ):
+                    st.session_state["nav_page"] = page
+                    st.rerun()
+
+    return current_page
+
+
+def page_button_label(page: str) -> str:
+    return f"{PAGE_EMOJIS.get(page, '•')} {page}"
+
+
+def action_button_label(label: str) -> str:
+    emoji = ACTION_EMOJIS.get(label)
+    if emoji:
+        return f"{emoji} {label}"
+    for prefix, prefix_emoji in ACTION_PREFIX_EMOJIS.items():
+        if label.startswith(prefix):
+            return f"{prefix_emoji} {label}"
+    return label
+
+
+def warning_label(message: str) -> str:
+    return f"⚠️ {message}"
 
 
 def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str = SAMPLE_DATA_PATH) -> int | None:
@@ -495,11 +616,11 @@ def demo_mode_controls() -> None:
     if is_demo_mode():
         st.success("Demo mode active")
         st.caption("Using session-only sample data.")
-        if st.button("Exit demo mode", key="exit_demo_mode"):
+        if st.button(action_button_label("Exit demo mode"), key="exit_demo_mode"):
             exit_demo_mode()
             st.rerun()
         return
-    if st.button("Demo mode", key="start_demo_mode"):
+    if st.button(action_button_label("Demo mode"), key="start_demo_mode"):
         start_demo_mode()
         st.rerun()
 
@@ -562,11 +683,11 @@ def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool =
 
 
 def unlock_screen(person: dict) -> None:
-    st.warning("This profile is password-protected.")
+    st.warning(warning_label("This profile is password-protected."))
     if person.get("profile_password_hint"):
         st.caption(f"Password hint: {person['profile_password_hint']}")
     password = st.text_input("Password", type="password")
-    if st.button("Unlock profile"):
+    if st.button(action_button_label("Unlock profile")):
         if security.verify_password(password, person.get("profile_password_hash") or ""):
             security.unlock_profile(int(person["id"]))
             st.rerun()
@@ -615,10 +736,10 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     st.subheader("Profile Password")
     if person.get("profile_password_enabled"):
         st.info("Password protection is enabled for this profile.")
-        if st.button("Lock profile"):
+        if st.button(action_button_label("Lock profile")):
             security.lock_profile(int(person["id"]))
             st.rerun()
-        if st.button("Remove password"):
+        if st.button(action_button_label("Remove password")):
             services.update_person(
                 int(person["id"]),
                 {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
@@ -630,7 +751,7 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     with st.form(f"password_form_{person['id']}"):
         password = st.text_input("Set/change password", type="password")
         hint = st.text_input("Password hint", value=person.get("profile_password_hint") or "")
-        submitted = st.form_submit_button("Save password")
+        submitted = st.form_submit_button(action_button_label("Save password"))
         if submitted:
             if not password:
                 st.error("Password cannot be blank.")
@@ -653,7 +774,7 @@ def ai_settings() -> None:
     if ai_config.zhipu_key_configured():
         st.success("Zhipu AI API key is configured.")
     else:
-        st.warning("Zhipu AI API key is not configured. AI safety-checked insights will not run.")
+        st.warning(warning_label("Zhipu AI API key is not configured. AI safety-checked insights will not run."))
     st.caption(f"AI provider: {ai_config.AI_PROVIDER}")
     st.caption(f"Model: {ai_config.ZHIPU_MODEL}")
     st.caption(f"AI Chat model candidates: {', '.join(ai_chat.chat_model_candidates())}")
@@ -662,7 +783,7 @@ def ai_settings() -> None:
     st.caption("Default setup uses BigModel's free low-power text model with a compact patient-data packet.")
     with st.form("zhipu_api_key_form"):
         api_key = st.text_input("Zhipu AI API key", type="password")
-        submitted = st.form_submit_button("Save API key")
+        submitted = st.form_submit_button(action_button_label("Save API key"))
         if submitted:
             ok, message = ai_config.store_zhipu_api_key(api_key)
             if ok:
@@ -670,7 +791,7 @@ def ai_settings() -> None:
             else:
                 st.error(message)
                 st.rerun()
-    if st.button("Test BigModel API key"):
+    if st.button(action_button_label("Test BigModel API key")):
         ok, message, detail = insights.validate_zhipu_connection()
         if ok:
             st.success(message)
@@ -693,7 +814,7 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
     if add_profile_key not in st.session_state:
         st.session_state[add_profile_key] = False
 
-    if st.button("Add profile", key="toggle_add_profile", on_click=toggle_add_form, args=(add_profile_key,)):
+    if st.button(action_button_label("Add profile"), key="toggle_add_profile", on_click=toggle_add_form, args=(add_profile_key,)):
         pass
 
     if st.session_state[add_profile_key]:
@@ -704,9 +825,9 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
             hint = st.text_input("Password hint") if enable_password else ""
             submit_col, cancel_col = st.columns([1, 1])
             with submit_col:
-                submitted = st.form_submit_button("Create profile")
+                submitted = st.form_submit_button(action_button_label("Create profile"))
             with cancel_col:
-                cancelled = st.form_submit_button("Cancel")
+                cancelled = st.form_submit_button(action_button_label("Cancel"))
             if cancelled:
                 close_form(add_profile_key)
                 st.rerun()
@@ -749,17 +870,17 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
         data = profile_form(row, key_prefix=f"edit_profile_{row['id']}")
         save_col, delete_col, cancel_col = st.columns([1, 1, 1])
         with save_col:
-            submitted = st.form_submit_button("Save changes")
+            submitted = st.form_submit_button(action_button_label("Save changes"))
         with delete_col:
-            deleted = st.form_submit_button("Delete profile")
+            deleted = st.form_submit_button(action_button_label("Delete profile"))
         with cancel_col:
-            cancelled = st.form_submit_button("Cancel")
+            cancelled = st.form_submit_button(action_button_label("Cancel"))
         if cancelled:
             st.session_state[profile_edit_reset_key] += 1
             st.rerun()
         if deleted:
             services.delete_person(int(row["id"]), db_path=db_path)
-            st.warning("Profile deleted.")
+            st.warning(warning_label("Profile deleted."))
             st.session_state[profile_edit_reset_key] += 1
             st.rerun()
         if submitted:
@@ -819,7 +940,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
     if add_form_key not in st.session_state:
         st.session_state[add_form_key] = False
 
-    if st.button(f"Add {singular_title}", key=f"toggle_add_{table}", on_click=toggle_add_form, args=(add_form_key,)):
+    if st.button(action_button_label(f"Add {singular_title}"), key=f"toggle_add_{table}", on_click=toggle_add_form, args=(add_form_key,)):
         pass
 
     if st.session_state[add_form_key]:
@@ -827,9 +948,9 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
             data = {name: input_field(name, kind, key=f"add_{table}_{name}") for name, kind in config["fields"]}
             submit_col, cancel_col = st.columns([1, 1])
             with submit_col:
-                submitted = st.form_submit_button("Add record")
+                submitted = st.form_submit_button(action_button_label("Add record"))
             with cancel_col:
-                cancelled = st.form_submit_button("Cancel")
+                cancelled = st.form_submit_button(action_button_label("Cancel"))
             if cancelled:
                 close_form(add_form_key)
                 st.rerun()
@@ -880,23 +1001,23 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
         if table == "reminders":
             save_col, complete_col, dismiss_col, delete_col, cancel_col = st.columns([1, 1, 1, 1, 1])
             with save_col:
-                submitted = st.form_submit_button("Save changes")
+                submitted = st.form_submit_button(action_button_label("Save changes"))
             with complete_col:
-                completed = st.form_submit_button("Mark complete")
+                completed = st.form_submit_button(action_button_label("Mark complete"))
             with dismiss_col:
-                dismissed = st.form_submit_button("Dismiss")
+                dismissed = st.form_submit_button(action_button_label("Dismiss"))
             with delete_col:
-                deleted = st.form_submit_button("Delete")
+                deleted = st.form_submit_button(action_button_label("Delete"))
             with cancel_col:
-                cancelled = st.form_submit_button("Cancel")
+                cancelled = st.form_submit_button(action_button_label("Cancel"))
         else:
             save_col, delete_col, cancel_col = st.columns([1, 1, 1])
             with save_col:
-                submitted = st.form_submit_button("Save changes")
+                submitted = st.form_submit_button(action_button_label("Save changes"))
             with delete_col:
-                deleted = st.form_submit_button("Delete")
+                deleted = st.form_submit_button(action_button_label("Delete"))
             with cancel_col:
-                cancelled = st.form_submit_button("Cancel")
+                cancelled = st.form_submit_button(action_button_label("Cancel"))
             completed = dismissed = False
 
         if cancelled:
@@ -912,7 +1033,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
             st.rerun()
         if deleted:
             services.delete_item(table, int(row["id"]), db_path=db_path)
-            st.warning("Record deleted.")
+            st.warning(warning_label("Record deleted."))
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if submitted:
@@ -965,14 +1086,14 @@ def page_provider_summary(person: dict, db_path: Path | str = db.DB_PATH) -> Non
     include_timeline = st.checkbox("Include health timeline", value=True)
     include_wearables = st.checkbox("Include wearables", value=True)
     markdown = services.generate_provider_summary(int(person["id"]), start, end, include_labs, include_timeline, include_wearables, db_path=db_path)
-    st.download_button("Download Markdown", markdown, file_name="provider_summary.md", mime="text/markdown")
+    st.download_button(action_button_label("Download Markdown"), markdown, file_name="provider_summary.md", mime="text/markdown")
     st.markdown(markdown)
 
 
 def page_emergency_snapshot(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Emergency Snapshot")
     markdown = services.generate_emergency_snapshot(int(person["id"]), db_path=db_path)
-    st.download_button("Download Markdown", markdown, file_name="emergency_snapshot.md", mime="text/markdown")
+    st.download_button(action_button_label("Download Markdown"), markdown, file_name="emergency_snapshot.md", mime="text/markdown")
     st.markdown(markdown)
 
 
@@ -983,13 +1104,13 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
     if person:
         st.subheader("CSV Imports")
         labs_file = st.file_uploader("Import labs CSV", type=["csv"])
-        if labs_file and st.button("Import labs"):
+        if labs_file and st.button(action_button_label("Import labs")):
             st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
         wearable_file = st.file_uploader("Import wearables CSV", type=["csv"])
-        if wearable_file and st.button("Import wearables"):
+        if wearable_file and st.button(action_button_label("Import wearables")):
             st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
-        st.download_button("Download sample labs CSV", imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
-        st.download_button("Download sample wearables CSV", imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
+        st.download_button(action_button_label("Download sample labs CSV"), imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
+        st.download_button(action_button_label("Download sample wearables CSV"), imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
 
     st.subheader("FHIR Interoperability")
     fhir_version = st.selectbox("FHIR version", fhir.SUPPORTED_FHIR_VERSIONS, key="fhir_version")
@@ -999,14 +1120,14 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
     export_person_id = int(person["id"]) if person and export_scope == "Selected profile" else None
     fhir_bundle = imports_exports.export_fhir_bundle(fhir_version, person_id=export_person_id, db_path=db_path)
     st.download_button(
-        f"Export FHIR {fhir_version} Bundle",
+        action_button_label(f"Export FHIR {fhir_version} Bundle"),
         fhir_bundle,
         file_name=f"phr_fhir_{fhir_version.lower()}_bundle.json",
         mime=fhir.FHIR_MIME_TYPE,
     )
     fhir_file = st.file_uploader("Import FHIR Bundle", type=["json"], key="fhir_bundle_upload")
     clear_existing_fhir = st.checkbox("Clear existing records before FHIR import", key="fhir_clear_existing")
-    if fhir_file and st.button("Import FHIR Bundle"):
+    if fhir_file and st.button(action_button_label("Import FHIR Bundle")):
         result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
         st.write(result)
         st.success("FHIR import completed.")
@@ -1014,10 +1135,10 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
 
     st.subheader("JSON Backup")
     backup = imports_exports.export_json_backup(db_path=db_path)
-    st.download_button("Export JSON backup", backup, "phr_backup.json", "application/json")
+    st.download_button(action_button_label("Export JSON backup"), backup, "phr_backup.json", "application/json")
     backup_file = st.file_uploader("Restore JSON backup", type=["json"])
     clear_existing = st.checkbox("Clear existing records before restore")
-    if backup_file and st.button("Restore backup"):
+    if backup_file and st.button(action_button_label("Restore backup")):
         imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
         st.success("Backup restored.")
         st.rerun()
@@ -1058,12 +1179,12 @@ def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
         include_wearables,
         db_path=db_path,
     )
-    if st.button("Generate rule-based report"):
+    if st.button(action_button_label("Generate rule-based report")):
         st.markdown(insights.generate_rule_based_insights(context, focus_area))
-    if st.button("Generate AI safety-checked insights"):
+    if st.button(action_button_label("Generate AI safety-checked insights")):
         result = insights.generate_ai_insight_result(context, focus_area)
         if result.get("warning"):
-            st.warning(result["warning"])
+            st.warning(warning_label(result["warning"]))
             if result.get("provider_details"):
                 with st.expander("Provider details"):
                     st.code(result["provider_details"])
