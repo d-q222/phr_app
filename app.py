@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+import ai_chat
 import ai_config
 import db
 import fhir
@@ -45,12 +46,13 @@ PAGES = [
     "Provider Summary",
     "Emergency Snapshot",
     "Health Insights",
+    "AI Chat",
     "Import/Export",
     "Settings",
 ]
 
 NAV_SECTIONS = {
-    "Overview": ["Dashboard", "Health Insights"],
+    "Overview": ["Dashboard", "Health Insights", "AI Chat"],
     "Records": ["Health Timeline", "Medications", "Allergies", "Labs", "Appointments", "Reminders", "Wearables"],
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
@@ -69,7 +71,8 @@ PAGE_DESCRIPTIONS = {
     "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
     "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
     "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
-    "Import/Export": "Import CSV records and manage local JSON backups.",
+    "AI Chat": "Ask selected-profile questions using a concise health context sent to Zhipu AI.",
+    "Import/Export": "Import CSV records, exchange FHIR bundles, and manage local JSON backups.",
     "Settings": "Manage local profile protection and optional BigModel API settings.",
 }
 
@@ -653,6 +656,7 @@ def ai_settings() -> None:
         st.warning("Zhipu AI API key is not configured. AI safety-checked insights will not run.")
     st.caption(f"AI provider: {ai_config.AI_PROVIDER}")
     st.caption(f"Model: {ai_config.ZHIPU_MODEL}")
+    st.caption(f"AI Chat model candidates: {', '.join(ai_chat.chat_model_candidates())}")
     st.caption(f"Max response tokens: {ai_config.ZHIPU_MAX_TOKENS}")
     st.caption(f"Max AI context bytes: {ai_config.ZHIPU_CONTEXT_BYTE_LIMIT}")
     st.caption("Default setup uses BigModel's free low-power text model with a compact patient-data packet.")
@@ -1066,6 +1070,11 @@ def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
         st.markdown(result["report"])
 
 
+def page_ai_chat(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+    page_header("AI Health Assistant", PAGE_DESCRIPTIONS["AI Chat"])
+    ai_chat.render_ai_chatbot(int(person["id"]), db_path=db_path)
+
+
 def main() -> None:
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
@@ -1101,7 +1110,11 @@ def main() -> None:
         else:
             password_settings(person, db_path=current_db_path)
         ai_settings()
-        st.info("Future TODO: encryption at rest, audit logging, stronger authentication, family sharing permissions, provider sharing, consent tracking, and FHIR/SMART integration.")
+        st.info(
+            "Future TODO: encryption at rest, audit logging, stronger authentication, family sharing permissions, "
+            "provider sharing, consent tracking, SMART-on-FHIR authorization, provider-connected EHR workflows, "
+            "production FHIR profiles, PDF export, and mobile interface."
+        )
         return
     if not security.health_data_visible(person):
         unlock_screen(person)
@@ -1133,6 +1146,8 @@ def main() -> None:
         page_emergency_snapshot(person, db_path=current_db_path)
     elif page == "Health Insights":
         page_insights(person, db_path=current_db_path)
+    elif page == "AI Chat":
+        page_ai_chat(person, db_path=current_db_path)
 
 
 if __name__ == "__main__":

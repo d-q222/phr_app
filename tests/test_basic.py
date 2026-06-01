@@ -2,12 +2,14 @@ import sqlite3
 import sys
 import json
 import socket
-from io import StringIO
+import urllib.error
+from io import BytesIO, StringIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import db  # noqa: E402
+import ai_chat  # noqa: E402
 import ai_config  # noqa: E402
 import app  # noqa: E402
 import fhir  # noqa: E402
@@ -334,3 +336,142 @@ def test_ai_insight_retries_next_model_on_timeout(monkeypatch):
     assert result["used_fallback"] is False
     assert seen_models == ["timeout-model", "working-model"]
     assert "fallback model working-model" in result["warning"]
+
+
+def test_ai_chat_context_is_scoped_to_selected_person(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    selected_id = services.create_person({"name": "Selected Person", "sex": "Female", "relationship": "Self"}, db_path=db_path)
+    other_id = services.create_person({"name": "Other Person", "sex": "Male", "relationship": "Child"}, db_path=db_path)
+
+    services.create_item("allergies", selected_id, {"allergen": "Penicillin", "reaction": "Rash", "severity": "Moderate"}, db_path=db_path)
+    services.create_item("allergies", other_id, {"allergen": "Peanuts", "reaction": "Hives", "severity": "Severe"}, db_path=db_path)
+    services.create_item("medications", selected_id, {"name": "Selected Med", "status": "Active", "dose": "10 mg"}, db_path=db_path)
+    services.create_item("medications", other_id, {"name": "Other Med", "status": "Active", "dose": "5 mg"}, db_path=db_path)
+    services.create_item(
+        "lab_results",
+        selected_id,
+        {"test_name": "A1c", "result_value": "6.0", "flag": "High", "lab_date": "2026-05-01"},
+        db_path=db_path,
+    )
+    services.create_item(
+        "health_entries",
+        selected_id,
+        {"entry_date": "2026-05-02", "title": "Headache", "body_system": "Neurologic", "note": "Afternoon headache."},
+        db_path=db_path,
+    )
+    services.create_item("appointments", selected_id, {"appointment_date": "2099-01-01", "title": "Checkup", "provider": "Dr. Test"}, db_path=db_path)
+    services.create_item("reminders", selected_id, {"reminder_type": "Lab", "title": "Repeat A1c", "due_date": "2020-01-01", "status": "Upcoming"}, db_path=db_path)
+
+    context_text = ai_chat.build_patient_context(selected_id, db_path=db_path)
+    context = json.loads(context_text)
+
+    assert context["basic_profile"]["name"] == "Selected Person"
+    assert context["allergies"][0]["allergen"] == "Penicillin"
+    assert context["active_medications"][0]["name"] == "Selected Med"
+    assert context["recent_labs"][0]["test_name"] == "A1c"
+    assert context["recent_health_entries"][0]["title"] == "Headache"
+    assert context["appointments"][0]["title"] == "Checkup"
+    assert context["overdue_reminders"][0]["title"] == "Repeat A1c"
+    assert "Other Person" not in context_text
+    assert "Other Med" not in context_text
+    assert "Peanuts" not in context_text
+
+
+def test_ai_chat_api_key_prefers_streamlit_secret_then_env(monkeypatch):
+    monkeypatch.setattr(ai_chat, "_streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
+    monkeypatch.setenv("ZAI_API_KEY", "env-key")
+    assert ai_chat.get_zhipu_api_key() == "secret-key"
+
+    monkeypatch.setattr(ai_chat, "_streamlit_secret", lambda name: None)
+    assert ai_chat.get_zhipu_api_key() == "env-key"
+
+
+def test_ai_chat_prompt_and_call_defaults(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.delenv("ZHIPU_CHAT_MODEL", raising=False)
+    monkeypatch.delenv("ZHIPU_CHAT_FALLBACK_MODELS", raising=False)
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "Chat answer"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["timeout"] = timeout
+        captured["headers"] = dict(request.header_items())
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    answer = ai_chat.call_zhipu_chat([{"role": "user", "content": "Summarize my recent labs."}])
+
+    assert answer == "Chat answer"
+    assert captured["body"]["model"] == "glm-5.1"
+    assert captured["body"]["temperature"] == 0.3
+    assert captured["body"]["max_tokens"] == 1200
+    assert captured["body"]["thinking"] == {"type": "disabled"}
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert "You are not a doctor" in ai_chat.build_ai_system_prompt()
+    assert "Use only the selected patient context" in ai_chat.build_ai_system_prompt()
+
+
+def test_ai_chat_handles_rate_limit(monkeypatch):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "busy-model")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "")
+
+    def fake_urlopen(request, timeout):
+        body = BytesIO(json.dumps({"error": {"code": "1305", "message": "model is busy"}}).encode("utf-8"))
+        raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", hdrs=None, fp=body)
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+    except ai_chat.RateLimitError as exc:
+        assert "could not complete" in exc.message
+        assert "model is busy" in (exc.detail or "")
+    else:
+        raise AssertionError("Expected RateLimitError")
+
+
+def test_ai_chat_falls_back_when_primary_model_has_no_resource_package(monkeypatch):
+    seen_models = []
+
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "glm-5.1")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "glm-4.5-flash")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "Fallback answer"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        model = json.loads(request.data.decode("utf-8"))["model"]
+        seen_models.append(model)
+        if model == "glm-5.1":
+            body = BytesIO(json.dumps({"error": {"code": "1113", "message": "no resource package"}}).encode("utf-8"))
+            raise urllib.error.HTTPError(request.full_url, 429, "Too Many Requests", hdrs=None, fp=body)
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    answer = ai_chat.call_zhipu_chat([{"role": "user", "content": "Summarize labs"}])
+
+    assert answer == "Fallback answer"
+    assert seen_models == ["glm-5.1", "glm-4.5-flash"]

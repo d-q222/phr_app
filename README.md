@@ -26,6 +26,8 @@ This application is for personal organization and education only. It is not a me
 - Markdown provider summary and emergency snapshot downloads.
 - Rule-based Health Insights report with safety language.
 - Optional Zhipu AI safety-checked insights only when a Zhipu AI API key is configured and the user clicks the AI button.
+- Optional AI Health Assistant chat for the currently selected profile only, using concise selected-patient context.
+- Demo mode with sample family data in a temporary session database.
 
 ## Installation
 
@@ -130,15 +132,19 @@ If records contain red-flag terms such as chest pain, stroke symptoms, severe sh
 
 ## Optional Zhipu AI BigModel API Key
 
-AI safety-checked insights are optional. Configure:
+AI safety-checked insights and AI Health Assistant chat are optional. Configure:
 
 ```bash
 export ZAI_API_KEY="your-key"
+# ZHIPU_API_KEY is also supported.
 export AI_PROVIDER="zhipu"
 export ZHIPU_MODEL="glm-4.5-flash"
 export ZHIPU_FALLBACK_MODELS="glm-4.7-flash"
 export ZHIPU_MAX_TOKENS="220"
 export ZHIPU_CONTEXT_BYTE_LIMIT="1200"
+# Optional chat-specific override if glm-5.1 is not enabled for your account:
+export ZHIPU_CHAT_MODEL="glm-4.5-flash"
+export ZHIPU_CHAT_FALLBACK_MODELS="glm-4.7-flash"
 ```
 
 The default model is the free low-power text model `glm-4.5-flash`, with `glm-4.7-flash` configured as a fallback. You can override either with `ZHIPU_MODEL` and `ZHIPU_FALLBACK_MODELS`, but larger models may use more quota.
@@ -155,6 +161,16 @@ The app sets `temperature=0.2`, disables model thinking, and defaults to `glm-4.
 
 If the AI report is unavailable, the app shows a Streamlit warning and falls back to the rule-based report. Zhipu business error `1113` is treated as an account balance/quota problem and is not retried.
 
+## AI Health Assistant Chat
+
+The AI Chat page uses Streamlit chat UI and keeps chat history only in `st.session_state`; it is not saved to SQLite. `Clear chat` removes the current selected profile's session chat.
+
+Each chat request sends only the currently selected profile's concise context, including basic profile details, allergies, active medications, recent labs, recent health entries, reminders, appointments, wearable summaries, and compact rule-based findings where available. It does not send the whole database or other family profiles.
+
+For chat, the app reads `ZAI_API_KEY` or `ZHIPU_API_KEY` from Streamlit secrets first, then environment variables, then the existing macOS Keychain setting if present. The default chat model is `glm-5.1` with `temperature=0.3` and `max_tokens=1200`.
+
+If Zhipu returns an account/resource-package error for `glm-5.1`, set `ZHIPU_CHAT_MODEL` to a model your account can use, such as the same model configured for Health Insights. When `ZHIPU_CHAT_FALLBACK_MODELS` is not set, chat automatically tries the existing `ZHIPU_MODEL` and `ZHIPU_FALLBACK_MODELS` after `glm-5.1`.
+
 ## Current Limitations
 
 - Local prototype only.
@@ -165,7 +181,7 @@ If the AI report is unavailable, the app shows a Streamlit warning and falls bac
 - No role-based family permissions.
 - No provider sharing links.
 - No PDF export.
-- No FHIR or SMART-on-FHIR implementation.
+- No SMART-on-FHIR authorization, provider-connected FHIR workflow, or implementation-guide profile support.
 - No live Apple Health, Fitbit, Garmin, Google Fit, or EHR integration.
 - Not intended for emergencies, diagnosis, prescriptions, or treatment decisions.
 
@@ -179,6 +195,7 @@ TODO areas for later production work:
 - Role-based family sharing permissions.
 - Secure provider sharing.
 - Consent tracking.
-- FHIR/SMART integration.
+- SMART-on-FHIR and provider-connected EHR integration.
+- FHIR implementation-guide profiles, coded vocabularies, and validation for production interoperability.
 - PDF export.
 - Mobile interface.
