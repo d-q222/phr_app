@@ -135,7 +135,7 @@ p {
 }
 
 .block-container {
-    padding-top: 1.4rem;
+    padding-top: 3rem;
     padding-bottom: 3rem;
     max-width: 1180px;
 }
@@ -1078,6 +1078,7 @@ def page_ai_chat(person: dict, db_path: Path | str = db.DB_PATH) -> None:
 def main() -> None:
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
+    st.write("")  # Top spacer to prevent Streamlit UI cutoff
     db.init_db()
 
     with st.sidebar:
