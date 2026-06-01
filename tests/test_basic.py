@@ -49,6 +49,45 @@ def test_default_zhipu_setup_uses_compact_free_model():
     assert ai_config.ZHIPU_CONTEXT_BYTE_LIMIT <= 1200
 
 
+def test_display_dataframe_uses_readable_column_titles_and_hides_internal_fields():
+    rows = [
+        {
+            "id": 1,
+            "person_id": 2,
+            "date_of_birth": "1990-01-02",
+            "profile_password_hash": "secret-hash",
+            "lab_date": "2026-01-01",
+            "result_value": "5.5",
+            "created_at": "2026-06-01T17:24:30",
+            "updated_at": "2026-06-01T17:30:00",
+        }
+    ]
+
+    frame = app.display_dataframe(rows)
+
+    assert list(frame.columns) == ["ID", "Date of Birth", "Lab Date", "Result", "Created", "Updated"]
+    assert frame.loc[0, "Date of Birth"] == "Jan 2, 1990"
+    assert frame.loc[0, "Lab Date"] == "Jan 1, 2026"
+    assert frame.loc[0, "Created"] == "5:24 PM, Jun 1, 2026"
+    assert frame.loc[0, "Updated"] == "5:30 PM, Jun 1, 2026"
+    assert rows[0]["created_at"] == "2026-06-01T17:24:30"
+
+
+def test_display_dataframe_keeps_unparseable_dates_unchanged():
+    frame = app.display_dataframe(
+        [
+            {
+                "id": 1,
+                "timestamp": "not-a-date",
+                "latest_timestamp": "2026-02-03",
+            }
+        ]
+    )
+
+    assert frame.loc[0, "Timestamp"] == "not-a-date"
+    assert frame.loc[0, "Latest Timestamp"] == "Feb 3, 2026"
+
+
 def test_person_medication_active_filter_lab_latest_password_reminder_insights_backup_and_csv(tmp_path, monkeypatch):
     monkeypatch.setattr(ai_config, "AI_PROVIDER", "none")
     db_path = tmp_path / "phr.db"

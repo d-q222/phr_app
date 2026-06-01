@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from datetime import date
+from datetime import date, datetime
 from html import escape
 from pathlib import Path
 
@@ -139,6 +139,77 @@ SINGULAR_TITLES = {
     "Wearables": "Wearable record",
 }
 
+DISPLAY_COLUMN_LABELS = {
+    "id": "ID",
+    "person_id": "Profile ID",
+    "name": "Name",
+    "date_of_birth": "Date of Birth",
+    "sex": "Sex",
+    "relationship": "Relationship",
+    "emergency_contact": "Emergency Contact",
+    "notes": "Notes",
+    "note": "Note",
+    "profile_password_enabled": "Password Protected",
+    "profile_password_hint": "Password Hint",
+    "created_at": "Created",
+    "updated_at": "Updated",
+    "allergen": "Allergen",
+    "reaction": "Reaction",
+    "severity": "Severity",
+    "dose": "Dose",
+    "frequency": "Frequency",
+    "start_date": "Start Date",
+    "end_date": "End Date",
+    "status": "Status",
+    "reason": "Reason",
+    "test_name": "Test",
+    "result_value": "Result",
+    "numeric_value": "Numeric Result",
+    "unit": "Unit",
+    "reference_low": "Reference Low",
+    "reference_high": "Reference High",
+    "flag": "Flag",
+    "lab_date": "Lab Date",
+    "entry_date": "Entry Date",
+    "title": "Title",
+    "body_system": "Body System",
+    "body_part": "Body Part",
+    "appointment_date": "Appointment Date",
+    "provider": "Provider",
+    "location": "Location",
+    "reminder_type": "Reminder Type",
+    "due_date": "Due Date",
+    "metric_type": "Metric",
+    "value": "Value",
+    "timestamp": "Timestamp",
+    "source": "Source",
+    "latest": "Latest",
+    "latest_timestamp": "Latest Timestamp",
+    "average": "Average",
+    "minimum": "Minimum",
+    "maximum": "Maximum",
+    "count": "Count",
+}
+
+HIDDEN_DISPLAY_COLUMNS = {"person_id", "profile_password_hash"}
+
+DATE_DISPLAY_COLUMNS = {
+    "date_of_birth",
+    "start_date",
+    "end_date",
+    "lab_date",
+    "entry_date",
+    "appointment_date",
+    "due_date",
+}
+
+DATETIME_DISPLAY_COLUMNS = {
+    "created_at",
+    "updated_at",
+    "timestamp",
+    "latest_timestamp",
+}
+
 APP_CSS = """
 <style>
 :root {
@@ -188,7 +259,7 @@ p {
 }
 
 .block-container {
-    padding-top: 3rem;
+    padding-top: 1.75rem;
     padding-bottom: 3rem;
     max-width: 1180px;
 }
@@ -495,6 +566,48 @@ def format_label(name: str) -> str:
     return name.replace("_", " ").title()
 
 
+def display_column_label(name: str) -> str:
+    return DISPLAY_COLUMN_LABELS.get(name, format_label(name).replace(" Id", " ID"))
+
+
+def format_display_date(value) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+    try:
+        parsed = date.fromisoformat(text)
+    except ValueError:
+        return text
+    return f"{parsed:%b} {parsed.day}, {parsed.year}"
+
+
+def format_display_datetime(value) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+    if "T" not in text and " " not in text:
+        return format_display_date(text)
+    normalized = text.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return format_display_date(text)
+    time_text = parsed.strftime("%I:%M %p").lstrip("0")
+    return f"{time_text}, {parsed:%b} {parsed.day}, {parsed.year}"
+
+
+def display_dataframe(rows: list[dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    hidden_columns = [column for column in HIDDEN_DISPLAY_COLUMNS if column in frame.columns]
+    if hidden_columns:
+        frame = frame.drop(columns=hidden_columns)
+    for column in DATE_DISPLAY_COLUMNS.intersection(frame.columns):
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_date(value))
+    for column in DATETIME_DISPLAY_COLUMNS.intersection(frame.columns):
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_datetime(value))
+    return frame.rename(columns={column: display_column_label(column) for column in frame.columns})
+
+
 def apply_global_styles() -> None:
     st.markdown(APP_CSS, unsafe_allow_html=True)
 
@@ -703,7 +816,7 @@ def require_profile(person: dict | None) -> bool:
 
 def dataframe(rows: list[dict]) -> None:
     if rows:
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.dataframe(display_dataframe(rows), width="stretch", hide_index=True)
     else:
         st.info("No records yet.")
 
