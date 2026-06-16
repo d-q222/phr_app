@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import os
+from pathlib import Path
 
 try:
     import streamlit as st
@@ -35,31 +36,37 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(actual, expected)
 
 
-def _unlocked_key(person_id: int) -> str:
-    return f"profile_unlocked_{person_id}"
+def _db_scope(db_path: Path | str | None = None) -> str:
+    if db_path is None:
+        return "default"
+    return hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
 
 
-def is_profile_unlocked(person_id: int) -> bool:
+def _unlocked_key(person_id: int, db_path: Path | str | None = None) -> str:
+    return f"profile_unlocked_{_db_scope(db_path)}_{person_id}"
+
+
+def is_profile_unlocked(person_id: int, db_path: Path | str | None = None) -> bool:
     if st is None:
         return False
-    return bool(st.session_state.get(_unlocked_key(person_id), False))
+    return bool(st.session_state.get(_unlocked_key(person_id, db_path), False))
 
 
-def unlock_profile(person_id: int) -> None:
+def unlock_profile(person_id: int, db_path: Path | str | None = None) -> None:
     if st is not None:
-        st.session_state[_unlocked_key(person_id)] = True
+        st.session_state[_unlocked_key(person_id, db_path)] = True
 
 
-def lock_profile(person_id: int) -> None:
+def lock_profile(person_id: int, db_path: Path | str | None = None) -> None:
     if st is not None:
-        st.session_state[_unlocked_key(person_id)] = False
+        st.session_state[_unlocked_key(person_id, db_path)] = False
 
 
-def health_data_visible(person: dict | None, unlocked: bool | None = None) -> bool:
+def health_data_visible(person: dict | None, unlocked: bool | None = None, db_path: Path | str | None = None) -> bool:
     if not person:
         return False
     if not person.get("profile_password_enabled"):
         return True
     if unlocked is not None:
         return unlocked
-    return is_profile_unlocked(int(person["id"]))
+    return is_profile_unlocked(int(person["id"]), db_path=db_path)

@@ -7,6 +7,22 @@ from pathlib import Path
 import db
 
 
+def _parse_iso_date(value: object) -> date | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def get_person(person_id: int, db_path: Path | str = db.DB_PATH) -> dict | None:
     return db.get_record("people", person_id, db_path=db_path)
 
@@ -24,17 +40,7 @@ def update_person(person_id: int, data: dict, db_path: Path | str = db.DB_PATH) 
 
 
 def delete_person(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
-    for table in [
-        "allergies",
-        "medications",
-        "lab_results",
-        "health_entries",
-        "appointments",
-        "reminders",
-        "wearable_records",
-    ]:
-        for row in list_items(table, person_id, db_path=db_path):
-            db.delete_record(table, int(row["id"]), db_path=db_path)
+    db.delete_records_for_person(person_id, db_path=db_path)
     db.delete_record("people", person_id, db_path=db_path)
 
 
@@ -69,7 +75,8 @@ def active_medications(person_id: int, db_path: Path | str = db.DB_PATH) -> list
 
 
 def latest_labs(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
-    labs = list_items("lab_results", person_id, order_by="lab_date", descending=True, db_path=db_path)
+    labs = list_items("lab_results", person_id, order_by="id", descending=True, db_path=db_path)
+    labs = sorted(labs, key=lambda lab: (lab.get("lab_date") or "", int(lab.get("id") or 0)), reverse=True)
     latest_by_test = {}
     for lab in labs:
         latest_by_test.setdefault(lab["test_name"].lower(), lab)
@@ -101,12 +108,15 @@ def upcoming_appointments(person_id: int, db_path: Path | str = db.DB_PATH) -> l
 
 def overdue_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
     reminders = list_items("reminders", person_id, order_by="due_date", descending=False, db_path=db_path)
-    today = date.today().isoformat()
-    return [
-        reminder
-        for reminder in reminders
-        if reminder.get("due_date", "") < today and reminder.get("status") not in {"Completed", "Dismissed"}
-    ]
+    today = date.today()
+    result = []
+    for reminder in reminders:
+        if reminder.get("status") in {"Completed", "Dismissed"}:
+            continue
+        due_date = _parse_iso_date(reminder.get("due_date"))
+        if due_date and due_date < today:
+            result.append(reminder)
+    return result
 
 
 def due_soon_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
@@ -116,9 +126,8 @@ def due_soon_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list
     for reminder in reminders:
         if reminder.get("status") in {"Completed", "Dismissed"}:
             continue
-        try:
-            due_date = date.fromisoformat(reminder["due_date"])
-        except ValueError:
+        due_date = _parse_iso_date(reminder.get("due_date"))
+        if not due_date:
             continue
         if 0 <= (due_date - today).days <= 7:
             result.append(reminder)
@@ -133,7 +142,7 @@ def wearable_summary(person_id: int, db_path: Path | str = db.DB_PATH) -> list[d
 
     summaries = []
     for metric_type, values in groups.items():
-        numbers = [float(record["value"]) for record in values if record.get("value") is not None]
+        numbers = [number for number in (_safe_float(record.get("value")) for record in values) if number is not None]
         if not numbers:
             continue
         latest = values[0]

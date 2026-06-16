@@ -626,8 +626,49 @@ def page_header(title: str, description: str | None = None, kicker: str = "Local
     )
 
 
-def selected_profile_banner(person: dict | None) -> None:
+def is_locked_profile(person: dict | None, db_path: Path | str = db.DB_PATH) -> bool:
+    return bool(person and person.get("profile_password_enabled") and not security.health_data_visible(person, db_path=db_path))
+
+
+def profile_selection_label(person: dict, db_path: Path | str = db.DB_PATH) -> str:
+    if is_locked_profile(person, db_path):
+        return f"Protected profile (ID {person['id']})"
+    return f"{person['name']} (ID {person['id']})"
+
+
+def display_safe_people(people: list[dict], db_path: Path | str = db.DB_PATH) -> list[dict]:
+    rows = []
+    for person in people:
+        if not is_locked_profile(person, db_path):
+            rows.append(person)
+            continue
+        rows.append(
+            {
+                "id": person["id"],
+                "name": "Protected profile",
+                "profile_password_enabled": person.get("profile_password_enabled"),
+            }
+        )
+    return rows
+
+
+def locked_profiles(db_path: Path | str = db.DB_PATH) -> list[dict]:
+    return [person for person in services.list_people(db_path=db_path) if is_locked_profile(person, db_path)]
+
+
+def selected_profile_banner(person: dict | None, db_path: Path | str = db.DB_PATH) -> None:
     if not person:
+        return
+    if is_locked_profile(person, db_path):
+        st.markdown(
+            """
+            <div class="phr-profile-strip">
+                <span class="phr-profile-name">Protected profile</span>
+                <span class="phr-pill">Password protected</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         return
     details = []
     if person.get("relationship"):
@@ -785,7 +826,7 @@ def input_field(name: str, kind, default=None, key: str | None = None):
 
 def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> tuple[str, dict | None]:
     people = services.list_people(db_path=db_path)
-    names = [f"{person['name']} (ID {person['id']})" for person in people]
+    names = [profile_selection_label(person, db_path) for person in people]
     label = "Demo profile" if demo_mode else "Selected profile"
     key = "demo_selected_profile" if demo_mode else "selected_profile"
     selection = st.sidebar.selectbox(label, names or ["No profile selected"], key=key)
@@ -795,14 +836,14 @@ def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool =
     return selection, people[index]
 
 
-def unlock_screen(person: dict) -> None:
+def unlock_screen(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     st.warning(warning_label("This profile is password-protected."))
     if person.get("profile_password_hint"):
         st.caption(f"Password hint: {person['profile_password_hint']}")
     password = st.text_input("Password", type="password")
     if st.button(action_button_label("Unlock profile")):
         if security.verify_password(password, person.get("profile_password_hash") or ""):
-            security.unlock_profile(int(person["id"]))
+            security.unlock_profile(int(person["id"]), db_path=db_path)
             st.rerun()
         st.error("Incorrect password.")
 
@@ -848,17 +889,24 @@ def profile_form(existing: dict | None = None, key_prefix: str = "profile") -> d
 def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     st.subheader("Profile Password")
     if person.get("profile_password_enabled"):
+        if not security.health_data_visible(person, db_path=db_path):
+            unlock_screen(person, db_path=db_path)
+            return
         st.info("Password protection is enabled for this profile.")
         if st.button(action_button_label("Lock profile")):
-            security.lock_profile(int(person["id"]))
+            security.lock_profile(int(person["id"]), db_path=db_path)
             st.rerun()
+        confirm_remove = st.checkbox("Confirm password removal", key=f"confirm_remove_password_{person['id']}")
         if st.button(action_button_label("Remove password")):
+            if not confirm_remove:
+                st.error("Confirm password removal before continuing.")
+                return
             services.update_person(
                 int(person["id"]),
                 {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
                 db_path=db_path,
             )
-            security.unlock_profile(int(person["id"]))
+            security.unlock_profile(int(person["id"]), db_path=db_path)
             st.success("Password removed.")
             st.rerun()
     with st.form(f"password_form_{person['id']}"):
@@ -878,7 +926,7 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
                     },
                     db_path=db_path,
                 )
-                security.lock_profile(int(person["id"]))
+                security.lock_profile(int(person["id"]), db_path=db_path)
                 st.success("Password saved. Profile is now locked.")
 
 
@@ -918,7 +966,7 @@ def ai_settings() -> None:
 def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
     page_header("Profiles")
     people = services.list_people(db_path=db_path)
-    dataframe(people)
+    dataframe(display_safe_people(people, db_path))
     if demo_mode:
         st.info("Demo profiles are loaded from sample data and are separate from your saved profiles. Exit demo mode to manage real profiles.")
         return
@@ -968,7 +1016,7 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
         st.session_state[profile_edit_reset_key] = 0
     profile_options = [""] + [str(row["id"]) for row in people]
     profile_labels = {"": "Select a profile to edit"}
-    profile_labels.update({str(row["id"]): record_label(row) for row in people})
+    profile_labels.update({str(row["id"]): profile_selection_label(row, db_path) for row in people})
     selected_profile_id = st.selectbox(
         "Edit profile",
         profile_options,
@@ -979,8 +1027,13 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
         return
 
     row = next(item for item in people if str(item["id"]) == selected_profile_id)
+    if is_locked_profile(row, db_path):
+        selected_profile_banner(row, db_path=db_path)
+        unlock_screen(row, db_path=db_path)
+        return
     with st.form(f"edit_profile_{row['id']}"):
         data = profile_form(row, key_prefix=f"edit_profile_{row['id']}")
+        confirm_delete = st.checkbox("Confirm profile delete", key=f"confirm_delete_profile_{row['id']}")
         save_col, delete_col, cancel_col = st.columns([1, 1, 1])
         with save_col:
             submitted = st.form_submit_button(action_button_label("Save changes"))
@@ -992,6 +1045,9 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
             st.session_state[profile_edit_reset_key] += 1
             st.rerun()
         if deleted:
+            if not confirm_delete:
+                st.error("Confirm profile delete before continuing.")
+                return
             services.delete_person(int(row["id"]), db_path=db_path)
             st.warning(warning_label("Profile deleted."))
             st.session_state[profile_edit_reset_key] += 1
@@ -1111,6 +1167,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
     row = next(item for item in rows if str(item["id"]) == selected_record_id)
     with st.form(f"edit_{table}_{row['id']}"):
         data = {name: input_field(name, kind, row.get(name), key=f"edit_{table}_{row['id']}_{name}") for name, kind in config["fields"]}
+        confirm_delete = st.checkbox("Confirm record delete", key=f"confirm_delete_{table}_{row['id']}")
         if table == "reminders":
             save_col, complete_col, dismiss_col, delete_col, cancel_col = st.columns([1, 1, 1, 1, 1])
             with save_col:
@@ -1145,6 +1202,9 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if deleted:
+            if not confirm_delete:
+                st.error("Confirm record delete before continuing.")
+                return
             services.delete_item(table, int(row["id"]), db_path=db_path)
             st.warning(warning_label("Record deleted."))
             st.session_state[edit_reset_key] += 1
@@ -1227,34 +1287,70 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
 
     st.subheader("FHIR Interoperability")
     fhir_version = st.selectbox("FHIR version", fhir.SUPPORTED_FHIR_VERSIONS, key="fhir_version")
-    export_scope = "All profiles"
+    protected_locked = locked_profiles(db_path)
+    all_profile_export_available = not protected_locked
+    export_scope = "All profiles" if not person else "Selected profile"
     if person:
-        export_scope = st.selectbox("FHIR export scope", ["Selected profile", "All profiles"], key="fhir_export_scope")
+        options = ["Selected profile"]
+        if all_profile_export_available:
+            options.append("All profiles")
+        export_scope = st.selectbox("FHIR export scope", options, key="fhir_export_scope")
+    elif not all_profile_export_available:
+        st.warning(warning_label("Unlock protected profiles before exporting all-profile FHIR data."))
+        export_scope = None
     export_person_id = int(person["id"]) if person and export_scope == "Selected profile" else None
-    fhir_bundle = imports_exports.export_fhir_bundle(fhir_version, person_id=export_person_id, db_path=db_path)
-    st.download_button(
-        action_button_label(f"Export FHIR {fhir_version} Bundle"),
-        fhir_bundle,
-        file_name=f"phr_fhir_{fhir_version.lower()}_bundle.json",
-        mime=fhir.FHIR_MIME_TYPE,
-    )
+    if export_scope:
+        fhir_bundle = imports_exports.export_fhir_bundle(fhir_version, person_id=export_person_id, db_path=db_path)
+        st.download_button(
+            action_button_label(f"Export FHIR {fhir_version} Bundle"),
+            fhir_bundle,
+            file_name=f"phr_fhir_{fhir_version.lower()}_bundle.json",
+            mime=fhir.FHIR_MIME_TYPE,
+        )
     fhir_file = st.file_uploader("Import FHIR Bundle", type=["json"], key="fhir_bundle_upload")
     clear_existing_fhir = st.checkbox("Clear existing records before FHIR import", key="fhir_clear_existing")
+    confirm_clear_fhir = st.checkbox("Confirm FHIR clear import", key="confirm_fhir_clear") if clear_existing_fhir else True
     if fhir_file and st.button(action_button_label("Import FHIR Bundle")):
-        result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
-        st.write(result)
-        st.success("FHIR import completed.")
-        st.rerun()
+        if not confirm_clear_fhir:
+            st.error("Confirm FHIR clear import before continuing.")
+        else:
+            try:
+                result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
+            except (ValueError, json.JSONDecodeError) as exc:
+                st.error(f"FHIR import failed: {exc}")
+            else:
+                st.write(result)
+                st.success("FHIR import completed.")
+                st.rerun()
 
     st.subheader("JSON Backup")
-    backup = imports_exports.export_json_backup(db_path=db_path)
-    st.download_button(action_button_label("Export JSON backup"), backup, "phr_backup.json", "application/json")
+    backup_scope = "All profiles" if not person else "Selected profile"
+    if person:
+        options = ["Selected profile"]
+        if all_profile_export_available:
+            options.append("All profiles")
+        backup_scope = st.selectbox("JSON backup export scope", options, key="json_backup_scope")
+    elif not all_profile_export_available:
+        st.warning(warning_label("Unlock protected profiles before exporting all-profile JSON backup data."))
+        backup_scope = None
+    if backup_scope:
+        backup_person_id = int(person["id"]) if person and backup_scope == "Selected profile" else None
+        backup = imports_exports.export_json_backup(db_path=db_path, person_id=backup_person_id)
+        st.download_button(action_button_label("Export JSON backup"), backup, "phr_backup.json", "application/json")
     backup_file = st.file_uploader("Restore JSON backup", type=["json"])
     clear_existing = st.checkbox("Clear existing records before restore")
+    confirm_restore = st.checkbox("Confirm backup restore", key="confirm_backup_restore")
     if backup_file and st.button(action_button_label("Restore backup")):
-        imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
-        st.success("Backup restored.")
-        st.rerun()
+        if not confirm_restore:
+            st.error("Confirm backup restore before continuing.")
+        else:
+            try:
+                imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
+            except (ValueError, json.JSONDecodeError) as exc:
+                st.error(f"Backup restore failed: {exc}")
+            else:
+                st.success("Backup restored.")
+                st.rerun()
 
 
 def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
@@ -1294,14 +1390,18 @@ def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     )
     if st.button(action_button_label("Generate rule-based report")):
         st.markdown(insights.generate_rule_based_insights(context, focus_area))
+    ai_consent = st.checkbox("I understand selected profile context will be sent to Zhipu AI.", key="insights_ai_consent")
     if st.button(action_button_label("Generate AI safety-checked insights")):
-        result = insights.generate_ai_insight_result(context, focus_area)
-        if result.get("warning"):
-            st.warning(warning_label(result["warning"]))
-            if result.get("provider_details"):
-                with st.expander("Provider details"):
-                    st.code(result["provider_details"])
-        st.markdown(result["report"])
+        if not ai_consent:
+            st.error("Confirm AI context sharing before generating AI insights.")
+        else:
+            result = insights.generate_ai_insight_result(context, focus_area)
+            if result.get("warning"):
+                st.warning(warning_label(result["warning"]))
+                if result.get("provider_details"):
+                    with st.expander("Provider details"):
+                        st.code(result["provider_details"])
+            st.markdown(result["report"])
 
 
 def page_ai_chat(person: dict, db_path: Path | str = db.DB_PATH) -> None:
@@ -1328,7 +1428,7 @@ def main() -> None:
         _, person = selected_profile_sidebar(current_db_path, demo_mode=demo_mode)
         if person:
             label = "Demo profile" if demo_mode else "Active profile"
-            st.caption(f"{label}: {person['name']}")
+            st.caption(f"{label}: {profile_selection_label(person, current_db_path)}")
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)
@@ -1339,7 +1439,7 @@ def main() -> None:
         return
     if page == "Settings":
         page_header("Settings")
-        selected_profile_banner(person)
+        selected_profile_banner(person, db_path=current_db_path)
         if demo_mode:
             st.info("Profile password settings are not available in demo mode. Exit demo mode to manage saved profiles.")
         else:
@@ -1351,11 +1451,11 @@ def main() -> None:
             "production FHIR profiles, PDF export, and mobile interface."
         )
         return
-    if not security.health_data_visible(person):
-        unlock_screen(person)
+    if not security.health_data_visible(person, db_path=current_db_path):
+        unlock_screen(person, db_path=current_db_path)
         return
 
-    selected_profile_banner(person)
+    selected_profile_banner(person, db_path=current_db_path)
 
     if page == "Dashboard":
         page_dashboard(person, db_path=current_db_path)

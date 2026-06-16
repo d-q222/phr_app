@@ -125,16 +125,24 @@ def detect_possible_urgent_flags(context: dict) -> list[str]:
 
 
 def _average_metric(context: dict, metric_type: str) -> float | None:
-    values = [float(row["value"]) for row in context.get("wearables", []) if row.get("metric_type") == metric_type]
+    values = [_safe_float(row.get("value")) for row in context.get("wearables", []) if row.get("metric_type") == metric_type]
+    values = [value for value in values if value is not None]
     return round(sum(values) / len(values), 2) if values else None
 
 
 def _weight_change(context: dict) -> float | None:
-    weights = [row for row in context.get("wearables", []) if row.get("metric_type") == "Weight"]
+    weights = [row for row in context.get("wearables", []) if row.get("metric_type") == "Weight" and _safe_float(row.get("value")) is not None]
     if len(weights) < 2:
         return None
     weights = sorted(weights, key=lambda row: row.get("timestamp") or "")
-    return round(float(weights[-1]["value"]) - float(weights[0]["value"]), 2)
+    return round(_safe_float(weights[-1].get("value")) - _safe_float(weights[0].get("value")), 2)
+
+
+def _safe_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _truncate_text(value, limit: int = 80):

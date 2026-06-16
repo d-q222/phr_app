@@ -48,6 +48,7 @@ DEFAULT_CHAT_MODEL = "glm-5.1"
 DEFAULT_CHAT_MAX_TOKENS = 1200
 DEFAULT_CHAT_TEMPERATURE = 0.3
 CHAT_TIMEOUT_SECONDS = 45
+CHAT_CONTEXT_BYTE_LIMIT = int(os.getenv("ZHIPU_CHAT_CONTEXT_BYTE_LIMIT", "6000"))
 
 
 class AIChatError(Exception):
@@ -129,6 +130,54 @@ def _compact_row(row: dict, fields: list[str], text_limit: int = 180) -> dict:
         if value is not None:
             compacted[field] = value
     return compacted
+
+
+def _json_size(value: dict) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+
+
+def _fit_packet_to_budget(packet: dict, byte_limit: int = CHAT_CONTEXT_BYTE_LIMIT) -> dict:
+    fitted = json.loads(json.dumps(packet, ensure_ascii=False, default=str))
+    if _json_size(fitted) <= byte_limit:
+        return fitted
+
+    sections = [
+        "recent_health_entries",
+        "recent_labs",
+        "upcoming_reminders",
+        "overdue_reminders",
+        "appointments",
+        "wearable_summary",
+        "active_medications",
+        "allergies",
+    ]
+    for section in sections:
+        while len(fitted.get(section, [])) > 1 and _json_size(fitted) > byte_limit:
+            fitted[section].pop()
+
+    findings = fitted.get("existing_summaries_or_insights", {}).get("rule_based_findings", [])
+    while len(findings) > 1 and _json_size(fitted) > byte_limit:
+        findings.pop()
+
+    if _json_size(fitted) <= byte_limit:
+        return fitted
+
+    def shrink_strings(value):
+        if isinstance(value, dict):
+            return {key: shrink_strings(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [shrink_strings(item) for item in value]
+        if isinstance(value, str) and len(value) > 80:
+            return f"{value[:77]}..."
+        return value
+
+    fitted = shrink_strings(fitted)
+    if _json_size(fitted) > byte_limit:
+        fitted.pop("existing_summaries_or_insights", None)
+    if _json_size(fitted) > byte_limit:
+        for section in sections:
+            fitted[section] = fitted.get(section, [])[:1]
+    return fitted
 
 
 def _recent_labs(person_id: int, db_path: Path | str) -> list[dict]:
@@ -225,7 +274,7 @@ def _patient_context_packet(person_id: int, db_path: Path | str = db.DB_PATH) ->
             "trend_summary": insight_packet.get("trend_summary", {}),
         },
     }
-    return packet
+    return _fit_packet_to_budget(packet, CHAT_CONTEXT_BYTE_LIMIT)
 
 
 def build_patient_context(person_id: int, db_path: Path | str = db.DB_PATH) -> str:
@@ -396,6 +445,8 @@ def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
     st.session_state.setdefault(draft_key, "")
 
     st.warning(f"⚠️ {PRIVACY_NOTICE}")
+    consent_key = f"{history_key}_ai_consent"
+    ai_consent = st.checkbox("I understand selected profile context will be sent to Zhipu AI.", key=consent_key)
     _example_questions(draft_key)
 
     if st.button("🧹 Clear chat", key=f"clear_{history_key}"):
@@ -416,6 +467,9 @@ def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
         else st.text_input("Ask about the selected profile's health records", key=draft_key)
     )
     if not prompt:
+        return
+    if not ai_consent:
+        st.error("Confirm AI context sharing before sending a chat message.")
         return
 
     user_message = {"role": "user", "content": prompt}

@@ -110,3 +110,14 @@ CREATE TABLE IF NOT EXISTS wearable_records (
     created_at TEXT NOT NULL,
     FOREIGN KEY(person_id) REFERENCES people(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
+CREATE INDEX IF NOT EXISTS idx_allergies_person_allergen ON allergies(person_id, allergen);
+CREATE INDEX IF NOT EXISTS idx_medications_person_status_name ON medications(person_id, status, name);
+CREATE INDEX IF NOT EXISTS idx_lab_results_person_date ON lab_results(person_id, lab_date);
+CREATE INDEX IF NOT EXISTS idx_lab_results_person_test ON lab_results(person_id, test_name);
+CREATE INDEX IF NOT EXISTS idx_health_entries_person_date ON health_entries(person_id, entry_date);
+CREATE INDEX IF NOT EXISTS idx_appointments_person_date ON appointments(person_id, appointment_date);
+CREATE INDEX IF NOT EXISTS idx_reminders_person_due_status ON reminders(person_id, due_date, status);
+CREATE INDEX IF NOT EXISTS idx_wearable_records_person_timestamp ON wearable_records(person_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_wearable_records_person_metric ON wearable_records(person_id, metric_type);

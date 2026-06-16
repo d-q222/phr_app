@@ -40,7 +40,7 @@ ZHIPU_CONTEXT_BYTE_LIMIT = _env_int("ZHIPU_CONTEXT_BYTE_LIMIT", DEFAULT_ZHIPU_CO
 
 
 def zhipu_model_candidates() -> list[str]:
-    candidates = [ZHIPU_MODEL]
+    candidates = [ZHIPU_MODEL] if ZHIPU_MODEL else []
     candidates.extend(model.strip() for model in ZHIPU_FALLBACK_MODELS.split(",") if model.strip())
     deduped = []
     for model in candidates:
@@ -86,13 +86,17 @@ def _get_keychain_password() -> str | None:
 
 
 def get_zhipu_api_key() -> str | None:
+    for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
+        value = _get_streamlit_secret(name)
+        if value:
+            return value.strip()
+    for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
+        value = os.getenv(name)
+        if value:
+            return value.strip()
     keychain_value = _get_keychain_password()
     if keychain_value:
         return keychain_value
-    for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = os.getenv(name) or _get_streamlit_secret(name)
-        if value:
-            return value.strip()
     return None
 
 

@@ -6,6 +6,8 @@ import urllib.error
 from io import BytesIO, StringIO
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import db  # noqa: E402
@@ -30,6 +32,12 @@ def test_database_initializes(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+        index_names = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
     assert {
         "people",
         "allergies",
@@ -40,6 +48,12 @@ def test_database_initializes(tmp_path):
         "reminders",
         "wearable_records",
     }.issubset(table_names)
+    assert {
+        "idx_lab_results_person_date",
+        "idx_health_entries_person_date",
+        "idx_reminders_person_due_status",
+        "idx_wearable_records_person_timestamp",
+    }.issubset(index_names)
 
 
 def test_default_zhipu_setup_uses_compact_free_model():
@@ -47,6 +61,20 @@ def test_default_zhipu_setup_uses_compact_free_model():
     assert "glm-4.7-flash" in ai_config.zhipu_model_candidates()
     assert ai_config.ZHIPU_MAX_TOKENS <= 220
     assert ai_config.ZHIPU_CONTEXT_BYTE_LIMIT <= 1200
+
+
+def test_zhipu_api_key_prefers_streamlit_secret_then_env_then_keychain(monkeypatch):
+    monkeypatch.setattr(ai_config, "_get_streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
+    monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: "keychain-key")
+    monkeypatch.setenv("ZAI_API_KEY", "env-key")
+
+    assert ai_config.get_zhipu_api_key() == "secret-key"
+
+    monkeypatch.setattr(ai_config, "_get_streamlit_secret", lambda name: None)
+    assert ai_config.get_zhipu_api_key() == "env-key"
+
+    monkeypatch.delenv("ZAI_API_KEY")
+    assert ai_config.get_zhipu_api_key() == "keychain-key"
 
 
 def test_display_dataframe_uses_readable_column_titles_and_hides_internal_fields():
@@ -187,6 +215,137 @@ def test_person_medication_active_filter_lab_latest_password_reminder_insights_b
     assert result["skipped"] == []
 
 
+def test_json_restore_upserts_existing_records_without_deleting_children(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Original Name"}, db_path=db_path)
+    services.create_item(
+        "medications",
+        person_id,
+        {"name": "Med A", "status": "Active"},
+        db_path=db_path,
+    )
+
+    backup = json.loads(imports_exports.export_json_backup(db_path=db_path))
+    backup["tables"]["people"][0]["name"] = "Restored Name"
+
+    imports_exports.import_json_backup(json.dumps(backup), clear_existing=False, db_path=db_path)
+
+    assert services.get_person(person_id, db_path=db_path)["name"] == "Restored Name"
+    meds = services.list_items("medications", person_id, db_path=db_path)
+    assert len(meds) == 1
+    assert meds[0]["name"] == "Med A"
+
+
+def test_json_restore_rejects_malformed_backup_shapes(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+
+    with pytest.raises(ValueError, match="Backup JSON must be an object"):
+        imports_exports.import_json_backup("[]", db_path=db_path)
+
+    with pytest.raises(ValueError, match="tables"):
+        imports_exports.import_json_backup('{"tables": []}', db_path=db_path)
+
+    with pytest.raises(ValueError, match="must be a list"):
+        imports_exports.import_json_backup('{"tables": {"people": {}}}', db_path=db_path)
+
+    with pytest.raises(ValueError, match="non-object"):
+        imports_exports.import_json_backup('{"tables": {"people": [1]}}', db_path=db_path)
+
+
+def test_invalid_reminder_dates_are_skipped_in_due_calculations(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Reminder Person"}, db_path=db_path)
+    services.create_item(
+        "reminders",
+        person_id,
+        {"reminder_type": "Lab", "title": "Bad date", "due_date": "not-a-date", "status": "Upcoming"},
+        db_path=db_path,
+    )
+    services.create_item(
+        "reminders",
+        person_id,
+        {"reminder_type": "Lab", "title": "Overdue", "due_date": "2020-01-01", "status": "Upcoming"},
+        db_path=db_path,
+    )
+
+    assert [row["title"] for row in services.overdue_reminders(person_id, db_path=db_path)] == ["Overdue"]
+    assert services.due_soon_reminders(person_id, db_path=db_path) == []
+
+
+def test_delete_person_removes_child_records(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Delete Me"}, db_path=db_path)
+    services.create_item("allergies", person_id, {"allergen": "Dust"}, db_path=db_path)
+    services.create_item("medications", person_id, {"name": "Med A"}, db_path=db_path)
+    services.create_item("lab_results", person_id, {"test_name": "A1c", "lab_date": "2026-01-01"}, db_path=db_path)
+
+    services.delete_person(person_id, db_path=db_path)
+
+    assert services.get_person(person_id, db_path=db_path) is None
+    assert db.list_records("allergies", person_id=person_id, db_path=db_path) == []
+    assert db.list_records("medications", person_id=person_id, db_path=db_path) == []
+    assert db.list_records("lab_results", person_id=person_id, db_path=db_path) == []
+
+
+def test_profile_unlock_state_is_scoped_by_database(monkeypatch, tmp_path):
+    fake_streamlit = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(security, "st", fake_streamlit)
+    person = {"id": 1, "profile_password_enabled": 1}
+    first_db = tmp_path / "first.db"
+    second_db = tmp_path / "second.db"
+
+    security.unlock_profile(1, db_path=first_db)
+
+    assert security.health_data_visible(person, db_path=first_db)
+    assert not security.health_data_visible(person, db_path=second_db)
+
+
+def test_locked_profiles_are_masked_in_display_helpers(monkeypatch, tmp_path):
+    fake_streamlit = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(security, "st", fake_streamlit)
+    locked = {
+        "id": 7,
+        "name": "Private Person",
+        "date_of_birth": "1990-01-01",
+        "sex": "Female",
+        "relationship": "Self",
+        "emergency_contact": "Private Contact",
+        "notes": "Private note",
+        "profile_password_enabled": 1,
+        "profile_password_hint": "hint",
+    }
+
+    assert app.profile_selection_label(locked, tmp_path / "phr.db") == "Protected profile (ID 7)"
+    safe_rows = app.display_safe_people([locked], tmp_path / "phr.db")
+
+    assert safe_rows == [
+        {
+            "id": 7,
+            "name": "Protected profile",
+            "profile_password_enabled": 1,
+        }
+    ]
+
+
+def test_selected_json_backup_excludes_other_profiles(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    selected_id = services.create_person({"name": "Selected"}, db_path=db_path)
+    other_id = services.create_person({"name": "Other"}, db_path=db_path)
+    services.create_item("medications", selected_id, {"name": "Selected Med"}, db_path=db_path)
+    services.create_item("medications", other_id, {"name": "Other Med"}, db_path=db_path)
+
+    backup = json.loads(imports_exports.export_json_backup(db_path=db_path, person_id=selected_id))
+
+    assert [person["name"] for person in backup["tables"]["people"]] == ["Selected"]
+    assert [med["name"] for med in backup["tables"]["medications"]] == ["Selected Med"]
+    assert "Other" not in json.dumps(backup)
+
+
 def test_demo_database_loads_sample_data_without_touching_real_profiles(tmp_path):
     real_db_path = tmp_path / "real.db"
     demo_db_path = tmp_path / "demo.db"
@@ -284,12 +443,105 @@ def test_fhir_r4_and_r5_export_and_import_round_trip(tmp_path):
     assert result["skipped"] == []
     assert imported_person["name"] == "FHIR Person"
     assert services.list_items("allergies", int(imported_person["id"]), db_path=target_db_path)[0]["allergen"] == "Peanuts"
-    assert services.list_items("medications", int(imported_person["id"]), db_path=target_db_path)[0]["name"] == "Med A"
+    imported_medication = services.list_items("medications", int(imported_person["id"]), db_path=target_db_path)[0]
+    assert imported_medication["name"] == "Med A"
+    assert imported_medication["dose"] == "10 mg"
+    assert imported_medication["frequency"] == "Daily"
     assert services.list_items("lab_results", int(imported_person["id"]), db_path=target_db_path)[0]["test_name"] == "LDL"
     assert services.list_items("health_entries", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Headache"
     assert services.list_items("appointments", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Primary care follow-up"
     assert services.list_items("reminders", int(imported_person["id"]), db_path=target_db_path)[0]["title"] == "Repeat LDL"
     assert services.list_items("wearable_records", int(imported_person["id"]), db_path=target_db_path)[0]["metric_type"] == "Steps"
+
+
+def test_fhir_import_skips_bad_patient_references_and_missing_required_fields(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "One"}]}},
+            {"resource": {"resourceType": "Patient", "id": "p2", "name": [{"text": "Two"}]}},
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "bad-ref",
+                    "category": [{"text": "Laboratory"}],
+                    "code": {"text": "LDL"},
+                    "subject": {"reference": "Patient/missing"},
+                    "effectiveDateTime": "2026-01-01",
+                    "valueQuantity": {"value": 120},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "missing-date",
+                    "category": [{"text": "Laboratory"}],
+                    "code": {"text": "A1c"},
+                    "subject": {"reference": "Patient/p1"},
+                    "valueQuantity": {"value": 5.6},
+                }
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "missing-value",
+                    "category": [{"text": "Wearable"}],
+                    "code": {"text": "Steps"},
+                    "subject": {"reference": "Patient/p1"},
+                    "effectiveDateTime": "2026-01-02",
+                }
+            },
+        ],
+    }
+
+    result = fhir.import_bundle(json.dumps(bundle), db_path=db_path)
+
+    assert result["imported"]["people"] == 2
+    assert result["imported"]["lab_results"] == 0
+    assert result["imported"]["wearable_records"] == 0
+    assert {item["id"] for item in result["skipped"]} == {"bad-ref", "missing-date", "missing-value"}
+
+
+def test_latest_labs_tie_breaks_same_day_by_newer_record(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Lab Person"}, db_path=db_path)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "A1c", "result_value": "5.6", "lab_date": "2026-01-01"},
+        db_path=db_path,
+    )
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "A1c", "result_value": "5.9", "lab_date": "2026-01-01"},
+        db_path=db_path,
+    )
+
+    assert services.latest_labs(person_id, db_path=db_path)[0]["result_value"] == "5.9"
+
+
+def test_json_restore_rejects_semantically_invalid_rows(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = {
+        "tables": {
+            "medications": [{"person_id": 1, "name": "Med", "status": "Invalid"}],
+            "lab_results": [{"person_id": 1, "test_name": "A1c", "flag": "Invalid", "lab_date": "2026-01-01"}],
+        }
+    }
+
+    with pytest.raises(ValueError, match="medications.*Medication status"):
+        imports_exports.import_json_backup(json.dumps(payload), db_path=db_path)
+
+
+def test_malformed_wearable_values_do_not_crash_summaries():
+    context = {"wearables": [{"metric_type": "Steps", "value": "bad"}, {"metric_type": "Weight", "value": "bad"}]}
+
+    assert insights.compact_context_for_ai(context)["trend_summary"] == {}
 
 
 def test_ai_insight_prompt_requires_safe_unobtrusive_suggestions(monkeypatch):
@@ -417,6 +669,37 @@ def test_ai_chat_context_is_scoped_to_selected_person(tmp_path):
     assert "Peanuts" not in context_text
 
 
+def test_ai_chat_context_is_byte_limited(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Selected Person", "notes": "profile " * 400}, db_path=db_path)
+    for index in range(12):
+        services.create_item(
+            "health_entries",
+            person_id,
+            {
+                "entry_date": f"2026-01-{index + 1:02d}",
+                "title": f"Entry {index}",
+                "body_system": "General",
+                "note": "long note " * 200,
+            },
+            db_path=db_path,
+        )
+
+    monkeypatch.setattr(ai_chat, "CHAT_CONTEXT_BYTE_LIMIT", 2500)
+    context_text = ai_chat.build_patient_context(person_id, db_path=db_path)
+
+    assert len(context_text.encode("utf-8")) <= 3000
+    assert "Selected Person" in context_text
+
+
+def test_zhipu_model_candidates_ignore_blank_primary(monkeypatch):
+    monkeypatch.setattr(ai_config, "ZHIPU_MODEL", "")
+    monkeypatch.setattr(ai_config, "ZHIPU_FALLBACK_MODELS", "fallback-a, fallback-b")
+
+    assert ai_config.zhipu_model_candidates() == ["fallback-a", "fallback-b"]
+
+
 def test_ai_chat_api_key_prefers_streamlit_secret_then_env(monkeypatch):
     monkeypatch.setattr(ai_chat, "_streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
     monkeypatch.setenv("ZAI_API_KEY", "env-key")
@@ -514,3 +797,59 @@ def test_ai_chat_falls_back_when_primary_model_has_no_resource_package(monkeypat
 
     assert answer == "Fallback answer"
     assert seen_models == ["glm-5.1", "glm-4.5-flash"]
+
+
+def test_ai_chat_maps_auth_and_invalid_responses(monkeypatch):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "glm-5.1")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "")
+
+    def fake_auth_error(request, timeout):
+        body = BytesIO(json.dumps({"error": {"code": "401", "message": "bad key"}}).encode("utf-8"))
+        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", hdrs=None, fp=body)
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_auth_error)
+    with pytest.raises(ai_chat.MissingAPIKeyError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+    class InvalidJsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b"not-json"
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", lambda request, timeout: InvalidJsonResponse())
+    with pytest.raises(ai_chat.InvalidAIResponseError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+
+def test_insight_urlopen_timeout_retries_without_real_sleep(monkeypatch):
+    attempts = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise socket.timeout("slow")
+        return FakeResponse()
+
+    monkeypatch.setattr(insights.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(insights.time, "sleep", lambda seconds: None)
+
+    payload = insights._call_zhipu_chat_completion(urllib.request.Request("https://example.invalid"))
+
+    assert attempts["count"] == 3
+    assert payload["choices"][0]["message"]["content"] == "ok"

@@ -161,6 +161,15 @@ def delete_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> 
         connection.execute(f"DELETE FROM {table} WHERE id = ?", (record_id,))
 
 
+def delete_records_for_person(person_id: int, db_path: Path | str = DB_PATH) -> None:
+    """Delete all child records for a profile in one transaction."""
+    with get_connection(db_path) as connection:
+        for table in reversed(TABLES):
+            if table == "people":
+                continue
+            connection.execute(f"DELETE FROM {table} WHERE person_id = ?", (person_id,))
+
+
 def get_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> dict | None:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
@@ -242,18 +251,44 @@ def export_all_tables(db_path: Path | str = DB_PATH) -> dict:
     return {table: list_records(table, order_by="id", descending=False, db_path=db_path) for table in TABLES}
 
 
+def _import_row_sql(table: str, values: dict) -> tuple[str, list]:
+    columns = list(values)
+    placeholders = ", ".join("?" for _ in columns)
+    column_sql = ", ".join(columns)
+    params = [values[column] for column in columns]
+
+    if "id" not in values:
+        return f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})", params
+
+    update_columns = [column for column in columns if column != "id"]
+    if not update_columns:
+        return f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders}) ON CONFLICT(id) DO NOTHING", params
+
+    assignments = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
+    sql = (
+        f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders}) "
+        f"ON CONFLICT(id) DO UPDATE SET {assignments}"
+    )
+    return sql, params
+
+
 def import_all_tables(payload: dict, clear_existing: bool = False, db_path: Path | str = DB_PATH) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Backup payload tables must be a JSON object.")
+
     with get_connection(db_path) as connection:
         if clear_existing:
             for table in reversed(TABLES):
                 connection.execute(f"DELETE FROM {table}")
         for table in TABLES:
-            for row in payload.get(table, []):
+            rows = payload.get(table, [])
+            if not isinstance(rows, list):
+                raise ValueError(f"Backup table '{table}' must be a list of records.")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError(f"Backup table '{table}' contains a non-object record.")
                 values = {key: value for key, value in row.items() if key in {"id", *TABLE_COLUMNS[table]}}
                 if not values:
                     continue
-                columns = list(values)
-                placeholders = ", ".join("?" for _ in columns)
-                column_sql = ", ".join(columns)
-                sql = f"INSERT OR REPLACE INTO {table} ({column_sql}) VALUES ({placeholders})"
-                connection.execute(sql, [values[column] for column in columns])
+                sql, params = _import_row_sql(table, values)
+                connection.execute(sql, params)

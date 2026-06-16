@@ -9,7 +9,33 @@ import pandas as pd
 import db
 import fhir
 import services
-from validation import normalize_optional_number, validate_lab, validate_wearable
+from validation import (
+    is_blank,
+    normalize_optional_number,
+    validate_allergy,
+    validate_appointment,
+    validate_health_entry,
+    validate_lab,
+    validate_medication,
+    validate_person,
+    validate_reminder,
+    validate_wearable,
+)
+
+
+BACKUP_VALIDATORS = {
+    "people": validate_person,
+    "allergies": validate_allergy,
+    "medications": validate_medication,
+    "lab_results": validate_lab,
+    "health_entries": validate_health_entry,
+    "appointments": validate_appointment,
+    "reminders": validate_reminder,
+    "wearable_records": validate_wearable,
+}
+
+
+SYSTEM_COLUMNS = {"id", "person_id", "created_at", "updated_at"}
 
 
 def import_labs_csv(file_obj, person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
@@ -62,13 +88,62 @@ def import_wearables_csv(file_obj, person_id: int, db_path: Path | str = db.DB_P
     return {"imported": imported, "skipped": skipped}
 
 
-def export_json_backup(db_path: Path | str = db.DB_PATH) -> str:
-    return json.dumps({"version": 1, "tables": db.export_all_tables(db_path=db_path)}, indent=2)
+def _person_scoped_tables(person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+    person = services.get_person(person_id, db_path=db_path)
+    tables = {table: [] for table in db.TABLES}
+    if not person:
+        return tables
+    tables["people"] = [person]
+    for table in db.TABLES:
+        if table == "people":
+            continue
+        tables[table] = services.list_items(table, person_id, order_by="id", descending=False, db_path=db_path)
+    return tables
+
+
+def export_json_backup(db_path: Path | str = db.DB_PATH, person_id: int | None = None) -> str:
+    tables = _person_scoped_tables(person_id, db_path=db_path) if person_id is not None else db.export_all_tables(db_path=db_path)
+    return json.dumps({"version": 1, "tables": tables}, indent=2)
+
+
+def _validate_backup_tables(tables: dict) -> dict:
+    validated = {}
+    for table, rows in tables.items():
+        if table not in db.TABLES:
+            validated[table] = rows
+            continue
+        if not isinstance(rows, list):
+            raise ValueError(f"Backup table '{table}' must be a list of records.")
+        validated_rows = []
+        for index, row in enumerate(rows, start=1):
+            if not isinstance(row, dict):
+                raise ValueError(f"Backup table '{table}' contains a non-object record.")
+            values = {key: value for key, value in row.items() if key in {"id", *db.TABLE_COLUMNS[table]}}
+            data = {key: value for key, value in values.items() if key not in SYSTEM_COLUMNS}
+            errors = BACKUP_VALIDATORS[table](data)
+            if errors:
+                raise ValueError(f"Backup table '{table}' row {index} is invalid: {'; '.join(errors)}")
+            if table == "lab_results":
+                for key in ("numeric_value", "reference_low", "reference_high"):
+                    if key in values and not is_blank(values[key]):
+                        values[key] = normalize_optional_number(values[key])
+            elif table == "wearable_records" and "value" in values and not is_blank(values["value"]):
+                values["value"] = float(values["value"])
+            elif table == "health_entries" and "severity" in values and not is_blank(values["severity"]):
+                values["severity"] = int(values["severity"])
+            validated_rows.append(values)
+        validated[table] = validated_rows
+    return validated
 
 
 def import_json_backup(payload_text: str, clear_existing: bool = False, db_path: Path | str = db.DB_PATH) -> None:
     payload = json.loads(payload_text)
+    if not isinstance(payload, dict):
+        raise ValueError("Backup JSON must be an object.")
     tables = payload.get("tables", payload)
+    if not isinstance(tables, dict):
+        raise ValueError("Backup JSON 'tables' must be an object.")
+    tables = _validate_backup_tables(tables)
     db.import_all_tables(tables, clear_existing=clear_existing, db_path=db_path)
 
 

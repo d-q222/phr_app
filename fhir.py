@@ -6,11 +6,33 @@ from pathlib import Path
 
 import db
 import services
-from validation import normalize_optional_number
+from validation import (
+    validate_allergy,
+    validate_appointment,
+    validate_health_entry,
+    validate_lab,
+    validate_medication,
+    validate_reminder,
+    validate_wearable,
+    normalize_optional_number,
+)
 
 
 SUPPORTED_FHIR_VERSIONS = ["R4", "R5"]
 FHIR_MIME_TYPE = "application/fhir+json"
+DOSE_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-dose"
+FREQUENCY_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-frequency"
+
+
+FHIR_VALIDATORS = {
+    "allergies": validate_allergy,
+    "medications": validate_medication,
+    "lab_results": validate_lab,
+    "health_entries": validate_health_entry,
+    "appointments": validate_appointment,
+    "reminders": validate_reminder,
+    "wearable_records": validate_wearable,
+}
 
 
 def normalize_fhir_version(version: str) -> str:
@@ -74,7 +96,8 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         for key in _reference_keys(resource):
             patient_map[key] = person_id
 
-    fallback_person_id = next(iter(patient_map.values()), None)
+    imported_patient_ids = list(dict.fromkeys(patient_map.values()))
+    fallback_person_id = imported_patient_ids[0] if len(imported_patient_ids) == 1 else None
     for resource in resources:
         resource_type = resource.get("resourceType")
         if resource_type == "Patient":
@@ -86,6 +109,10 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         table, data = _local_record_from_resource(resource)
         if not table:
             skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "Unsupported FHIR resource."})
+            continue
+        errors = FHIR_VALIDATORS[table](data)
+        if errors:
+            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "; ".join(errors)})
             continue
         services.create_item(table, person_id, data, db_path=db_path)
         imported[table] += 1
@@ -172,6 +199,11 @@ def _allergy_resource(allergy: dict, version: str) -> dict:
 
 
 def _medication_statement_resource(medication: dict, version: str) -> dict:
+    extensions = []
+    if medication.get("dose"):
+        extensions.append({"url": DOSE_EXTENSION_URL, "valueString": str(medication["dose"])})
+    if medication.get("frequency"):
+        extensions.append({"url": FREQUENCY_EXTENSION_URL, "valueString": str(medication["frequency"])})
     resource = {
         "resourceType": "MedicationStatement",
         "id": _id("medication", medication),
@@ -180,6 +212,7 @@ def _medication_statement_resource(medication: dict, version: str) -> dict:
         "effectivePeriod": _period(medication.get("start_date"), medication.get("end_date")),
         "dosage": [{"text": " ".join(part for part in [medication.get("dose"), medication.get("frequency")] if part)}],
         "note": _note(medication.get("notes")),
+        "extension": extensions,
     }
     if version == "R5":
         resource["medication"] = {"concept": _codeable_text(medication.get("name"))}
@@ -443,6 +476,8 @@ def _resolve_patient_id(resource: dict, patient_map: dict[str, int], fallback_pe
         return patient_map[reference]
     if reference and reference.split("/")[-1] in patient_map:
         return patient_map[reference.split("/")[-1]]
+    if reference:
+        return None
     return fallback_person_id
 
 
@@ -516,10 +551,12 @@ def _medication_from_resource(resource: dict) -> dict:
     elif resource.get("reason"):
         reason = _text_from_codeable_reference(resource["reason"][0])
     dosage = resource.get("dosage", [{}])[0].get("text") if resource.get("dosage") else None
+    dose = _extension_value(resource, DOSE_EXTENSION_URL) or dosage
+    frequency = _extension_value(resource, FREQUENCY_EXTENSION_URL)
     return {
         "name": _text_from_codeable(medication) or "Unknown medication",
-        "dose": dosage,
-        "frequency": None,
+        "dose": dose,
+        "frequency": frequency,
         "start_date": effective.get("start"),
         "end_date": effective.get("end"),
         "status": _medication_status_from_fhir(resource.get("status"), effective),
@@ -551,7 +588,7 @@ def _lab_from_observation(resource: dict) -> dict:
         "reference_low": normalize_optional_number(low) if low is not None else None,
         "reference_high": normalize_optional_number(high) if high is not None else None,
         "flag": (_text_from_codeable(resource.get("interpretation", [{}])[0]) if resource.get("interpretation") else None) or "Unknown",
-        "lab_date": _date_part(resource.get("effectiveDateTime")) or db.now_iso()[:10],
+        "lab_date": _date_part(resource.get("effectiveDateTime")),
         "notes": _notes_text(resource.get("note")),
     }
 
@@ -560,9 +597,9 @@ def _wearable_from_observation(resource: dict) -> dict:
     quantity = resource.get("valueQuantity") or {}
     return {
         "metric_type": _text_from_codeable(resource.get("code")) or "Other",
-        "value": float(quantity.get("value") or 0),
+        "value": quantity.get("value"),
         "unit": quantity.get("unit"),
-        "timestamp": _date_part(resource.get("effectiveDateTime")) or db.now_iso()[:10],
+        "timestamp": _date_part(resource.get("effectiveDateTime")),
         "source": resource.get("device", {}).get("display"),
     }
 
@@ -575,7 +612,7 @@ def _health_entry_from_observation(resource: dict) -> dict:
     categories = [_text_from_codeable(item) for item in resource.get("category", [])]
     body_system = next((item for item in categories if item and item != "Survey"), None)
     return {
-        "entry_date": _date_part(resource.get("effectiveDateTime")) or db.now_iso()[:10],
+        "entry_date": _date_part(resource.get("effectiveDateTime")),
         "title": _text_from_codeable(resource.get("code")) or "FHIR observation",
         "body_system": body_system,
         "body_part": _text_from_codeable(resource.get("bodySite")),
@@ -592,7 +629,7 @@ def _appointment_from_resource(resource: dict) -> dict:
         if not actor.get("reference", "").startswith("Patient/") and actor.get("display"):
             provider = actor["display"]
     return {
-        "appointment_date": _date_part(requested_period.get("start")) or db.now_iso()[:10],
+        "appointment_date": _date_part(requested_period.get("start")),
         "title": resource.get("description") or "FHIR appointment",
         "provider": provider,
         "location": resource.get("supportingInformation", [{}])[0].get("display") if resource.get("supportingInformation") else None,
@@ -606,7 +643,7 @@ def _task_from_resource(resource: dict) -> dict:
     return {
         "reminder_type": _text_from_codeable(resource.get("code")) or "FHIR Task",
         "title": resource.get("description") or "FHIR task",
-        "due_date": _date_part(period.get("end") or period.get("start")) or db.now_iso()[:10],
+        "due_date": _date_part(period.get("end") or period.get("start")),
         "status": _task_status_from_fhir(resource.get("status")),
         "notes": _notes_text(resource.get("note")),
     }
@@ -642,6 +679,13 @@ def _notes_text(notes: list[dict] | None) -> str | None:
         return None
     values = [note.get("text") for note in notes if note.get("text")]
     return "\n".join(values) if values else None
+
+
+def _extension_value(resource: dict, url: str) -> str | None:
+    for extension in resource.get("extension", []):
+        if extension.get("url") == url and extension.get("valueString"):
+            return str(extension["valueString"])
+    return None
 
 
 def _date_part(value: str | None) -> str | None:
