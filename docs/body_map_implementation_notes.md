@@ -139,3 +139,67 @@ Persistent user overrides are deferred until their storage and review workflow i
 ### Next Step
 
 Part 2 — implement selected-profile, normalized body-area record retrieval using this mapping layer.
+
+## Part 2 — Body-Area Record Retrieval
+
+### Goal
+
+Retrieve every existing record relevant to one canonical body part for one selected profile, with a
+single normalized result per source record and no medical interpretation.
+
+### Files Changed
+
+- `body_map_services.py`: added profile-scoped retrieval, source adapters, stored-mapping precedence,
+  canonical normalization, and deduplication by construction.
+- `tests/test_body_map_services.py`: added Part 2 isolation, mapping, boundary, normalization, adapter,
+  deduplication, and error regression tests.
+- `docs/body_map_implementation_notes.md`: recorded the completed Part 2 implementation.
+
+### Key Functions / Classes Added
+
+- `NormalizedBodyRecord`: typed normalized shape shared by all retrieved source records.
+- `get_records_for_body_part(person_id, body_part_id, db_path)`: queries every supported source table
+  with the selected `person_id`, applies explicit or curated mappings, and returns matching records.
+
+### Data Model / Schema Changes
+
+None. Retrieval reuses the existing `lab_results`, `medications`, `health_entries`, `appointments`,
+and `wearable_records` tables. Only `health_entries` currently stores explicit body-part/body-system
+fields.
+
+### Assumptions
+
+- An exact, canonicalizable `health_entries.body_part` or `body_system` value is an explicit stored
+  mapping and takes precedence over a conflicting curated name mapping.
+- A stored system expands only to body parts for which that system is primary. Related systems do not
+  pull records into an organ.
+- Tables without stored body-area fields participate only when their record-name field matches a Part
+  1 curated mapping exactly or through a Part 1 alias.
+
+### Automated Tests
+
+- `.venv/bin/python -m pytest -q tests/test_body_map_services.py tests/test_body_map_config.py`: 65
+  passed.
+- `./scripts/verify.sh`: compile checks passed; 96 tests passed.
+
+### How to Test Manually
+
+1. Initialize a temporary database and create two fictional profiles.
+2. Add an LDL lab and a cardiovascular health entry for the first profile, plus similar records for
+   the second profile.
+3. Call `get_records_for_body_part(first_profile_id, "heart", db_path=temp_db_path)`.
+4. Confirm only the first profile's heart records appear and every result has the normalized fields.
+5. Add an unknown lab name and confirm it does not appear under `heart`.
+6. Add a respiratory-only health entry and confirm it appears under `lungs` but not `heart`.
+
+### Known Limitations
+
+- There is no UI in Part 2.
+- Medications, appointments, and wearables have no existing stored body-area columns, so most such
+  records remain unmapped until a later explicit mapping design exists; no schema was invented here.
+- Mapping uses exact canonical IDs, existing display labels, and Part 1 aliases only; there is no
+  fuzzy, inferred, or AI mapping.
+
+### Next Step
+
+Part 3 — build conservative current and historical summaries from these normalized records.
