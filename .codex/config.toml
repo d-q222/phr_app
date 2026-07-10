@@ -1,0 +1,11 @@
+# Project-scoped Codex settings. Codex loads this only after the repository is trusted.
+# The main-thread model is intentionally not pinned here; choose Sol/Terra in the UI or CLI
+# according to task difficulty. Specialized subagents pin cheaper models in .codex/agents/.
+
+[agents]
+max_threads = 4
+max_depth = 1
+interrupt_message = false
+
+[features]
+multi_agent = true
