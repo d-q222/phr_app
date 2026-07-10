@@ -203,3 +203,104 @@ fields.
 ### Next Step
 
 Part 3 — build conservative current and historical summaries from these normalized records.
+
+## Part 3 — Conservative Health Summary
+
+### Goal
+
+Convert profile-scoped Part 2 normalized records into a pure, conservative body-area overview that
+separates current source flags, historical source flags, uncertain mappings, and unknown chronology
+without interpreting medical values.
+
+### Files Changed
+
+- `body_map_summary.py`: added the typed summary model, flag normalization, date grouping, and status
+  selection.
+- `tests/test_body_map_summary.py`: added focused Part 3 status, chronology, safety, and immutability
+  tests.
+- `docs/body_map_implementation_notes.md`: recorded the completed Part 3 behavior and limitations.
+
+### Public Interfaces
+
+- `BodyPartHealthSummary`: immutable summary shape containing the approved status, factual reason,
+  latest/current/historical records, uncertain mappings, unknown-chronology records, counts, and
+  latest relevant date.
+- `summarize_body_part_health(records)`: summarizes an already profile-scoped sequence of
+  `NormalizedBodyRecord` values without database, UI, SVG, or AI access.
+
+### Status Rules
+
+- No records produce `No data`.
+- Records without usable source flags produce `Data available`.
+- A latest or unknown-date source-flagged record produces `Needs review`.
+- An older source-flagged record with no current flag produces `Historical flag found`.
+- Usable source flags with no recognized abnormal flag produce `No flagged items`.
+- `Mapping uncertain` takes precedence only when every latest or unknown-date summary-driving record
+  has a low-confidence mapping. Mixed-confidence summaries retain their evidence-based status and
+  explicitly report the low-confidence record count.
+
+### Current vs. Historical Logic
+
+Comparable records use normalized record name plus record type. The newest parseable date in each
+group is current; ties at that date remain current. Older source-flagged records remain in
+`historical_flagged_records`, including when a newer unflagged record exists. Records with unknown
+chronology are kept separately and never described as current or historical.
+
+### Flag Normalization
+
+- `abnormal`, `high`/`H`, `low`/`L`, and `critical` are recognized case-insensitively.
+- `positive` is recognized only when it came from the `lab_results.flag` source field.
+- `normal`, `within range`, `within normal range`, `negative`, and `not detected` are usable
+  non-abnormal source flags.
+- Blank, unknown, unrecognized, medication-status, and appointment-status values are not interpreted.
+- Raw values and reference ranges never create a flag.
+
+### Date and Grouping Rules
+
+ISO dates and timestamps are parsed with the Python standard library and sorted newest first with
+stable source-table and record-ID tie-breakers. Missing or malformed dates do not crash the summary;
+they appear in `chronology_unknown_records` after dated records and cannot become current or
+historical. `latest_relevant_date` retains the source date string for the newest parseable record.
+
+### Assumptions
+
+- Input records come from one selected-person Part 2 retrieval and are already profile-isolated.
+- Only `mapping_confidence == "low"` is uncertain; medium confidence remains usable.
+- A lab `positive` flag is reported as source-provided context, not interpreted as a diagnosis.
+
+### Tests Added
+
+- `tests/test_body_map_summary.py` covers every approved status, current/historical separation,
+  comparable-key grouping, flag variants, lab-only `positive`, raw-value non-interpretation, missing
+  dates, stable sorting, counts, cautious language, and input immutability.
+- `.venv/bin/python -m pytest -q tests/test_body_map_summary.py`: 28 passed.
+- `.venv/bin/python -m pytest -q tests/test_body_map_config.py tests/test_body_map_services.py tests/test_body_map_summary.py`:
+  93 passed.
+- `./scripts/verify.sh`: compile checks passed; 124 tests passed.
+
+### How to Test Manually
+
+1. Import `summarize_body_part_health` and pass an empty tuple; confirm `No data`.
+2. Pass fictional normalized records for one name with an older `high` flag and a newer blank flag;
+   confirm `Historical flag found`, with the newer record current and the older record preserved.
+3. Pass a fictional `high` record with no date; confirm `Needs review` and that the record appears only
+   under unknown chronology.
+4. Pass mixed high- and low-confidence mappings; confirm uncertain records remain visible without
+   overriding a supported status.
+
+### Known Limitations
+
+- Source flags only; no reference-range or raw-value interpretation.
+- No AI interpretation, diagnosis, treatment advice, trend analysis, or UI.
+- Only ISO-compatible dates participate in chronology.
+- `positive` is contextualized only as a lab source flag; patient-facing explanation belongs in the
+  later UI and must remain consistent wherever the same flag is shown.
+- There is no patient mapping-correction workflow yet because persistent mapping overrides are not
+  part of Parts 1–3.
+
+### Next Step
+
+Part 4 should display the factual reason, uncertain mappings, and unknown-date flags prominently while
+keeping the underlying records easy to reach. It should explain source flags consistently in context.
+Mapping correction remains deferred until an explicit reviewed-override workflow is scoped. Do not
+add AI or medical interpretation when presenting these fields.
