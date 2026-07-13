@@ -19,6 +19,7 @@ This application is for personal organization and education only. It is not a me
 - Local SQLite storage.
 - CRUD pages for allergies, medications, labs, health timeline entries, appointments, reminders, and wearable records.
 - Profile-specific dashboard.
+- Interactive profile-specific body map with synchronized organ highlighting and record filtering.
 - Filters for dates, body system, body part, medication status, lab flag, reminder status, and keyword search where useful.
 - CSV import for labs and wearable records.
 - JSON backup export and restore.

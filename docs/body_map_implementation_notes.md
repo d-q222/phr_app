@@ -304,3 +304,133 @@ Part 4 should display the factual reason, uncertain mappings, and unknown-date f
 keeping the underlying records easy to reach. It should explain source flags consistently in context.
 Mapping correction remains deferred until an explicit reviewed-override workflow is scoped. Do not
 add AI or medical interpretation when presenting these fields.
+
+## Part 4 — Streamlit Body Map UI
+
+### Goal
+
+Provide a profile-specific body-map page that selects canonical body areas and presents Parts 2–3
+records and conservative summaries without adding medical interpretation.
+
+### Files Changed
+
+- `app.py`: added Body Map navigation and the thin page integration.
+- `body_map_ui.py`: added selection, SVG rendering, profile-state validation, summaries, tabs, and trends.
+- `assets/body_map_front.svg`: added the replaceable front-view selector asset.
+- `tests/test_body_map_ui.py`: added focused Part 4 UI-helper and integration tests.
+
+### Navigation and Page Integration
+
+Body Map appears in the existing Overview navigation and receives the selected profile and active
+database path. With no profile it shows the required selection prompt; locked profiles remain behind
+the app's existing unlock boundary.
+
+### Body Model and Replaceability
+
+The standalone SVG uses Part 1 canonical IDs and ordinary query links. `body_map_ui.py` adds only the
+selected highlight class. A replacement asset must preserve the canonical region IDs and links; no
+retrieval or summary logic lives in the SVG.
+
+### Selection and Session State
+
+The canonical selection is stored as `selected_body_part`. Invalid values are discarded, and an
+associated database-path/profile-ID scope clears the organ and trend selections whenever the active
+database or selected profile changes. A selectbox remains available if SVG interaction is unsupported.
+
+### Profile-Isolation Behavior
+
+Every selection calls Part 2 with the current `person_id` and active database path. Records are held
+only in the current render; errors stop rendering before any summary or record data can be displayed.
+
+### Summary and Record Display
+
+The header uses Part 1 display names and primary systems. Status labels and reasons come unchanged
+from Part 3, with relevant/current/historical counts and the latest relevant date. Empty results do
+not imply that an area is healthy.
+
+### Tabs and Trends
+
+Overview is the default, followed by Labs, Vitals, Medications, Notes, Imaging, Wearables, and Trends.
+Records are deduplicated by source table and ID. Trends chart only source-provided numeric values with
+usable dates; values are neither inferred nor interpolated.
+
+### Tests Added
+
+`tests/test_body_map_ui.py` covers profile state, service scoping, selection, SVG IDs/highlighting,
+Part 3 display text, grouping/deduplication, empty/error states, fallback selection, and safe trends.
+The suite includes a Streamlit `AppTest` using a temporary database and fictional profile.
+
+- `.venv/bin/python -m pytest -q tests/test_body_map_ui.py`: 19 passed.
+- `.venv/bin/python -m pytest -q tests/test_body_map_config.py tests/test_body_map_services.py tests/test_body_map_summary.py tests/test_basic.py`: 124 passed.
+- `./scripts/verify.sh`: compile checks passed; 143 tests passed.
+
+### How to Test Manually
+
+1. Start Streamlit with a temporary or demo database and open Body Map.
+2. Select two profiles in turn and confirm the body-area selection clears between them.
+3. Click an SVG organ and use the fallback selector; confirm the highlight, header, summary, and tabs update.
+4. Open Trends and confirm only dated numeric source records are charted.
+
+### Known Limitations
+
+The first version is front-view only. SVG clicks depend on the browser honoring ordinary SVG query
+links; the selectbox is the supported fallback. Existing normalized records do not currently provide
+dedicated vital or imaging types, so those tabs normally show their empty states.
+
+### Next Step
+
+Stop after Part 4. Part 5 AI explanation work remains unimplemented.
+
+## Part 4 Fix — In-Page Body Map Selection
+
+### Root Cause and Event Flow
+
+The SVG's query-string anchors performed a browser navigation, which created a new Streamlit session
+and allowed `nav_page` to return to Dashboard. The body map now renders inside a dependency-free local
+Streamlit component. Its click handler prevents navigation and returns the clicked SVG region ID with
+a non-health event ID; Python accepts the body-part value only when it is a Part 1 canonical ID.
+
+The initial bridge rendered the SVG before applying the returned component value. The filter therefore
+changed during the rerun while that run's SVG still contained the previous highlight. The component
+now invokes a validated Streamlit callback before the fragment reruns. That callback updates
+`selected_body_part`, which is the single source for the SVG highlight, fallback selector, retrieval,
+summary, categories, and trends. JavaScript still moves the highlight immediately for responsiveness,
+and the callback-driven render confirms the same selection without changing the rest of the page.
+
+The validated component value and fallback selectbox both update `selected_body_part`. The active
+selection is then used once for Part 2 retrieval; that exact record collection is passed to Part 3,
+Overview, record categories, and trends. Missing or invalid component values preserve the last valid
+selection, and a later valid click replaces it.
+
+### Isolation and Filtering
+
+Component keys include only the resolved database path and profile ID, remaining stable while organs
+change but isolating profiles and real/demo databases. The callback reads only that scoped component
+value and accepts only canonical string IDs; malformed or unknown values preserve the existing filter.
+A stored component value is not reapplied during ordinary renders, so it cannot override a later
+fallback-selector change. Retrieval remains explicitly scoped to the active `person_id`, canonical
+body-part ID, and database path. No records, mappings, or medical interpretation are stored in the
+component or SVG.
+
+### Tests and Manual Verification
+
+`tests/test_body_map_ui.py` covers Heart selection, rerun persistence, replacement with Kidneys,
+invalid-event preservation, unchanged Body Map navigation, scoped component keys, highlight movement,
+fallback-selector parity, and consistent profile-filtered records through retrieval and summary.
+It also models Streamlit's callback-before-render lifecycle, verifies immediate frontend highlighting,
+repeated and same-organ clicks, malformed-event rejection, stable in-profile keys, and different keys
+across profile/database scopes.
+
+- `.venv/bin/python -m pytest -q tests/test_body_map_ui.py`: 28 passed.
+- Parts 1–4 focused tests: 121 passed.
+- `./scripts/verify.sh`: compile checks passed; 152 tests passed.
+
+Manual verification procedure: run with a temporary or demo database, open Body Map, click Heart then
+Kidneys, and switch profiles. Confirm the page does not redirect, each highlight matches the selector
+and filtered heading, and the new profile starts without the prior selection.
+
+### Limitations
+
+The selector remains front-view only and depends on JavaScript/custom-component support. The native
+selectbox remains the fallback. The SVG remains replaceable as long as its clickable regions retain
+Part 1 canonical IDs.

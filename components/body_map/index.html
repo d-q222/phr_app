@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head><style>body { margin: 0; }</style></head>
+  <body>
+    <div id="body-map"></div>
+    <script>
+      const send = (type, extra = {}) => window.parent.postMessage(
+        {isStreamlitMessage: true, type, ...extra}, "*"
+      );
+
+      window.addEventListener("message", (event) => {
+        if (event.data.type !== "streamlit:render") return;
+        const root = document.getElementById("body-map");
+        root.innerHTML = event.data.args.svg;
+        root.querySelectorAll("a").forEach((anchor) => anchor.addEventListener("click", (click) => {
+          click.preventDefault();
+          const bodyPart = anchor.querySelector("[id]")?.id;
+          if (!bodyPart) return;
+          root.querySelector(".selected-organ")?.classList.remove("selected-organ");
+          anchor.querySelector("[id]").classList.add("selected-organ");
+          send("streamlit:setComponentValue", {
+            value: {body_part: bodyPart, event_id: `${Date.now()}-${Math.random()}`}
+          });
+        }));
+        send("streamlit:setFrameHeight", {height: root.scrollHeight});
+      });
+
+      send("streamlit:componentReady", {apiVersion: 1});
+    </script>
+  </body>
+</html>

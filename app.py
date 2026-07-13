@@ -12,6 +12,7 @@ import streamlit as st
 
 import ai_chat
 import ai_config
+import body_map_ui
 import db
 import fhir
 import imports_exports
@@ -35,6 +36,7 @@ DEMO_DB_PATH_KEY = "demo_db_path"
 
 PAGES = [
     "Dashboard",
+    "Body Map",
     "Profiles",
     "Health Timeline",
     "Medications",
@@ -52,7 +54,7 @@ PAGES = [
 ]
 
 NAV_SECTIONS = {
-    "Overview": ["Dashboard", "Health Insights", "AI Chat"],
+    "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
     "Records": ["Health Timeline", "Medications", "Allergies", "Labs", "Appointments", "Reminders", "Wearables"],
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
@@ -60,6 +62,7 @@ NAV_SECTIONS = {
 
 PAGE_EMOJIS = {
     "Dashboard": "📊",
+    "Body Map": "🫀",
     "Profiles": "👤",
     "Health Timeline": "🗓️",
     "Medications": "💊",
@@ -113,6 +116,7 @@ ACTION_PREFIX_EMOJIS = {
 
 PAGE_DESCRIPTIONS = {
     "Dashboard": "A quick operational view of medications, allergies, labs, reminders, appointments, and recent notes.",
+    "Body Map": "Explore profile-specific records by body area without medical interpretation.",
     "Profiles": "Manage family member profiles and local profile access settings.",
     "Health Timeline": "Record symptoms, observations, body systems, and dated health notes.",
     "Medications": "Track current and past medications, dose details, reasons, and notes.",
@@ -1433,6 +1437,10 @@ def main() -> None:
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)
         return
+    if page == "Body Map" and not person:
+        page_header("Body Map")
+        body_map_ui.render_body_map_page(None, current_db_path)
+        return
     if not require_profile(person):
         if page == "Import/Export":
             page_import_export(person, current_db_path, demo_mode=demo_mode)
@@ -1459,6 +1467,9 @@ def main() -> None:
 
     if page == "Dashboard":
         page_dashboard(person, db_path=current_db_path)
+    elif page == "Body Map":
+        page_header("Body Map")
+        body_map_ui.render_body_map_page(person, db_path=current_db_path)
     elif page == "Import/Export":
         page_import_export(person, current_db_path, demo_mode=demo_mode)
     elif page == "Health Timeline":

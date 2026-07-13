@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 760" role="img" aria-label="Front view body map">
+  <style>
+    svg {width:100%;max-height:680px;background:#f7fbfa;border:1px solid #d9e1dd;border-radius:18px}
+    .body {fill:#dce9e5;stroke:#78928a;stroke-width:3}
+    .organ {stroke:#fff;stroke-width:2;opacity:.9;transition:.15s}
+    a:hover .organ,.selected-organ .organ,.selected-organ .body {opacity:1;stroke:#087ea4;stroke-width:5;filter:drop-shadow(0 0 9px #42bde5)}
+    text {font:15px sans-serif;fill:#31443e;pointer-events:none}
+  </style>
+  <a href="?body_part=general_body" target="_self"><g id="general_body"><circle class="body" cx="260" cy="83" r="53"/><path class="body" d="M195 140 Q260 116 325 140 L350 395 318 705 270 705 260 425 250 705 202 705 170 395Z"/></g></a>
+  <a href="?body_part=brain" target="_self"><g id="brain"><ellipse class="organ" fill="#d7a8db" cx="260" cy="73" rx="35" ry="25"/></g></a>
+  <a href="?body_part=thyroid" target="_self"><g id="thyroid"><path class="organ" fill="#e6b36d" d="M245 137 Q260 150 275 137 L270 158 Q260 150 250 158Z"/></g></a>
+  <a href="?body_part=lungs" target="_self"><g id="lungs"><ellipse class="organ" fill="#8bc9d1" cx="225" cy="214" rx="34" ry="62"/><ellipse class="organ" fill="#8bc9d1" cx="295" cy="214" rx="34" ry="62"/></g></a>
+  <a href="?body_part=heart" target="_self"><g id="heart"><path class="organ" fill="#d96772" d="M260 268 C220 238 225 200 260 220 C295 200 300 238 260 268Z"/></g></a>
+  <a href="?body_part=liver" target="_self"><g id="liver"><path class="organ" fill="#a96f55" d="M205 290 Q270 270 310 300 Q275 335 205 320Z"/></g></a>
+  <a href="?body_part=stomach_intestines" target="_self"><g id="stomach_intestines"><path class="organ" fill="#e6a5a1" d="M245 315 Q310 315 290 390 Q250 410 225 365Z"/></g></a>
+  <a href="?body_part=pancreas" target="_self"><g id="pancreas"><ellipse class="organ" fill="#e4cf73" cx="270" cy="325" rx="42" ry="10"/></g></a>
+  <a href="?body_part=kidneys" target="_self"><g id="kidneys"><ellipse class="organ" fill="#9b6b73" cx="215" cy="345" rx="17" ry="29"/><ellipse class="organ" fill="#9b6b73" cx="305" cy="345" rx="17" ry="29"/></g></a>
+  <a href="?body_part=reproductive_organs" target="_self"><g id="reproductive_organs"><ellipse class="organ" fill="#c899c5" cx="260" cy="425" rx="32" ry="25"/></g></a>
+  <a href="?body_part=lymph_nodes" target="_self"><g id="lymph_nodes" fill="#71b89c"><circle class="organ" cx="195" cy="170" r="8"/><circle class="organ" cx="325" cy="170" r="8"/><circle class="organ" cx="205" cy="405" r="8"/><circle class="organ" cx="315" cy="405" r="8"/></g></a>
+  <a href="?body_part=bones" target="_self"><g id="bones"><path class="organ" fill="none" stroke="#f4efe2" stroke-width="10" d="M260 155V410M205 175L155 360M315 175L365 360M245 420L225 675M275 420L295 675"/></g></a>
+  <a href="?body_part=muscles" target="_self"><g id="muscles"><path class="organ" fill="none" stroke="#d98c7d" stroke-width="13" d="M190 180L150 350M330 180L370 350M225 455L210 650M295 455L310 650"/></g></a>
+  <a href="?body_part=skin" target="_self"><g id="skin"><path class="organ" fill="none" stroke="#efc7ab" stroke-width="7" d="M195 145Q260 120 325 145L345 390 315 700M175 390L205 700"/></g></a>
+  <text x="24" y="735">Select a region or use the selector below</text>
+</svg>
