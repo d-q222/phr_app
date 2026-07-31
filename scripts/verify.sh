@@ -14,6 +14,16 @@ fi
 
 printf 'Using Python: %s\n' "$PYTHON_BIN"
 
+# Lint gate (fatal): unused/dead code, import order, and the AGENTS.md §6.2 complexity
+# signals (over-complex functions, too many args/statements). Pre-existing outliers are
+# grandfathered with line-level `# noqa`; new violations fail verification.
+# `set -e` above makes a non-zero ruff exit abort the script.
+if ! "$PYTHON_BIN" -m ruff --version >/dev/null 2>&1; then
+  printf 'ERROR: ruff is required for verification. Install with: %s -m pip install ruff\n' "$PYTHON_BIN" >&2
+  exit 1
+fi
+"$PYTHON_BIN" -m ruff check .
+
 # Compile project Python without descending into private/generated directories.
 "$PYTHON_BIN" -m compileall -q \
   -x '(^|/)(\.venv|\.git|\.pytest_cache|data)(/|$)' \

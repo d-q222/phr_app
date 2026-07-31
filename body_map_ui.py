@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import MutableMapping, Sequence
 from math import isfinite
 from pathlib import Path
-from typing import MutableMapping, Sequence
 
 import pandas as pd
 import streamlit as st
@@ -12,7 +12,6 @@ import db
 from body_map_config import BODY_PART_IDS, BODY_PARTS, BODY_SYSTEMS
 from body_map_services import NormalizedBodyRecord, get_records_for_body_part
 from body_map_summary import BodyPartHealthSummary, summarize_body_part_health
-
 
 SVG_PATH = Path(__file__).resolve().parent / "assets" / "body_map_front.svg"
 COMPONENT_PATH = Path(__file__).resolve().parent / "components" / "body_map"

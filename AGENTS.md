@@ -110,6 +110,35 @@ For any non-trivial task:
 Do not ask the user for information that can be determined from the repository. Do not perform broad
 cleanup, unrelated refactors, dependency upgrades, or formatting churn while implementing a feature.
 
+### 6.1 Before writing new code (necessity ladder)
+
+Read the relevant execution path first — be lazy about the solution, never about reading. Then walk
+this ladder in order and stop at the first step that satisfies the requirement:
+
+1. Does this need to exist at all? If the requirement is speculative or "for later," skip it (YAGNI).
+2. Does the codebase already do this? Reuse the existing `services.py`/`db.py`/helper.
+3. Does the standard library or an already-installed dependency cover it? Use it; add nothing.
+4. Is it a one-line or single-function change? Write that; do not scaffold around it.
+5. Only then write the minimum new code, in the module that already owns that responsibility (§3).
+
+Do not add a new class, module, config layer, dependency, table, or "future override" hook until a
+second concrete caller exists. Safety, validation, and profile isolation (§4, §5) are never what gets
+minimized — this ladder trims scope, not correctness.
+
+### 6.2 When structure has earned its place (add it now)
+
+The ladder biases toward less; these signals are the counterweight. When one fires, the abstraction is
+justified by a second real instance, not a hypothetical — build it rather than copy-paste again:
+
+- Third copy of the same logic (rule of three) → extract the shared helper now, not before.
+- A previously-skipped hook gains an actual second caller → build it.
+- One logical change forces edits in 3+ spots → a seam is missing; the concept wants one home.
+- A function stops fitting on a screen or mixes concerns → split by responsibility per §3.
+- A test is hard to write because logic is tangled in Streamlit rendering → separate pure logic (§9).
+- The same 4+ args are threaded everywhere → a small data object (not a framework) is now cheaper.
+
+Add structure in response to a second concrete instance, never in anticipation of a hypothetical one.
+
 ## 7. Delegation and model-routing policy
 
 The main agent owns requirement interpretation, architecture, cross-module changes, integration,

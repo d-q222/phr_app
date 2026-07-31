@@ -272,7 +272,7 @@ def generate_provider_summary(
     if include_labs:
         lines += ["", "## Recent Labs"]
         labs = filter_labs(person_id, start_date, end_date, db_path=db_path)[:20]
-        lines += [f"- {l['lab_date']}: {l['test_name']} {l.get('result_value') or l.get('numeric_value') or ''} {l.get('unit') or ''} [{l.get('flag') or 'Unknown'}]".strip() for l in labs] or ["None recorded."]
+        lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag') or 'Unknown'}]".strip() for lab in labs] or ["None recorded."]
     lines += ["", "## Upcoming Appointments"]
     appointments = upcoming_appointments(person_id, db_path=db_path)[:10]
     lines += [f"- {a['appointment_date']}: {a['title']} with {a.get('provider') or 'provider not recorded'}" for a in appointments] or ["None recorded."]
@@ -308,5 +308,5 @@ def generate_emergency_snapshot(person_id: int, db_path: Path | str = db.DB_PATH
     lines += ["", "## Key Health Notes"]
     lines += [f"- {e['entry_date']}: {e['title']}" for e in entries] or ["None recorded."]
     lines += ["", "## Recent Critical/Abnormal Labs"]
-    lines += [f"- {l['lab_date']}: {l['test_name']} {l.get('result_value') or l.get('numeric_value') or ''} {l.get('unit') or ''} [{l.get('flag')}]".strip() for l in critical_labs] or ["None recorded."]
+    lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag')}]".strip() for lab in critical_labs] or ["None recorded."]
     return "\n".join(lines)

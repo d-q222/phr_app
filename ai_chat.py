@@ -16,7 +16,6 @@ import db
 import insights
 import services
 
-
 PRIVACY_NOTICE = (
     "This sends the selected patient’s relevant health context and your message to Zhipu AI. "
     "Do not include information you do not want sent to the API."
@@ -136,7 +135,7 @@ def _json_size(value: dict) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
 
 
-def _fit_packet_to_budget(packet: dict, byte_limit: int = CHAT_CONTEXT_BYTE_LIMIT) -> dict:
+def _fit_packet_to_budget(packet: dict, byte_limit: int = CHAT_CONTEXT_BYTE_LIMIT) -> dict:  # noqa: C901
     fitted = json.loads(json.dumps(packet, ensure_ascii=False, default=str))
     if _json_size(fitted) <= byte_limit:
         return fitted

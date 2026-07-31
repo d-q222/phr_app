@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Sequence
+from typing import Literal
 
 from body_map_config import normalize_record_name
 from body_map_services import NormalizedBodyRecord
-
 
 StatusLabel = Literal[
     "No data",

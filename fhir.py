@@ -7,6 +7,7 @@ from pathlib import Path
 import db
 import services
 from validation import (
+    normalize_optional_number,
     validate_allergy,
     validate_appointment,
     validate_health_entry,
@@ -14,9 +15,7 @@ from validation import (
     validate_medication,
     validate_reminder,
     validate_wearable,
-    normalize_optional_number,
 )
-
 
 SUPPORTED_FHIR_VERSIONS = ["R4", "R5"]
 FHIR_MIME_TYPE = "application/fhir+json"
