@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import body_map_config as config  # noqa: E402
 
-
 REQUIRED_BODY_PART_IDS = {
     "heart",
     "lungs",

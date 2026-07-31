@@ -14,7 +14,6 @@ from body_map_config import BODY_PART_IDS
 from body_map_services import NormalizedBodyRecord
 from body_map_summary import summarize_body_part_health
 
-
 _render_page = body_map_ui.render_body_map_page.__wrapped__
 
 

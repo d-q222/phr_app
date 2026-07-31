@@ -12,7 +12,6 @@ import ai_config
 import db
 import services
 
-
 DISCLAIMER = (
     "This report is for organization and education only. It is not a diagnosis or medical advice. "
     "Please discuss important findings, symptoms, medication questions, or abnormal results with a qualified healthcare professional."
@@ -79,7 +78,7 @@ class ZhipuRetryableError(Exception):
         self.detail = detail
 
 
-def collect_health_context(
+def collect_health_context(  # noqa: PLR0913
     person_id: int,
     date_range: tuple | None,
     include_medications: bool = True,
@@ -165,7 +164,7 @@ def _json_size(value: dict) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
-def _fit_packet_to_budget(packet: dict, byte_limit: int) -> dict:
+def _fit_packet_to_budget(packet: dict, byte_limit: int) -> dict:  # noqa: C901
     fitted = json.loads(json.dumps(packet))
     if _json_size(fitted) <= byte_limit:
         return fitted
@@ -326,7 +325,7 @@ def _call_zhipu_chat_completion(request: urllib.request.Request) -> dict:
             provider_code, detail = _parse_http_error(exc)
             last_error = ZhipuAPIError(exc.code, provider_code, detail)
             if exc.code != 429 or provider_code == "1113":
-                raise last_error
+                raise last_error from exc
         except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(exc).lower():
@@ -395,7 +394,7 @@ def validate_zhipu_connection() -> tuple[bool, str, str | None]:
     return True, f"BigModel API key works with model {model}.", None
 
 
-def generate_rule_based_insights(context: dict, focus_area: str | None = None) -> str:
+def generate_rule_based_insights(context: dict, focus_area: str | None = None) -> str:  # noqa: C901
     medications = context.get("medications", [])
     reminders = context.get("reminders", [])
     labs = context.get("labs", [])
@@ -406,8 +405,8 @@ def generate_rule_based_insights(context: dict, focus_area: str | None = None) -
     active_med_count = len([m for m in medications if m.get("status") == "Active"])
     today = date.today().isoformat()
     overdue = [r for r in reminders if r.get("due_date", "") < today and r.get("status") not in {"Completed", "Dismissed"}]
-    abnormal = [l for l in labs if l.get("flag") in {"High", "Low", "Abnormal", "Critical"}]
-    missing_ranges = [l for l in labs if l.get("reference_low") is None or l.get("reference_high") is None]
+    abnormal = [lab for lab in labs if lab.get("flag") in {"High", "Low", "Abnormal", "Critical"}]
+    missing_ranges = [lab for lab in labs if lab.get("reference_low") is None or lab.get("reference_high") is None]
     body_counts = Counter(e.get("body_system") or "Unspecified" for e in entries)
     recent_cutoff = (date.today() - timedelta(days=30)).isoformat()
     recent_symptoms = [e for e in entries if e.get("entry_date", "") >= recent_cutoff]

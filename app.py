@@ -967,7 +967,7 @@ def ai_settings() -> None:
                     st.code(detail)
 
 
-def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
+def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     page_header("Profiles")
     people = services.list_people(db_path=db_path)
     dataframe(display_safe_people(people, db_path))
@@ -1078,7 +1078,7 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
     return start or None, end or None
 
 
-def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
+def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     config = FIELD_CONFIGS[table]
     page_header(config["title"])
     if demo_mode:
@@ -1274,7 +1274,7 @@ def page_emergency_snapshot(person: dict, db_path: Path | str = db.DB_PATH) -> N
     st.markdown(markdown)
 
 
-def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:
+def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     page_header("Import/Export")
     if demo_mode:
         st.caption("Imports and restores in demo mode modify only the session demo database.")
@@ -1413,7 +1413,7 @@ def page_ai_chat(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     ai_chat.render_ai_chatbot(int(person["id"]), db_path=db_path)
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff

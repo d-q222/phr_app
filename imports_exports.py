@@ -22,7 +22,6 @@ from validation import (
     validate_wearable,
 )
 
-
 BACKUP_VALIDATORS = {
     "people": validate_person,
     "allergies": validate_allergy,

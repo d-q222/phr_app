@@ -4,7 +4,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "phr.db"
@@ -178,7 +177,7 @@ def get_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> dic
     return row_to_dict(row)
 
 
-def list_records(
+def list_records(  # noqa: C901
     table: str,
     person_id: int | None = None,
     filters: dict | None = None,

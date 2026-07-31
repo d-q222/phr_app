@@ -1,7 +1,7 @@
-import sqlite3
-import sys
 import json
 import socket
+import sqlite3
+import sys
 import urllib.error
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -10,10 +10,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import db  # noqa: E402
 import ai_chat  # noqa: E402
 import ai_config  # noqa: E402
 import app  # noqa: E402
+import db  # noqa: E402
 import fhir  # noqa: E402
 import imports_exports  # noqa: E402
 import insights  # noqa: E402

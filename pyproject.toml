@@ -1,0 +1,30 @@
+# NOTE: target-version matches the actual .venv interpreter (Python 3.9.6), NOT the
+# "3.11+" aspiration in AGENTS.md §9. Pinning py311 makes pyupgrade rewrite to syntax
+# the runtime can't execute (e.g. `datetime.UTC`), which breaks the test suite. Bump this
+# to py311 only after the venv is actually upgraded to 3.11.
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+exclude = [".venv", "data", ".pytest_cache"]
+
+[tool.ruff.lint]
+# E/F = pyflakes+pycodestyle, I = import sorting, UP = pyupgrade,
+# B = bugbear, F401 = unused imports (the "irrelevant code" signal).
+# C901/PLR09xx = the mechanical proxies for the AGENTS.md §6.2 "structure has grown"
+# signals: over-complex functions, too many args, sprawling functions.
+select = ["E", "F", "I", "UP", "B", "C901", "PLR0913", "PLR0915"]
+ignore = ["E501"]  # line length handled by the formatter, not enforced as an error
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12  # default 10; +2 headroom for this codebase's branchy UI handlers
+
+[tool.ruff.lint.pylint]
+# max-args 7 (default 5) fits the person_id + date-range + filters + db_path idiom;
+# genuine outliers (8+ args, 60+ statements) still fail. Pre-existing violators are
+# grandfathered with line-level `# noqa` — new sprawl fails, old debt stays visible.
+max-args = 7
+max-statements = 60
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may take many fixture args and be long; the complexity gate targets app/service code.
+"tests/*" = ["PLR0913", "PLR0915"]
