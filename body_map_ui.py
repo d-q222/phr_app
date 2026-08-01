@@ -174,7 +174,10 @@ def render_body_map_page(person: dict | None, db_path: Path | str = db.DB_PATH) 
     tabs = st.tabs(["Overview", "Labs", "Vitals", "Medications", "Notes", "Imaging", "Wearables", "Trends"])
     with tabs[0]:
         _render_records(records, "Overview")
-    for tab, category in zip(tabs[1:7], grouped):
+    # strict=True: group_records() seeds exactly the six categories rendered as tabs[1:7].
+    # If that list and the st.tabs() list above ever drift apart, fail loudly instead of
+    # silently dropping a category's records.
+    for tab, category in zip(tabs[1:7], grouped, strict=True):
         with tab:
             _render_records(grouped[category], category)
     with tabs[7]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
@@ -1078,6 +1079,22 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
     return start or None, end or None
 
 
+def apply_record_change(action: Callable[[], None]) -> bool:
+    """Run a person-scoped write, reporting a clean message if the record is not available.
+
+    `db.RecordNotFound` means the record does not belong to the selected profile, or no
+    longer exists. It should be unreachable from this page, which only offers record ids
+    drawn from the selected profile's own rows — so if it fires, the isolation guard in
+    `db._assert_owned` has caught something the UI should have prevented.
+    """
+    try:
+        action()
+    except db.RecordNotFound:
+        st.error("That record is no longer available for this profile. Refresh and try again.")
+        return False
+    return True
+
+
 def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     config = FIELD_CONFIGS[table]
     page_header(config["title"])
@@ -1198,27 +1215,26 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if completed:
-            services.update_item("reminders", int(row["id"]), {"status": "Completed"}, db_path=db_path)
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.update_item("reminders", person_id=int(person["id"]), record_id=int(row["id"]), data={"status": "Completed"}, db_path=db_path)):
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if dismissed:
-            services.update_item("reminders", int(row["id"]), {"status": "Dismissed"}, db_path=db_path)
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.update_item("reminders", person_id=int(person["id"]), record_id=int(row["id"]), data={"status": "Dismissed"}, db_path=db_path)):
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if deleted:
             if not confirm_delete:
                 st.error("Confirm record delete before continuing.")
                 return
-            services.delete_item(table, int(row["id"]), db_path=db_path)
-            st.warning(warning_label("Record deleted."))
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.delete_item(table, person_id=int(person["id"]), record_id=int(row["id"]), db_path=db_path)):
+                st.warning(warning_label("Record deleted."))
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if submitted:
             errors = config["validator"](data)
             if errors:
                 show_errors(errors)
-            else:
-                services.update_item(table, int(row["id"]), clean_payload(data), db_path=db_path)
+            elif apply_record_change(lambda: services.update_item(table, person_id=int(person["id"]), record_id=int(row["id"]), data=clean_payload(data), db_path=db_path)):
                 st.success("Record updated.")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()

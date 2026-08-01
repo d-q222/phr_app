@@ -9,6 +9,15 @@ DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "phr.db"
 SCHEMA_PATH = APP_DIR / "schema.sql"
 
+
+class RecordNotFound(LookupError):
+    """A record id does not exist, or does not belong to the requesting person.
+
+    The two cases are deliberately indistinguishable: telling a caller that a record
+    exists but belongs to someone else would leak the existence of another profile's
+    data. This maps onto a single 404 in the future HTTP API.
+    """
+
 TABLES = [
     "people",
     "allergies",
@@ -139,24 +148,65 @@ def create_record(table: str, data: dict, db_path: Path | str = DB_PATH) -> int:
         return int(cursor.lastrowid)
 
 
-def update_record(table: str, record_id: int, data: dict, db_path: Path | str = DB_PATH) -> None:
+def _assert_owned(connection: sqlite3.Connection, table: str, record_id: int, person_id: int) -> None:
+    """Raise unless `record_id` in `table` belongs to `person_id`.
+
+    Runs on the caller's connection so the check and the write share one transaction.
+    """
+    if "person_id" not in TABLE_COLUMNS[table]:
+        raise ValueError(f"Table {table} is not person-scoped; pass person_id=None")
+    row = connection.execute(
+        f"SELECT 1 FROM {table} WHERE id = ? AND person_id = ?", (record_id, person_id)
+    ).fetchone()
+    if row is None:
+        raise RecordNotFound(f"No {table} record {record_id} for person {person_id}")
+
+
+def update_record(
+    table: str,
+    record_id: int,
+    data: dict,
+    db_path: Path | str = DB_PATH,
+    *,
+    person_id: int | None = None,
+) -> None:
+    """Update a record by id. Pass `person_id` to require the record belong to that person.
+
+    `person_id=None` performs an unscoped update and must only be used by callers that
+    legitimately operate across profiles (see `services.update_person`).
+    """
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
     values = {key: value for key, value in data.items() if key in TABLE_COLUMNS[table]}
     if "updated_at" in TABLE_COLUMNS[table]:
         values["updated_at"] = now_iso()
-    if not values:
-        return
     assignments = ", ".join(f"{column} = ?" for column in values)
     sql = f"UPDATE {table} SET {assignments} WHERE id = ?"
     with get_connection(db_path) as connection:
+        if person_id is not None:
+            _assert_owned(connection, table, record_id, person_id)
+        if not values:
+            return
         connection.execute(sql, [*values.values(), record_id])
 
 
-def delete_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> None:
+def delete_record(
+    table: str,
+    record_id: int,
+    db_path: Path | str = DB_PATH,
+    *,
+    person_id: int | None = None,
+) -> None:
+    """Delete a record by id. Pass `person_id` to require the record belong to that person.
+
+    `person_id=None` performs an unscoped delete and must only be used by callers that
+    legitimately operate across profiles (see `services.delete_person`).
+    """
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
     with get_connection(db_path) as connection:
+        if person_id is not None:
+            _assert_owned(connection, table, record_id, person_id)
         connection.execute(f"DELETE FROM {table} WHERE id = ?", (record_id,))
 
 

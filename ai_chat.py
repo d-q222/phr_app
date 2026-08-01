@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -389,7 +388,7 @@ def _call_zhipu_chat_model(
         if exc.code in {401, 403}:
             raise MissingAPIKeyError("Zhipu AI rejected the API key. Check that your key is correct and has access to this model.", detail) from exc
         raise AIChatError("Zhipu AI returned an error.", detail) from exc
-    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+    except (TimeoutError, urllib.error.URLError) as exc:
         raise NetworkAIChatError("Could not reach Zhipu AI. Check your network connection and try again.", str(exc)) from exc
     except json.JSONDecodeError as exc:
         raise InvalidAIResponseError("Zhipu AI returned a response the app could not read.", str(exc)) from exc

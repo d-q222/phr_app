@@ -50,12 +50,25 @@ def create_item(table: str, person_id: int, data: dict, db_path: Path | str = db
     return db.create_record(table, data, db_path=db_path)
 
 
-def update_item(table: str, record_id: int, data: dict, db_path: Path | str = db.DB_PATH) -> None:
-    db.update_record(table, record_id, data, db_path=db_path)
+def update_item(
+    table: str, *, person_id: int, record_id: int, data: dict, db_path: Path | str = db.DB_PATH
+) -> None:
+    """Update one of `person_id`'s records. Raises db.RecordNotFound if it is not theirs.
+
+    `person_id` and `record_id` are keyword-only on purpose: they are adjacent ints, and
+    silently swapping them would be an isolation failure rather than a visible error.
+    """
+    db.update_record(table, record_id, data, db_path=db_path, person_id=person_id)
 
 
-def delete_item(table: str, record_id: int, db_path: Path | str = db.DB_PATH) -> None:
-    db.delete_record(table, record_id, db_path=db_path)
+def delete_item(
+    table: str, *, person_id: int, record_id: int, db_path: Path | str = db.DB_PATH
+) -> None:
+    """Delete one of `person_id`'s records. Raises db.RecordNotFound if it is not theirs.
+
+    `person_id` and `record_id` are keyword-only for the same reason as `update_item`.
+    """
+    db.delete_record(table, record_id, db_path=db_path, person_id=person_id)
 
 
 def list_items(

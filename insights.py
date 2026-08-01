@@ -326,7 +326,7 @@ def _call_zhipu_chat_completion(request: urllib.request.Request) -> dict:
             last_error = ZhipuAPIError(exc.code, provider_code, detail)
             if exc.code != 429 or provider_code == "1113":
                 raise last_error from exc
-        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        except (TimeoutError, urllib.error.URLError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(exc).lower():
                 last_error = ZhipuRetryableError(str(exc))

@@ -1,5 +1,5 @@
+import inspect
 import json
-import socket
 import sqlite3
 import sys
 import urllib.error
@@ -289,6 +289,124 @@ def test_delete_person_removes_child_records(tmp_path):
     assert db.list_records("allergies", person_id=person_id, db_path=db_path) == []
     assert db.list_records("medications", person_id=person_id, db_path=db_path) == []
     assert db.list_records("lab_results", person_id=person_id, db_path=db_path) == []
+
+
+def _two_profiles_with_allergies(tmp_path):
+    """Alice and Bob, each with one allergy. Returns (db_path, alice, bob, bob_record_id)."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    services.create_item("allergies", alice, {"allergen": "Penicillin"}, db_path=db_path)
+    bob_record = services.create_item(
+        "allergies", bob, {"allergen": "Peanuts", "severity": "Severe"}, db_path=db_path
+    )
+    return db_path, alice, bob, bob_record
+
+
+def test_update_item_rejects_a_record_owned_by_another_profile(tmp_path):
+    db_path, alice, bob, bob_record = _two_profiles_with_allergies(tmp_path)
+
+    with pytest.raises(db.RecordNotFound):
+        services.update_item(
+            "allergies",
+            person_id=alice,
+            record_id=bob_record,
+            data={"allergen": "Overwritten"},
+            db_path=db_path,
+        )
+
+    survivor = db.get_record("allergies", bob_record, db_path=db_path)
+    assert survivor["allergen"] == "Peanuts"
+    assert survivor["severity"] == "Severe"
+    assert survivor["person_id"] == bob
+
+
+def test_delete_item_rejects_a_record_owned_by_another_profile(tmp_path):
+    db_path, alice, bob, bob_record = _two_profiles_with_allergies(tmp_path)
+
+    with pytest.raises(db.RecordNotFound):
+        services.delete_item("allergies", person_id=alice, record_id=bob_record, db_path=db_path)
+
+    assert db.get_record("allergies", bob_record, db_path=db_path) is not None
+    assert [row["allergen"] for row in db.list_records("allergies", person_id=bob, db_path=db_path)] == [
+        "Peanuts"
+    ]
+
+
+def test_update_and_delete_still_work_for_the_owning_profile(tmp_path):
+    db_path, _alice, bob, bob_record = _two_profiles_with_allergies(tmp_path)
+
+    services.update_item(
+        "allergies", person_id=bob, record_id=bob_record, data={"allergen": "Tree nuts"}, db_path=db_path
+    )
+    assert db.get_record("allergies", bob_record, db_path=db_path)["allergen"] == "Tree nuts"
+
+    services.delete_item("allergies", person_id=bob, record_id=bob_record, db_path=db_path)
+    assert db.get_record("allergies", bob_record, db_path=db_path) is None
+
+
+def test_update_item_rejects_a_record_id_that_does_not_exist(tmp_path):
+    db_path, alice, _bob, bob_record = _two_profiles_with_allergies(tmp_path)
+
+    with pytest.raises(db.RecordNotFound):
+        services.update_item(
+            "allergies", person_id=alice, record_id=bob_record + 999, data={"allergen": "X"}, db_path=db_path
+        )
+
+
+def test_person_and_record_ids_are_keyword_only_on_scoped_writes():
+    """Swapping two adjacent ints would be a silent isolation failure, so positional is banned."""
+    for fn in (services.update_item, services.delete_item):
+        kinds = {
+            name: param.kind
+            for name, param in inspect.signature(fn).parameters.items()
+            if name in {"person_id", "record_id"}
+        }
+        assert kinds == {
+            "person_id": inspect.Parameter.KEYWORD_ONLY,
+            "record_id": inspect.Parameter.KEYWORD_ONLY,
+        }, f"{fn.__name__} must keep person_id/record_id keyword-only"
+
+
+def test_person_scoped_write_guard_covers_every_child_table(tmp_path):
+    """Each person-scoped table rejects a cross-profile write, not just allergies."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    seeds = {
+        "allergies": {"allergen": "Peanuts"},
+        "medications": {"name": "Med A"},
+        "lab_results": {"test_name": "A1c", "lab_date": "2026-01-01"},
+        "health_entries": {"title": "Headache", "entry_date": "2026-01-01"},
+        "appointments": {"title": "Checkup", "appointment_date": "2026-01-01"},
+        "reminders": {"reminder_type": "Lab", "title": "Draw", "due_date": "2026-01-01"},
+        "wearable_records": {"metric_type": "Steps", "value": 100, "timestamp": "2026-01-01T08:00:00"},
+    }
+    for table, payload in seeds.items():
+        record_id = services.create_item(table, bob, payload, db_path=db_path)
+        with pytest.raises(db.RecordNotFound):
+            services.update_item(
+                table, person_id=alice, record_id=record_id, data=payload, db_path=db_path
+            )
+        with pytest.raises(db.RecordNotFound):
+            services.delete_item(table, person_id=alice, record_id=record_id, db_path=db_path)
+        assert db.get_record(table, record_id, db_path=db_path) is not None
+
+
+def test_unscoped_db_writes_reject_tables_that_are_not_person_scoped(tmp_path):
+    """`people` has no person_id column; scoping it is a programming error, not a silent pass."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alice"}, db_path=db_path)
+
+    with pytest.raises(ValueError):
+        db.update_record("people", person_id, {"name": "X"}, db_path=db_path, person_id=person_id)
+
+    # The unscoped path that services.update_person uses stays working.
+    services.update_person(person_id, {"name": "Renamed"}, db_path=db_path)
+    assert services.get_person(person_id, db_path=db_path)["name"] == "Renamed"
 
 
 def test_profile_unlock_state_is_scoped_by_database(monkeypatch, tmp_path):
@@ -617,7 +735,7 @@ def test_ai_insight_retries_next_model_on_timeout(monkeypatch):
         model = json.loads(request.data.decode("utf-8"))["model"]
         seen_models.append(model)
         if model == "timeout-model":
-            raise insights.ZhipuRetryableError(str(socket.timeout("The read operation timed out")))
+            raise insights.ZhipuRetryableError(str(TimeoutError("The read operation timed out")))
         return {"choices": [{"message": {"content": "# AI Safety-Checked Insights\n\n- Consider tracking symptoms."}}]}
 
     monkeypatch.setattr(insights, "_call_zhipu_chat_completion", fake_call)
@@ -843,7 +961,7 @@ def test_insight_urlopen_timeout_retries_without_real_sleep(monkeypatch):
     def fake_urlopen(request, timeout):
         attempts["count"] += 1
         if attempts["count"] < 3:
-            raise socket.timeout("slow")
+            raise TimeoutError("slow")
         return FakeResponse()
 
     monkeypatch.setattr(insights.urllib.request, "urlopen", fake_urlopen)
