@@ -1,7 +1,8 @@
 # ADR-0003 — Persistence layer and schema migrations
 
-- **Status:** **PROPOSED — awaiting Daniel's ruling.** Do not treat as decided.
-- **Date raised:** 2026-08-01
+- **Status:** Accepted
+- **Date raised / decided:** 2026-08-01
+- **Decider:** Daniel
 - **Change class:** Architectural, with Critical implications (record-altering migration)
 - **Blocks:** the walking skeleton (migration step 3). This is the last open blocker.
 - **Depends on:** ADR-0004 (local-first) — which constrains but does not settle this
@@ -226,7 +227,42 @@ and for declared relationships that move the delete-children guarantee out of Py
 (no `ON DELETE CASCADE` exists today). Accepted cost: learning curve, and vigilance about query cost in the
 body-map and analytics read paths.
 
-**3b — Database engine: still open.** The appendix above was requested before ruling.
+**3b — Database engine: SQLite now, Postgres-compatible, with three mitigations and a recorded
+trigger.** Decided 2026-08-01 after the cost analysis above.
+
+Rationale, in the order it actually decided the question: consolidating N local databases onto a server is
+unavoidable in *either* branch, so Postgres-from-day-one's only genuine benefit is avoiding dirty-data
+cleanup — and that benefit is purchasable without a server. Against it stands a continuous cost that
+obstructs shipping the local-first product ADR-0004 commits to.
+
+**Required mitigations, landing with the walking skeleton (slice 3), not deferred:**
+
+1. **Dual-engine CI.** Run the suite against SQLite *and* Postgres by parameterizing the connection URL.
+   Type and constraint divergence then surfaces at commit time instead of at migration time, while
+   production ships SQLite.
+2. **Real column types in the ORM models** — `Date`, `DateTime`, `Numeric`. Do **not** carry the current
+   `TEXT`-for-every-date shape into the new layer.
+3. **`CHECK` constraints** for the `models.py` controlled vocabularies (`MEDICATION_STATUSES`, `LAB_FLAGS`,
+   `REMINDER_STATUSES`, `APPOINTMENT_STATUSES`, `WEARABLE_METRIC_TYPES`), which the database does not
+   enforce today at all.
+
+These were chosen to land with slice 3 because the models are being written then anyway, and because
+divergence that never accumulates costs nothing to fix.
+
+**Switch trigger:** first multi-tenant user, or observed concurrent-write contention. Revisit this ADR at
+that point, not before.
+
+**Constraint this imposes on all subsequent slices:** no Postgres-only types (JSONB, arrays,
+`RETURNING`-heavy patterns). Portability is only real if this discipline is maintained; dual-engine CI is
+what makes the discipline self-enforcing rather than aspirational.
+
+### Migrating existing data
+
+One consequence needs care during slice 3. Existing `data/phr.db` files hold rows that the new typed
+columns will reject — unparseable dates and non-numeric numerics that the current app tolerates by design.
+Those rows must be surfaced for user review, **not silently coerced or dropped**: `docs/domain_invariants.md`
+§2 forbids silently altering or reinterpreting records. The initial migration therefore needs a quarantine
+or report path, not just a type change.
 
 Recommended framing for the ruling, in dependency order:
 
