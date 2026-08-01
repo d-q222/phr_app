@@ -137,9 +137,96 @@ schema triplication persists.
 
 ---
 
+---
+
+## Appendix — cost of being wrong, in each direction
+
+Requested before ruling on 3b. Grounded in `schema.sql` as it exists, not in general argument.
+
+### The relevant property of the current schema
+
+**Every date and timestamp is `TEXT`**: `date_of_birth`, `lab_date NOT NULL`, `entry_date NOT NULL`,
+`appointment_date NOT NULL`, `due_date NOT NULL`, `timestamp NOT NULL`, `created_at`, `updated_at`.
+In SQLite, `TEXT` accepts `"2026-13-45"`, `"sometime last year"`, or `""`. A Postgres `DATE` column
+rejects all three at insert.
+
+**SQLite's declared types are advisory.** `severity INTEGER` will store `"very bad"`; `numeric_value REAL`
+will store `"abc"`; there is not a single `CHECK` constraint in the file, so the controlled vocabularies in
+`models.py` (`MEDICATION_STATUSES`, `LAB_FLAGS`, …) are enforced only in Python.
+
+This is not hypothetical. The app **already tolerates malformed stored data by design**, and has tests
+proving it: `test_invalid_reminder_dates_are_skipped_in_due_calculations`,
+`test_display_dataframe_keeps_unparseable_dates_unchanged`, and
+`test_malformed_wearable_values_do_not_crash_summaries`. Those tests exist because such rows occur.
+So a future Postgres migration will encounter them.
+
+### If you choose SQLite and later need Postgres
+
+| Cost | Size | Notes |
+|---|---|---|
+| Engine swap | **Small — days** | With SQLAlchemy ORM + Alembic already chosen, this is largely a connection URL and column-type refinement, provided JSONB/arrays/PG-only types were avoided |
+| Consolidating N user databases into one server, with tenancy and `person_id` remapping across 7 child tables | **Large** | **But unavoidable in either branch** — see below |
+| Cleaning data SQLite accepted and Postgres rejects | **Real, and risky** | Unparseable dates, non-numeric numerics, out-of-vocabulary statuses. Risky because it is health data: you cannot silently coerce it without violating the provenance invariant (`domain_invariants.md` §2) |
+
+**The load-bearing observation:** the consolidation cost is paid in *both* branches. Going local-first →
+hosted means moving users' data onto a server regardless of which engine ran locally. Postgres-from-day-one
+avoids that cost only if you **never ship local-first at all** — in which case ADR-0004 has been abandoned,
+not implemented.
+
+So B2's "parity" benefit reduces to exactly one thing: avoiding the dirty-data cleanup. That is a genuine
+benefit, and it is the only one.
+
+### If you choose Postgres and stay local-first
+
+Nothing breaks. The cost is paid continuously instead of at a moment.
+
+| Cost | Size | Notes |
+|---|---|---|
+| **Distribution** | **Blocking** | A family member running this on their laptop would need Postgres. That means bundling/embedding a server or shipping Docker to non-technical users. This does not merely add work — it obstructs shipping the local-first product at all |
+| Backup/restore regression | Moderate | Today backup is "copy a file" plus a JSON export the user can read. With Postgres it becomes `pg_dump` — a user-facing feature made worse |
+| Contributor setup | Small | Everyone needs Docker running to run the suite |
+| Offline and emergency-card story | Moderate | The signed offline card (ADR-0004) is simplest when there is no server in the picture |
+
+Reverting is again a small engine swap — but you would have spent the intervening time unable to ship the
+thing that differentiates the product.
+
+### The mitigation that captures most of B2's benefit at near-zero cost
+
+The dirty-data risk is B1's only real exposure, and it does not require a server to address:
+
+1. **Run the test suite against both engines in CI.** SQLAlchemy makes this cheap — parameterize the
+   connection URL and run `pytest` twice. Type and constraint divergence then surfaces at commit time
+   rather than at migration time, while production still ships SQLite.
+2. **Use real column types in the ORM models** — `Date`, `DateTime`, `Numeric` — instead of carrying the
+   current `TEXT`-for-everything shape forward into the new layer.
+3. **Add `CHECK` constraints** for the `models.py` vocabularies, so the database enforces what is presently
+   Python-only.
+
+Together these buy Postgres-grade strictness on SQLite. They also improve the system whether or not
+Postgres ever arrives, which is the mark of a good hedge.
+
+### Summary
+
+- B1's worst case is a **concentrated, one-time, partly-unavoidable** cost, arriving at a trigger you
+  choose, and largely mitigable in advance.
+- B2's worst case is a **continuous** cost that obstructs shipping the product ADR-0004 just committed to.
+
+---
+
 ## Decision
 
-**Not yet made.** This ADR is written to be ruled on, not to record a conclusion.
+**3a — Migration tooling: Alembic.** Decided 2026-08-01. Chosen over the `PRAGMA user_version` runner
+because it survives the engine question; the runner is SQLite-only and would be discarded if 3b ever
+moved. The sharp edges above (batch mode, stamping existing files, startup-migration with backup-first
+failure handling) are accepted and must be handled explicitly during slice 3.
+
+**3c — Access layer: SQLAlchemy ORM.** Decided 2026-08-01. Chosen for the single-source-of-truth property
+that collapses the current triplication across `schema.sql`, `db.TABLE_COLUMNS`, and `app.FIELD_CONFIGS`,
+and for declared relationships that move the delete-children guarantee out of Python and into the database
+(no `ON DELETE CASCADE` exists today). Accepted cost: learning curve, and vigilance about query cost in the
+body-map and analytics read paths.
+
+**3b — Database engine: still open.** The appendix above was requested before ruling.
 
 Recommended framing for the ruling, in dependency order:
 
