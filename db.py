@@ -180,14 +180,19 @@ def update_record(
     values = {key: value for key, value in data.items() if key in TABLE_COLUMNS[table]}
     if "updated_at" in TABLE_COLUMNS[table]:
         values["updated_at"] = now_iso()
-    assignments = ", ".join(f"{column} = ?" for column in values)
-    sql = f"UPDATE {table} SET {assignments} WHERE id = ?"
     with get_connection(db_path) as connection:
+        # Ownership is checked before the empty-values bail-out, so a caller naming another
+        # person's record gets RecordNotFound either way rather than a silent no-op.
         if person_id is not None:
             _assert_owned(connection, table, record_id, person_id)
         if not values:
             return
-        connection.execute(sql, [*values.values(), record_id])
+        # Built after the guard: with no values this would be malformed `SET  WHERE`.
+        # Only reachable for tables without `updated_at` (today: wearable_records).
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        connection.execute(
+            f"UPDATE {table} SET {assignments} WHERE id = ?", [*values.values(), record_id]
+        )
 
 
 def delete_record(
