@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -8,6 +9,20 @@ APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "phr.db"
 SCHEMA_PATH = APP_DIR / "schema.sql"
+DATABASE_BUSY_TIMEOUT_MS = 1_000
+
+
+class RecordNotFound(LookupError):
+    """A record id does not exist, or does not belong to the requesting person.
+
+    The two cases are deliberately indistinguishable: telling a caller that a record
+    exists but belongs to someone else would leak the existence of another profile's
+    data. This maps onto a single 404 in the future HTTP API.
+    """
+
+
+class DatabaseBusyError(RuntimeError):
+    """SQLite could not acquire its write lock within the bounded wait."""
 
 TABLES = [
     "people",
@@ -90,11 +105,27 @@ TABLE_COLUMNS = {
 
 
 def get_connection(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
-    """Return a SQLite connection with foreign key enforcement enabled."""
-    connection = sqlite3.connect(db_path)
+    """Return a SQLite connection with foreign keys and a bounded native lock wait."""
+    connection = sqlite3.connect(db_path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1_000)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute(f"PRAGMA busy_timeout = {DATABASE_BUSY_TIMEOUT_MS}")
     return connection
+
+
+@contextmanager
+def _write_connection(db_path: Path | str):
+    """Use SQLite's one-shot busy wait and map only busy/locked failures."""
+    try:
+        with get_connection(db_path) as connection:
+            yield connection
+    except sqlite3.OperationalError as exc:
+        error_code = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF
+        if error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            raise DatabaseBusyError(
+                "The health record database is busy. Wait a moment and try again."
+            ) from exc
+        raise
 
 
 def init_db(db_path: Path | str = DB_PATH) -> Path:
@@ -103,7 +134,7 @@ def init_db(db_path: Path | str = DB_PATH) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
-    with get_connection(db_path) as connection:
+    with _write_connection(db_path) as connection:
         connection.executescript(schema)
 
     return db_path
@@ -124,6 +155,11 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
 def create_record(table: str, data: dict, db_path: Path | str = DB_PATH) -> int:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
+    if "person_id" in TABLE_COLUMNS[table]:
+        if data.get("person_id") is None:
+            raise ValueError(f"person_id is required for table {table}")
+    elif "person_id" in data:
+        raise ValueError(f"Table {table} is not person-scoped; omit person_id")
     values = {key: value for key, value in data.items() if key in TABLE_COLUMNS[table]}
     stamp = now_iso()
     if "created_at" in TABLE_COLUMNS[table]:
@@ -134,39 +170,76 @@ def create_record(table: str, data: dict, db_path: Path | str = DB_PATH) -> int:
     placeholders = ", ".join("?" for _ in columns)
     column_sql = ", ".join(columns)
     sql = f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})"
-    with get_connection(db_path) as connection:
+    with _write_connection(db_path) as connection:
         cursor = connection.execute(sql, [values[column] for column in columns])
         return int(cursor.lastrowid)
 
 
-def update_record(table: str, record_id: int, data: dict, db_path: Path | str = DB_PATH) -> None:
+def _mutation_scope(table: str, person_id: int | None) -> tuple[str, list[int]]:
+    person_scoped = "person_id" in TABLE_COLUMNS[table]
+    if person_scoped and person_id is None:
+        raise ValueError(f"person_id is required for table {table}")
+    if not person_scoped and person_id is not None:
+        raise ValueError(f"Table {table} is not person-scoped; omit person_id")
+    return ("id = ? AND person_id = ?", [person_id]) if person_scoped else ("id = ?", [])
+
+
+def update_record(
+    table: str,
+    record_id: int,
+    data: dict,
+    db_path: Path | str = DB_PATH,
+    *,
+    person_id: int | None = None,
+) -> None:
+    """Update one record, requiring scope for person-owned tables."""
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
+    if "person_id" in data:
+        raise ValueError("person_id cannot be changed by an ordinary update")
+    where, scope_params = _mutation_scope(table, person_id)
     values = {key: value for key, value in data.items() if key in TABLE_COLUMNS[table]}
     if "updated_at" in TABLE_COLUMNS[table]:
         values["updated_at"] = now_iso()
-    if not values:
-        return
-    assignments = ", ".join(f"{column} = ?" for column in values)
-    sql = f"UPDATE {table} SET {assignments} WHERE id = ?"
-    with get_connection(db_path) as connection:
-        connection.execute(sql, [*values.values(), record_id])
+    assignments = ", ".join(f"{column} = ?" for column in values) or "id = id"
+    with _write_connection(db_path) as connection:
+        cursor = connection.execute(
+            f"UPDATE {table} SET {assignments} WHERE {where}",
+            [*values.values(), record_id, *scope_params],
+        )
+        if cursor.rowcount != 1:
+            raise RecordNotFound(f"No {table} record {record_id} for the requested scope")
 
 
-def delete_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> None:
+def delete_record(
+    table: str,
+    record_id: int,
+    db_path: Path | str = DB_PATH,
+    *,
+    person_id: int | None = None,
+) -> None:
+    """Delete one record, requiring scope for person-owned tables."""
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
-    with get_connection(db_path) as connection:
-        connection.execute(f"DELETE FROM {table} WHERE id = ?", (record_id,))
+    where, scope_params = _mutation_scope(table, person_id)
+    with _write_connection(db_path) as connection:
+        cursor = connection.execute(
+            f"DELETE FROM {table} WHERE {where}", (record_id, *scope_params)
+        )
+        if cursor.rowcount != 1:
+            raise RecordNotFound(f"No {table} record {record_id} for the requested scope")
 
 
-def delete_records_for_person(person_id: int, db_path: Path | str = DB_PATH) -> None:
-    """Delete all child records for a profile in one transaction."""
-    with get_connection(db_path) as connection:
+def delete_person(person_id: int, db_path: Path | str = DB_PATH) -> None:
+    """Delete one profile and all child rows atomically."""
+    with _write_connection(db_path) as connection:
         for table in reversed(TABLES):
             if table == "people":
                 continue
             connection.execute(f"DELETE FROM {table} WHERE person_id = ?", (person_id,))
+        cursor = connection.execute("DELETE FROM people WHERE id = ?", (person_id,))
+        if cursor.rowcount != 1:
+            raise RecordNotFound(f"No people record {person_id}")
 
 
 def get_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> dict | None:
@@ -275,7 +348,7 @@ def import_all_tables(payload: dict, clear_existing: bool = False, db_path: Path
     if not isinstance(payload, dict):
         raise ValueError("Backup payload tables must be a JSON object.")
 
-    with get_connection(db_path) as connection:
+    with _write_connection(db_path) as connection:
         if clear_existing:
             for table in reversed(TABLES):
                 connection.execute(f"DELETE FROM {table}")

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
-import socket
+import time
 import urllib.error
 import urllib.request
 from datetime import date, timedelta
@@ -308,7 +309,7 @@ def _parse_http_error(exc: urllib.error.HTTPError) -> tuple[str | None, str]:
         return None, str(exc)
     try:
         parsed = json.loads(body)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return None, f"{exc} ({body[:500]})"
     if isinstance(parsed, dict):
         error = parsed.get("error") or parsed
@@ -331,16 +332,30 @@ def call_zhipu_chat(
 
     last_error: AIChatError | None = None
     tried_models = []
+    deadline = time.monotonic() + CHAT_TIMEOUT_SECONDS
     for candidate_model in chat_model_candidates(model):
         tried_models.append(candidate_model)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise NetworkAIChatError(
+                "Zhipu AI did not respond within the request time budget. Try again."
+            )
         try:
-            return _call_zhipu_chat_model(api_key, candidate_model, messages, temperature, max_tokens)
+            return _call_zhipu_chat_model(
+                api_key,
+                candidate_model,
+                messages,
+                temperature,
+                max_tokens,
+                timeout_seconds=remaining,
+            )
         except RateLimitError as exc:
             last_error = exc
             continue
-        except NetworkAIChatError as exc:
-            last_error = exc
-            continue
+        except NetworkAIChatError:
+            # Transport failures are model-independent; do not multiply the timeout
+            # budget by retrying the same network path for every fallback model.
+            raise
 
     if isinstance(last_error, RateLimitError):
         raise RateLimitError(
@@ -359,6 +374,8 @@ def _call_zhipu_chat_model(
     messages: list[dict],
     temperature: float,
     max_tokens: int,
+    *,
+    timeout_seconds: float = CHAT_TIMEOUT_SECONDS,
 ) -> str:
     request = urllib.request.Request(
         ai_config.ZHIPU_API_URL,
@@ -375,8 +392,11 @@ def _call_zhipu_chat_model(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=CHAT_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read(ai_config.ZHIPU_RESPONSE_BYTE_LIMIT + 1)
+            if len(raw) > ai_config.ZHIPU_RESPONSE_BYTE_LIMIT:
+                raise InvalidAIResponseError("Zhipu AI returned an oversized response.")
+            payload = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         provider_code, detail = _parse_http_error(exc)
         if exc.code == 429:
@@ -389,18 +409,18 @@ def _call_zhipu_chat_model(
         if exc.code in {401, 403}:
             raise MissingAPIKeyError("Zhipu AI rejected the API key. Check that your key is correct and has access to this model.", detail) from exc
         raise AIChatError("Zhipu AI returned an error.", detail) from exc
-    except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+    except (OSError, http.client.HTTPException) as exc:
         raise NetworkAIChatError("Could not reach Zhipu AI. Check your network connection and try again.", str(exc)) from exc
-    except json.JSONDecodeError as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise InvalidAIResponseError("Zhipu AI returned a response the app could not read.", str(exc)) from exc
 
     try:
         content = payload["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise InvalidAIResponseError("Zhipu AI returned an unexpected response format.", json.dumps(payload)[:1000]) from exc
-    if not str(content).strip():
+    if not isinstance(content, str) or not content.strip():
         raise InvalidAIResponseError("Zhipu AI returned an empty response.")
-    return str(content).strip()
+    return content.strip()
 
 
 def _history_key(person_id: int, db_path: Path | str) -> str:

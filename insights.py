@@ -42,6 +42,10 @@ RED_FLAG_TERMS = [
     "loss of consciousness",
 ]
 
+# One monotonic deadline per insight action, shared by in-model retries and
+# model fallback (the chat equivalent is ai_chat.CHAT_TIMEOUT_SECONDS).
+INSIGHT_TIMEOUT_SECONDS = 30
+
 AI_CONTEXT_LIMITS = {
     "active_medications": 3,
     "allergies": 3,
@@ -308,31 +312,42 @@ def _parse_http_error(exc: urllib.error.HTTPError) -> tuple[str | None, str]:
                 code = error.get("code")
                 detail = f"{exc} ({code}: {message})" if code else f"{exc} ({message})"
                 return str(code) if code else None, detail
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
     return None, f"{exc} ({body[:500]})"
 
 
-def _call_zhipu_chat_completion(request: urllib.request.Request) -> dict:
+def _call_zhipu_chat_completion(
+    request: urllib.request.Request, *, deadline: float | None = None
+) -> dict:
+    deadline = deadline or time.monotonic() + INSIGHT_TIMEOUT_SECONDS
     last_error = None
     for delay in (0, 3, 8):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         if delay:
-            time.sleep(delay)
+            time.sleep(min(delay, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                return json.loads(response.read().decode("utf-8"))
+            with urllib.request.urlopen(request, timeout=remaining) as response:
+                raw = response.read(ai_config.ZHIPU_RESPONSE_BYTE_LIMIT + 1)
+                if len(raw) > ai_config.ZHIPU_RESPONSE_BYTE_LIMIT:
+                    raise ZhipuAPIError(None, None, "Zhipu AI returned an oversized response.")
+                return json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             provider_code, detail = _parse_http_error(exc)
             last_error = ZhipuAPIError(exc.code, provider_code, detail)
             if exc.code != 429 or provider_code == "1113":
                 raise last_error from exc
-        except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
+        except (TimeoutError, urllib.error.URLError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(exc).lower():
-                last_error = ZhipuRetryableError(str(exc))
-                continue
+                raise ZhipuRetryableError(str(exc)) from exc
             raise
-    raise last_error
+    raise last_error or ZhipuRetryableError("Zhipu AI request deadline expired")
 
 
 def _build_zhipu_request(api_key: str, model: str, messages: list[dict], max_tokens: int, temperature: float) -> urllib.request.Request:
@@ -359,17 +374,16 @@ def _call_zhipu_with_model_fallback(
     temperature: float,
 ) -> tuple[dict, str]:
     last_error = None
+    deadline = time.monotonic() + INSIGHT_TIMEOUT_SECONDS
     for model in ai_config.zhipu_model_candidates():
         request = _build_zhipu_request(api_key, model, messages, max_tokens, temperature)
         try:
-            return _call_zhipu_chat_completion(request), model
+            return _call_zhipu_chat_completion(request, deadline=deadline), model
         except ZhipuAPIError as exc:
             last_error = exc
-            if exc.http_status != 429:
+            if exc.http_status != 429 or exc.provider_code == "1113":
                 raise
-        except ZhipuRetryableError as exc:
-            last_error = exc
-    raise last_error
+    raise last_error or ZhipuAPIError(None, None, "No Zhipu model is configured.")
 
 
 def validate_zhipu_connection() -> tuple[bool, str, str | None]:
@@ -378,6 +392,9 @@ def validate_zhipu_connection() -> tuple[bool, str, str | None]:
     api_key = ai_config.get_zhipu_api_key()
     if not api_key:
         return False, "No Zhipu AI API key is configured.", None
+    if not ai_config.zhipu_model_candidates():
+        message = "No Zhipu model is configured. Set ZHIPU_MODEL or ZHIPU_FALLBACK_MODELS."
+        return False, message, None
 
     messages = [{"role": "user", "content": "Reply with OK."}]
     try:

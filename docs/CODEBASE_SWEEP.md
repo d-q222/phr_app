@@ -54,7 +54,7 @@ Constants:
 
 Connection and schema:
 
-- `get_connection` opens SQLite with row dictionaries and `PRAGMA foreign_keys = ON`.
+- `get_connection` opens SQLite with row dictionaries, `PRAGMA foreign_keys = ON`, and a bounded one-second busy wait; write helpers map only busy/locked failures to `DatabaseBusyError`.
 - `init_db` creates the DB parent folder and executes `schema.sql`.
 - `now_iso`, `row_to_dict`, and `rows_to_dicts` are formatting helpers.
 
@@ -71,7 +71,7 @@ Backup/restore:
 
 Sweep changes:
 
-- Added `delete_records_for_person` to delete all profile child records in one transaction instead of N+1 row deletes.
+- `delete_person` deletes all profile child records and the parent row in one connection and one transaction, so a parent-delete failure rolls back every child deletion.
 - Replaced restore-time `INSERT OR REPLACE` with real SQLite upsert semantics. This avoids deleting/reinserting parent rows, which can violate foreign keys or drop child records when restoring a backup over an existing DB.
 - Added shape validation for backup table payloads so malformed JSON fails with clear `ValueError` messages.
 
@@ -168,7 +168,7 @@ Markdown exports:
 
 Sweep changes:
 
-- `delete_person` now uses bulk child deletion through `db.delete_records_for_person`.
+- `delete_person` delegates to `db.delete_person`, which removes child rows and the parent atomically in one transaction.
 - Added robust date parsing for reminder due-date calculations. Invalid imported reminder dates are skipped instead of being compared lexicographically or raising errors.
 
 ### `imports_exports.py`
@@ -385,7 +385,7 @@ Sweep additions:
 
 ### `.devcontainer/devcontainer.json`
 
-Defines the Python 3.11 dev container image, VS Code/Codespaces defaults, install command, Streamlit post-attach command, and port `8501` forwarding.
+Defines the Python 3.12 dev container image, VS Code/Codespaces defaults, install command, Streamlit post-attach command, and port `8501` forwarding.
 
 ### `.gitignore`
 
@@ -501,6 +501,34 @@ Regressions: `test_zhipu_model_candidates_ignore_blank_primary`, `test_ai_chat_c
 
 ## Remaining Risks And Follow-Ups
 
+The `Open P1` entries below are temporary: delete each entry after its fix and required regression
+tests pass.
+
+- **Open P1 — AI provider output is not medically post-validated.** Recorded during
+  the PR #3 security audit on 2026-08-01. `ai_chat._call_zhipu_chat_model` accepts any
+  nonempty provider string and `render_ai_chatbot` displays it; Health Insights likewise
+  trusts provider text after appending the disclaimer. Prompts prohibit diagnosis,
+  medication or supplement changes, prognosis, urgent-symptom home management, and
+  unsupported raw-lab interpretation, but prompts are not an enforcement boundary.
+  A future fix must validate provider output before display and use a safe failure mode:
+  a cautious local message for chat and the existing rule-based report for insights.
+  Regression tests must mock unsafe provider strings for every prohibited category,
+  require source flags for abnormal-lab claims, confirm safe output still passes, and
+  make no real provider calls. Do not weaken the existing prompts or treat a disclaimer
+  appended to unsafe content as sufficient mitigation.
+- **Open P1 — locked-profile authorization is not enforced by direct context/export
+  helpers.** Recorded during the PR #3 security audit on 2026-08-01. Normal Streamlit
+  routing checks `security.health_data_visible`, but direct calls to helpers such as
+  `ai_chat.build_patient_context`, `insights.collect_health_context`, selected-profile
+  JSON/FHIR export helpers, summaries, and similar service functions trust their caller
+  to have performed that check. This leaves an invariant gap for future non-UI callers.
+  Before adding an HTTP/API/background-job caller, define one explicit authorization
+  boundary that derives the permitted `person_id` from trusted server-side/session
+  context; a caller-supplied `person_id` must not count as authorization. Do not couple
+  `db.py` or general service logic directly to Streamlit session state. Regression tests
+  must cover a locked selected profile, a second profile, and overlapping demo/real IDs,
+  and must prove that exports, summaries, body-map/AI context, cached state, and errors
+  reveal no locked health data.
 - Streamlit UI behavior is mostly tested through pure helpers and service functions, not browser-driven interaction.
 - FHIR support remains intentionally lightweight and human-readable; production EHR interoperability would need implementation-guide validation, coded vocabularies, and SMART-on-FHIR flows.
 - Local profile passwords do not encrypt the database and are not production authentication.

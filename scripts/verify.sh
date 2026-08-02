@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if [[ -x ".venv/bin/python" ]]; then
+if [[ -n "${PHR_VERIFY_PYTHON_BIN:-}" ]]; then
+  PYTHON_BIN="$PHR_VERIFY_PYTHON_BIN"
+elif [[ -x ".venv/bin/python" ]]; then
   PYTHON_BIN=".venv/bin/python"
 elif command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="python3"
@@ -13,6 +15,11 @@ else
 fi
 
 printf 'Using Python: %s\n' "$PYTHON_BIN"
+
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+  printf 'ERROR: Python 3.12+ is required. Recreate .venv with: python3.12 -m venv .venv\n' >&2
+  exit 1
+fi
 
 # Lint gate (fatal): unused/dead code, import order, and the AGENTS.md §6.2 complexity
 # signals (over-complex functions, too many args/statements). Pre-existing outliers are

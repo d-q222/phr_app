@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
@@ -788,22 +789,24 @@ def show_errors(errors: list[str]) -> None:
         st.error(error)
 
 
-def clean_payload(payload: dict) -> dict:
+def clean_payload(table: str, payload: dict) -> dict:
     cleaned = {}
     for key, value in payload.items():
         if value == "":
             cleaned[key] = None
         else:
             cleaned[key] = value
-    for key in ["numeric_value", "reference_low", "reference_high"]:
-        if key in cleaned:
-            cleaned[key] = validation.normalize_optional_number(cleaned[key])
-    if "value" in cleaned and not validation.is_blank(cleaned["value"]):
+    if table == "lab_results":
+        for key in ["numeric_value", "reference_low", "reference_high"]:
+            if key in cleaned:
+                cleaned[key] = validation.normalize_optional_number(cleaned[key])
+    if table == "wearable_records" and "value" in cleaned and not validation.is_blank(cleaned["value"]):
         cleaned["value"] = float(cleaned["value"])
-    if "severity" in cleaned and validation.is_blank(cleaned["severity"]):
-        cleaned["severity"] = None
-    elif "severity" in cleaned:
-        cleaned["severity"] = int(cleaned["severity"])
+    if table in {"allergies", "health_entries"} and "severity" in cleaned:
+        if validation.is_blank(cleaned["severity"]):
+            cleaned["severity"] = None
+        elif table == "health_entries":
+            cleaned["severity"] = int(cleaned["severity"])
     return cleaned
 
 
@@ -905,14 +908,16 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
             if not confirm_remove:
                 st.error("Confirm password removal before continuing.")
                 return
-            services.update_person(
-                int(person["id"]),
-                {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
-                db_path=db_path,
-            )
-            security.unlock_profile(int(person["id"]), db_path=db_path)
-            st.success("Password removed.")
-            st.rerun()
+            if apply_record_change(
+                lambda: services.update_person(
+                    int(person["id"]),
+                    {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
+                    db_path=db_path,
+                )
+            ):
+                security.unlock_profile(int(person["id"]), db_path=db_path)
+                st.success("Password removed.")
+                st.rerun()
     with st.form(f"password_form_{person['id']}"):
         password = st.text_input("Set/change password", type="password")
         hint = st.text_input("Password hint", value=person.get("profile_password_hint") or "")
@@ -920,8 +925,8 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
         if submitted:
             if not password:
                 st.error("Password cannot be blank.")
-            else:
-                services.update_person(
+            elif apply_record_change(
+                lambda: services.update_person(
                     int(person["id"]),
                     {
                         "profile_password_enabled": 1,
@@ -930,6 +935,7 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
                     },
                     db_path=db_path,
                 )
+            ):
                 security.lock_profile(int(person["id"]), db_path=db_path)
                 st.success("Password saved. Profile is now locked.")
 
@@ -1007,10 +1013,12 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
                         data["profile_password_enabled"] = 1
                         data["profile_password_hash"] = security.hash_password(password)
                         data["profile_password_hint"] = hint
-                    services.create_person(clean_payload(data), db_path=db_path)
-                    st.success("Profile created.")
-                    st.session_state[add_profile_key] = False
-                    st.rerun()
+                    if apply_record_change(
+                        lambda: services.create_person(clean_payload("people", data), db_path=db_path)
+                    ):
+                        st.success("Profile created.")
+                        st.session_state[add_profile_key] = False
+                        st.rerun()
 
     if not people:
         return
@@ -1052,16 +1060,17 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
             if not confirm_delete:
                 st.error("Confirm profile delete before continuing.")
                 return
-            services.delete_person(int(row["id"]), db_path=db_path)
-            st.warning(warning_label("Profile deleted."))
-            st.session_state[profile_edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.delete_person(int(row["id"]), db_path=db_path)):
+                st.warning(warning_label("Profile deleted."))
+                st.session_state[profile_edit_reset_key] += 1
+                st.rerun()
         if submitted:
             errors = validation.validate_person(data)
             if errors:
                 show_errors(errors)
-            else:
-                services.update_person(int(row["id"]), clean_payload(data), db_path=db_path)
+            elif apply_record_change(
+                lambda: services.update_person(int(row["id"]), clean_payload("people", data), db_path=db_path)
+            ):
                 st.success("Profile updated.")
                 st.session_state[profile_edit_reset_key] += 1
                 st.rerun()
@@ -1078,8 +1087,33 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
     return start or None, end or None
 
 
+def apply_record_change(action: Callable[[], None]) -> bool:
+    """Run a person-scoped write, reporting a clean message if the record is not available.
+
+    `db.RecordNotFound` means the target — a record, or the profile itself for
+    profile-level writes — no longer exists or is out of scope for the caller, e.g.
+    after a concurrent delete in another session.
+    """
+    try:
+        action()
+    except db.RecordNotFound:
+        st.error("That record is no longer available. Refresh and try again.")
+        return False
+    except db.DatabaseBusyError:
+        st.error("The health record database is busy. Wait a moment and try again.")
+        return False
+    return True
+
+
+def record_page_scope(table: str, person_id: int, db_path: Path | str) -> str:
+    """Return the stable database/profile/table identity for write-capable UI state."""
+    return f"{Path(db_path).resolve()}:{person_id}:{table}"
+
+
 def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     config = FIELD_CONFIGS[table]
+    person_id = int(person["id"])
+    state_scope = record_page_scope(table, person_id, db_path)
     page_header(config["title"])
     if demo_mode:
         st.caption("Demo changes stay in this Streamlit session and do not affect saved profiles.")
@@ -1091,34 +1125,34 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
         body_system = st.selectbox("Body system", ["", *BODY_SYSTEMS])
         body_part = st.text_input("Body part")
         search = st.text_input("Search title/notes")
-        rows = services.filter_health_entries(int(person["id"]), start, end, body_system or None, body_part or None, search or None, db_path=db_path)
+        rows = services.filter_health_entries(person_id, start, end, body_system or None, body_part or None, search or None, db_path=db_path)
     elif table == "lab_results":
         start, end = date_range_controls("labs")
         test_search = st.text_input("Test search")
         flag = st.selectbox("Lab flag", ["", *LAB_FLAGS])
-        rows = services.filter_labs(int(person["id"]), start, end, test_search or None, flag or None, db_path=db_path)
+        rows = services.filter_labs(person_id, start, end, test_search or None, flag or None, db_path=db_path)
     elif table == "medications":
         status = st.selectbox("Medication status", ["", *MEDICATION_STATUSES])
-        rows = services.medication_filters(int(person["id"]), status or None, db_path=db_path)
+        rows = services.medication_filters(person_id, status or None, db_path=db_path)
     elif table == "reminders":
         status = st.selectbox("Reminder status", ["", *REMINDER_STATUSES])
-        rows = services.reminder_filters(int(person["id"]), status or None, db_path=db_path)
+        rows = services.reminder_filters(person_id, status or None, db_path=db_path)
     else:
-        rows = services.list_items(table, int(person["id"]), filters, config["order_by"], descending=table not in {"allergies", "medications"}, db_path=db_path)
+        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications"}, db_path=db_path)
 
     dataframe(rows)
 
     singular_title = SINGULAR_TITLES.get(config["title"], config["title"])
-    add_form_key = f"show_add_{table}_form"
+    add_form_key = f"{state_scope}:add:open"
     if add_form_key not in st.session_state:
         st.session_state[add_form_key] = False
 
-    if st.button(action_button_label(f"Add {singular_title}"), key=f"toggle_add_{table}", on_click=toggle_add_form, args=(add_form_key,)):
+    if st.button(action_button_label(f"Add {singular_title}"), key=f"{state_scope}:add:toggle", on_click=toggle_add_form, args=(add_form_key,)):
         pass
 
     if st.session_state[add_form_key]:
-        with st.form(f"add_{table}"):
-            data = {name: input_field(name, kind, key=f"add_{table}_{name}") for name, kind in config["fields"]}
+        with st.form(f"{state_scope}:add:form"):
+            data = {name: input_field(name, kind, key=f"{state_scope}:add:{name}") for name, kind in config["fields"]}
             submit_col, cancel_col = st.columns([1, 1])
             with submit_col:
                 submitted = st.form_submit_button(action_button_label("Add record"))
@@ -1132,10 +1166,17 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
                 if errors:
                     show_errors(errors)
                 else:
-                    services.create_item(table, int(person["id"]), clean_payload(data), db_path=db_path)
-                    st.success("Record added.")
-                    st.session_state[add_form_key] = False
-                    st.rerun()
+                    if apply_record_change(
+                        lambda: services.create_item(
+                            table,
+                            person_id,
+                            clean_payload(table, data),
+                            db_path=db_path,
+                        )
+                    ):
+                        st.success("Record added.")
+                        st.session_state[add_form_key] = False
+                        st.rerun()
 
     if table == "lab_results":
         numeric_rows = [row for row in rows if row.get("numeric_value") is not None]
@@ -1148,12 +1189,12 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
         chart_data = pd.DataFrame(rows).sort_values("timestamp")
         metric = st.selectbox("Trend metric", sorted(chart_data["metric_type"].unique()))
         st.line_chart(chart_data[chart_data["metric_type"] == metric], x="timestamp", y="value")
-        dataframe(services.wearable_summary(int(person["id"]), db_path=db_path))
+        dataframe(services.wearable_summary(person_id, db_path=db_path))
 
     if not rows:
         return
 
-    edit_reset_key = f"edit_{table}_selection_reset"
+    edit_reset_key = f"{state_scope}:edit:reset"
     if edit_reset_key not in st.session_state:
         st.session_state[edit_reset_key] = 0
     edit_options = [""] + [str(row["id"]) for row in rows]
@@ -1163,15 +1204,16 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
         "Edit existing record",
         edit_options,
         format_func=lambda value: edit_labels[value],
-        key=f"edit_{table}_selection_{st.session_state[edit_reset_key]}",
+        key=f"{state_scope}:edit:selection:{st.session_state[edit_reset_key]}",
     )
     if not selected_record_id:
         return
 
     row = next(item for item in rows if str(item["id"]) == selected_record_id)
-    with st.form(f"edit_{table}_{row['id']}"):
-        data = {name: input_field(name, kind, row.get(name), key=f"edit_{table}_{row['id']}_{name}") for name, kind in config["fields"]}
-        confirm_delete = st.checkbox("Confirm record delete", key=f"confirm_delete_{table}_{row['id']}")
+    record_scope = f"{state_scope}:edit:{row['id']}"
+    with st.form(f"{record_scope}:form"):
+        data = {name: input_field(name, kind, row.get(name), key=f"{record_scope}:{name}") for name, kind in config["fields"]}
+        confirm_delete = st.checkbox("Confirm record delete", key=f"{record_scope}:confirm_delete")
         if table == "reminders":
             save_col, complete_col, dismiss_col, delete_col, cancel_col = st.columns([1, 1, 1, 1, 1])
             with save_col:
@@ -1198,27 +1240,26 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
             st.session_state[edit_reset_key] += 1
             st.rerun()
         if completed:
-            services.update_item("reminders", int(row["id"]), {"status": "Completed"}, db_path=db_path)
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.update_item("reminders", person_id=person_id, record_id=int(row["id"]), data={"status": "Completed"}, db_path=db_path)):
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if dismissed:
-            services.update_item("reminders", int(row["id"]), {"status": "Dismissed"}, db_path=db_path)
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.update_item("reminders", person_id=person_id, record_id=int(row["id"]), data={"status": "Dismissed"}, db_path=db_path)):
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if deleted:
             if not confirm_delete:
                 st.error("Confirm record delete before continuing.")
                 return
-            services.delete_item(table, int(row["id"]), db_path=db_path)
-            st.warning(warning_label("Record deleted."))
-            st.session_state[edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.delete_item(table, person_id=person_id, record_id=int(row["id"]), db_path=db_path)):
+                st.warning(warning_label("Record deleted."))
+                st.session_state[edit_reset_key] += 1
+                st.rerun()
         if submitted:
             errors = config["validator"](data)
             if errors:
                 show_errors(errors)
-            else:
-                services.update_item(table, int(row["id"]), clean_payload(data), db_path=db_path)
+            elif apply_record_change(lambda: services.update_item(table, person_id=person_id, record_id=int(row["id"]), data=clean_payload(table, data), db_path=db_path)):
                 st.success("Record updated.")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()
@@ -1282,10 +1323,16 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         st.subheader("CSV Imports")
         labs_file = st.file_uploader("Import labs CSV", type=["csv"])
         if labs_file and st.button(action_button_label("Import labs")):
-            st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
+            try:
+                st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
+            except db.DatabaseBusyError as exc:
+                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
         wearable_file = st.file_uploader("Import wearables CSV", type=["csv"])
         if wearable_file and st.button(action_button_label("Import wearables")):
-            st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
+            try:
+                st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
+            except db.DatabaseBusyError as exc:
+                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
         st.download_button(action_button_label("Download sample labs CSV"), imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
         st.download_button(action_button_label("Download sample wearables CSV"), imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
 
@@ -1320,7 +1367,7 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         else:
             try:
                 result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
                 st.error(f"FHIR import failed: {exc}")
             else:
                 st.write(result)
@@ -1350,7 +1397,7 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         else:
             try:
                 imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
                 st.error(f"Backup restore failed: {exc}")
             else:
                 st.success("Backup restored.")
@@ -1359,6 +1406,7 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
 
 def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     page_header("Health Insights")
+    person_id = int(person["id"])
     start, end = date_range_controls("insights")
     include_medications = st.checkbox("Include medications", value=True)
     include_allergies = st.checkbox("Include allergies", value=True)
@@ -1394,7 +1442,10 @@ def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     )
     if st.button(action_button_label("Generate rule-based report")):
         st.markdown(insights.generate_rule_based_insights(context, focus_area))
-    ai_consent = st.checkbox("I understand selected profile context will be sent to Zhipu AI.", key="insights_ai_consent")
+    consent_key = f"{record_page_scope('insights', person_id, db_path)}:ai_consent"
+    ai_consent = st.checkbox(
+        "I understand selected profile context will be sent to Zhipu AI.", key=consent_key
+    )
     if st.button(action_button_label("Generate AI safety-checked insights")):
         if not ai_consent:
             st.error("Confirm AI context sharing before generating AI insights.")
@@ -1417,7 +1468,13 @@ def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff
-    db.init_db()
+    try:
+        # Pass the module attribute explicitly: the keyword default was bound at import
+        # time, and tests repoint db.DB_PATH at temporary databases.
+        db.init_db(db.DB_PATH)
+    except db.DatabaseBusyError as exc:
+        st.error(str(exc))
+        st.stop()
 
     with st.sidebar:
         st.markdown("### Family PHR")

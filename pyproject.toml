@@ -1,9 +1,9 @@
-# NOTE: target-version matches the actual .venv interpreter (Python 3.9.6), NOT the
-# "3.11+" aspiration in AGENTS.md §9. Pinning py311 makes pyupgrade rewrite to syntax
-# the runtime can't execute (e.g. `datetime.UTC`), which breaks the test suite. Bump this
-# to py311 only after the venv is actually upgraded to 3.11.
+# NOTE: target-version matches the actual .venv interpreter. The venv was upgraded from
+# 3.9.6 to 3.12 on 2026-08-01, so pyupgrade
+# may now rewrite to 3.12 syntax (e.g. `datetime.UTC`) that the runtime can execute.
+# Keep this in sync with the interpreter — a target ahead of the runtime breaks the suite.
 [tool.ruff]
-target-version = "py39"
+target-version = "py312"
 line-length = 100
 exclude = [".venv", "data", ".pytest_cache"]
 
