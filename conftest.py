@@ -45,10 +45,12 @@ def guard_real_database(tmp_path, monkeypatch, request):
     """Point every test at a temporary database and fail loudly on real-DB access.
 
     ``db.DB_PATH`` is redirected so that any helper reaching for the module-level
-    default lands in ``tmp_path``. Every ``db_path`` parameter in the codebase now
-    defaults to ``None`` and resolves ``db.DB_PATH`` in the function body, so this
-    patch is actually honoured -- an import-time ``db_path=DB_PATH`` default would
-    have frozen the real path into the function object and ignored it silently.
+    default lands in ``tmp_path``. Every ``db_path`` parameter now defaults to
+    ``None`` rather than to ``DB_PATH``, so this patch is actually honoured -- an
+    import-time default would have frozen the real path into the function object
+    and ignored it silently. Where the ``None`` resolves differs by layer: caller
+    modules resolve in the function body, while ``db.py`` forwards it down to
+    ``db._resolve_db_path`` at the two places that open the file.
 
     The ``sqlite3.connect`` wrapper is the backstop that does not depend on that
     discipline holding: it catches reads as well as writes whatever the call site's

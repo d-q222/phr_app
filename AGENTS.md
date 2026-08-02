@@ -13,7 +13,9 @@ Preserve these boundaries in code, UI text, documentation, tests, and AI prompts
 Before changing code, read:
 
 1. `README.md` for product behavior and operating instructions.
-2. `docs/CODEBASE_SWEEP.md` for the current architecture, known risks, and prior fixes.
+2. `docs/current_system.md` for the current architecture, layering, and failure modes.
+   `docs/CODEBASE_SWEEP.md` is superseded for architecture -- read it only for the `Open P1`
+   tracker and the historical audit record.
 3. The directly affected source files and tests.
 4. `docs/body_map_prd.md` only for body-map work.
 5. `docs/body_map_implementation_notes.md` only when continuing body-map implementation.
@@ -266,8 +268,8 @@ Mandatory rules:
 ## 12. Documentation and completion report
 
 Update `README.md` when setup, environment variables, supported behavior, safety boundaries, or user
-operations change. Update `docs/CODEBASE_SWEEP.md` only for meaningful architecture/audit changes, not
-for every small edit.
+operations change. Update `docs/current_system.md` for meaningful architecture changes, not for every small edit.
+`docs/CODEBASE_SWEEP.md` is historical -- amend it only to close an `Open P1` item.
 
 At completion, report:
 

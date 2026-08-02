@@ -1862,13 +1862,14 @@ def test_no_caller_forwards_none_into_profile_unlock_scoping(tmp_path, monkeypat
 
     person = {"id": 1, "name": "Scoped Person", "profile_password_enabled": 1}
     security.unlock_profile(1, db_path=real_db)
+    before = len(seen)  # the unlock above already recorded one call
 
     assert app.is_locked_profile(person) is False
     app.selected_profile_banner(person)
     app.display_safe_people([person])
     app.profile_selection_label(person)
 
-    assert seen, "expected the profile helpers to consult _db_scope"
+    assert len(seen) > before, "expected the profile helpers to consult _db_scope"
     assert None not in seen, f"a caller forwarded None into _db_scope: {seen}"
 
 

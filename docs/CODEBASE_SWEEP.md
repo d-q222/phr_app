@@ -1,5 +1,9 @@
 # Full Codebase Sweep
 
+> **Superseded for architecture by `docs/current_system.md`.** This file is kept as the historical
+> audit record and as the home of the `Open P1` tracker. Its module descriptions and its 15-test
+> baseline predate the body-map subsystem and are not current.
+
 This document records a source-level sweep of the local-first Streamlit PHR app. It explains the role of each file and major code section, then lists the bugs, risks, and efficiency items reviewed during the audit.
 
 Baseline before changes: `.venv/bin/python -m pytest -q` passed with 15 tests.
