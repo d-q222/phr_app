@@ -51,7 +51,7 @@ Every slice must traverse this whole path. A slice that stops at the service lay
 
 | Module | Becomes |
 |---|---|
-| `db.py` | SQLAlchemy models + repository classes. The hand-rolled f-string query builder (`db.py:200-225`) is retired. |
+| `db.py` | SQLAlchemy models + repository classes. The hand-rolled f-string query builder in `db.list_records` is retired. |
 | `app.py` (1,516 lines) | Split: routes (FastAPI) + components (React). `FIELD_CONFIGS` is the seam — see §5. |
 | `body_map_ui.py`, `components/body_map/index.html` | A first-class React component. |
 | `ai_chat.py` | Split three ways: context assembly (service), transport (provider adapter), rendering (React). |
@@ -77,12 +77,12 @@ Non-negotiable properties, per ADR-0003:
 - **`ON DELETE CASCADE`** via declared relationships, moving the delete-children guarantee out of
   `services.delete_person` and into the database.
 - **No Postgres-only types** (JSONB, arrays). Dual-engine CI makes this self-enforcing.
-- **Timezone-aware timestamps.** `db.now_iso()` is naive local time today, and `fhir.py:73` still calls the
+- **Timezone-aware timestamps.** `db.now_iso()` is naive local time today, and `fhir.export_bundle` still calls the
   deprecated `datetime.utcnow()`. Fix both at the model boundary.
 
 ### Repository contract — the isolation boundary
 
-The contract established in `2e8261e` carries forward and tightens:
+The contract established in PR #3 carries forward and tightens:
 
 ```python
 class RecordRepository:
@@ -118,7 +118,7 @@ contracts and the conflict must be resolved once, not per-slice.
 **Decision: keep `validation.py` as the shared rule layer; wrap it at the API boundary.**
 
 - Pydantic models own **shape and type coercion** at the HTTP edge — replacing `app.clean_payload`
-  (app.py:791), which is type coercion that has been living in the UI.
+  (`app.clean_payload`), which is type coercion that has been living in the UI.
 - `validation.py` owns **domain rules** (severity ranges, date ordering, controlled vocabularies) and keeps
   its message-list contract.
 - The route layer calls the validators and converts messages into a `422` with per-field detail.
@@ -198,7 +198,7 @@ problem only when a sharing slice exists, and only for the sharing path.
 
 ## 8. Testing
 
-- The 159 existing tests are the behavioral contract. Port them; do not rewrite them to match new code.
+- The 206 existing tests are the behavioral contract. Port them; do not rewrite them to match new code.
 - The two-profile isolation pattern (`tests/AGENTS.md`) applies to every new endpoint, and now must cover
   `update`/`delete`/`get` with a **foreign record id** returning 404.
 - **Dual-engine CI** from slice 3 (ADR-0003): the suite runs against SQLite and Postgres.

@@ -1,6 +1,6 @@
 # Migration Map
 
-**Updated:** 2026-08-01, commit `bff5c38`. **Baseline:** 159 tests passing, Python 3.12.13.
+**Updated:** 2026-08-02, commit `cb7e055`. **Baseline:** 206 tests passing, Python 3.12.13.
 
 How the Streamlit + SQLite prototype becomes the system in `docs/target_architecture.md`. The controlling
 step list is `PHR_PROJECT_INSTRUCTIONS_OPTIMIZED_2026-07-28.md:19-27`.
@@ -16,7 +16,7 @@ step list is `PHR_PROJECT_INSTRUCTIONS_OPTIMIZED_2026-07-28.md:19-27`.
 | # | Step | Status |
 |---|---|---|
 | 1 | Document the current system and target architecture | **Done** — 2026-08-01 |
-| 2 | Audit malformed inputs, failure behavior, profile isolation | **Done** — `docs/CODEBASE_SWEEP.md` closed its P0–P3 findings; the write-path isolation gap it missed was closed in `2e8261e` |
+| 2 | Audit malformed inputs, failure behavior, profile isolation | **Done** — `docs/CODEBASE_SWEEP.md` closed its P0–P3 findings; the write-path isolation gap it missed was closed in PR #3 |
 | 3 | Establish a full-stack walking skeleton | **Next** — unblocked, all four ADRs decided |
 | 4 | Migrate patient selection and isolation | Not started |
 | 5 | Migrate one complete record workflow | Not started — candidate chosen, §4 |
@@ -156,8 +156,8 @@ Recorded so they are deliberately open rather than silently unresolved.
 
 | Issue | Where | Handling |
 |---|---|---|
-| `datetime.utcnow()` deprecated and scheduled for removal | `fhir.py:73` | Fix at the model boundary in step 3 (timezone-aware). Changes FHIR timestamp output, so it needs its own verified change |
-| Redundant `socket.timeout` in an `isinstance` | `insights.py:330` | Harmless; clean up opportunistically |
+| `datetime.utcnow()` deprecated and scheduled for removal | `fhir.export_bundle` | Fix at the model boundary in step 3 (timezone-aware). Changes FHIR timestamp output, so it needs its own verified change |
+| Redundant `socket.timeout` in an `isinstance` | `insights._call_zhipu_chat_completion` | Harmless; clean up opportunistically |
 | `generic_record_page` has no direct test | `app.py` | Mitigated by keyword-only `person_id`/`record_id`; superseded when the page becomes React components |
 | Connections opened per call, never explicitly closed | `db.py` | Resolved by SQLAlchemy session scope |
 | Schema triplication | `schema.sql` / `db.TABLE_COLUMNS` / `app.FIELD_CONFIGS` | Resolved by ORM models as single source of truth |

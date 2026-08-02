@@ -125,7 +125,7 @@ Cost: a real learning curve (2.0-style is a shift), and ORMs hide query cost unt
 ### Option C2 — SQLAlchemy Core
 
 Dialect portability and safe query construction without ORM indirection. Retires the hand-rolled query
-builder at `db.py:200-225`, where table and column names are f-string-interpolated into SQL and defended
+builder in `db.list_records`, where table and column names are f-string-interpolated into SQL and defended
 by an allowlist — code that works today but is the most likely place for a future injection bug.
 
 Cost: no declared relationships, no autogenerate from models, so schema truth still lives in more than
@@ -276,7 +276,7 @@ Recommended framing for the ruling, in dependency order:
 - Whichever combination is chosen, the **first migration must represent today's schema** and there must
   be a stamping path for existing `data/phr.db` files.
 - Backup-before-migrate at app startup is required under ADR-0004 regardless of tooling.
-- The chosen layer must express the person-scoping contract established in `2e8261e`: scoped update and
+- The chosen layer must express the person-scoping contract established in PR #3: scoped update and
   delete predicated on `person_id`, with a not-found result that does not distinguish "missing" from
   "not yours" (`docs/domain_invariants.md` §1).
 

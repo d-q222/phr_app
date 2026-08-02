@@ -13,22 +13,22 @@ through verified vertical slices, preserving current behavior. Step 3 of that pl
 skeleton along `browser → component → API client → route → service → repository → database`, which
 cannot be scaffolded until the backend framework is chosen.
 
-The decisive constraint is how much existing code survives. Measured at commit `2e8261e`:
+The decisive constraint is how much existing code survives. Measured at commit `cb7e055`:
 
 | Module | Lines | Imports Streamlit? | Direct `db.*` calls |
 |---|---|---|---|
-| `fhir.py` | 711 | no | 1 |
-| `insights.py` | 579 | no | 0 |
-| `db.py` | 343 | no | — |
-| `services.py` | 325 | no | 10 |
-| `body_map_services.py` | 204 | no | 0 |
+| `fhir.py` | 713 | no | 1 |
+| `insights.py` | 596 | no | 0 |
+| `db.py` | 381 | no | — |
+| `services.py` | 356 | no | 8 |
+| `body_map_services.py` | 205 | no | 0 |
 | `body_map_summary.py` | 196 | no | 0 |
-| `imports_exports.py` | 192 | no | 2 |
+| `imports_exports.py` | 199 | no | 2 |
 | `body_map_config.py` | 393 | no | 0 |
 | `validation.py` | 126 | no | 0 |
 | `models.py` | 35 | no | 0 |
 
-That is roughly **2,300 lines that are already framework-free**. `fhir.py` alone — bidirectional FHIR
+That is roughly **2,400 lines that are already framework-free** (the table's total excluding `db.py`, which is replaced, and `body_map_config.py`, which is data). `fhir.py` alone — bidirectional FHIR
 R4/R5 Bundle translation with 40+ resource builders and parsers — would take weeks to reproduce and is
 the substrate for the entire interoperability story (ADR-0004). `validation.py` is already shared by the
 UI, CSV import, backup restore, and FHIR import, so it is stack-independent by construction.
@@ -71,7 +71,7 @@ and is resolved in `docs/target_architecture.md`, not here.
 - The `db_path` parameter threaded through nearly every signature becomes injected session/connection
   scope. This is the largest mechanical change in the migration.
 - `services.py` grows explicit person-scoped contracts. Already begun: `update_item`/`delete_item` take
-  keyword-only `person_id` and `record_id` as of `2e8261e`.
+  keyword-only `person_id` and `record_id` as of PR #3.
 - `security.py` is **replaced, not ported**. PBKDF2 hashing survives; `st.session_state` unlock state does
   not. See `docs/domain_invariants.md` §8.
 - `db.RecordNotFound` maps to a single 404 — never a 403, which would leak record existence across profiles.

@@ -1,6 +1,6 @@
 # Current System
 
-**Verified against the repository:** 2026-08-01, commit `2e8261e`. **Suite:** 159 tests passing on Python 3.12.13.
+**Verified against the repository:** 2026-08-02, commit `cb7e055`. **Suite:** 206 tests passing on Python 3.12.13.
 
 Supersedes `docs/CODEBASE_SWEEP.md`, which remains in the repo as the historical record of the
 P0–P3 audit but is stale by an entire subsystem: it predates `body_map_*`, `components/`, and
@@ -69,7 +69,7 @@ and `scripts/verify.sh`.
 
 ```
 app.main()
-  → db.init_db()                              # bootstrap, app.py:1436
+  → db.init_db()                              # bootstrap, in app.main
   → app.selected_profile_sidebar(db_path, demo_mode)
       → services.list_people(db_path)
       → st.sidebar.selectbox(key="selected_profile")   # value is a DISPLAY LABEL string
@@ -88,7 +88,7 @@ Body map and AI chat branch off to `body_map_ui.render_body_map_page(person, db_
 ### Layering is cleaner than it looks
 
 Direct `db.*` **calls** by module: `app.py` **3** (all bootstrap/demo-seed — `db.init_db()` at
-app.py:1436, and `db.init_db` + `db.import_all_tables` for demo seeding at app.py:740-741),
+`app.main`, and `db.init_db` + `db.import_all_tables` for demo seeding in `app.create_demo_database`),
 `imports_exports.py` 2, `fhir.py` 1, and **zero** in `insights.py`, `ai_chat.py`,
 `body_map_services.py`, and `body_map_ui.py`. Everything else routes through `services.*`.
 
@@ -108,9 +108,10 @@ signature change rather than a rewrite for roughly 2,300 of these lines.
 
 Facts that matter for migration:
 
-- **No `ON DELETE CASCADE` anywhere.** `services.delete_person` deletes children in Python first
-  (`db.delete_records_for_person`), then the parent. The guarantee lives in application code, not the
-  database.
+- **No `ON DELETE CASCADE` anywhere.** `db.delete_person` deletes every child table then the parent
+  inside a single transaction, and raises `RecordNotFound` if the parent delete matches no row — which
+  rolls the children back with it. The guarantee lives in application code, not the database, so it
+  does not survive anything that writes to SQLite without going through this function.
 - `wearable_records` has `created_at` but **no `updated_at`**; every other table has both.
   `db.create_record`/`update_record` branch on this.
 - `people` carries auth columns inline: `profile_password_enabled`, `profile_password_hash`,
@@ -187,11 +188,14 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 ## 7. Failure modes
 
 - **Validation failures** — surfaced as messages, never exceptions. Row-atomic for imports.
-- **Isolation violations** — `db.RecordNotFound` (added 2026-08-01). Raised by `db._assert_owned`;
-  `app.apply_record_change` renders a clean message rather than a traceback.
+- **Isolation violations** — `db.RecordNotFound` (added 2026-08-01). Raised when a scoped write
+  matches no row (`db._mutation_scope` supplies the `WHERE`); `app.apply_record_change` renders a
+  clean message rather than a traceback.
 - **Provider failures** — typed: `ZhipuAPIError`, `ZhipuRetryableError`, `AIChatError`,
-  `MissingAPIKeyError`, `RateLimitError`, `NetworkAIChatError`, `InvalidAIResponseError`. Model-fallback
-  loops retry across candidates; rule-based output always remains available.
+  `MissingAPIKeyError`, `RateLimitError`, `NetworkAIChatError`, `InvalidAIResponseError`. Model fallback
+  retries capacity failures (429, missing resource package) across candidates but **not** transport
+  timeouts or account errors, so total AI latency stays bounded; rule-based output always remains
+  available.
 - **Database errors in the body map** — explicitly *not* reported as "no data," since an empty state
   reads as clinically meaningful (`test_database_error_is_not_reported_as_no_data`).
 - **Malformed stored data** — unparseable dates are displayed unchanged rather than dropped;
@@ -199,9 +203,9 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 
 ### Known code-level issues
 
-- `fhir.py:73` uses `datetime.utcnow()`, deprecated and **scheduled for removal**. Surfaces as a test
+- `fhir.export_bundle` uses `datetime.utcnow()`, deprecated and **scheduled for removal**. Surfaces as a test
   warning. Fixing it changes FHIR timestamp output (naive → timezone-aware), so it needs its own change.
-- `insights.py:330` still references `socket.timeout` inside an `isinstance` check — redundant on 3.10+
+- `insights._call_zhipu_chat_completion` still references `socket.timeout` inside an `isinstance` check — redundant on 3.10+
   where it aliases `TimeoutError`, harmless, `socket` still imported.
 - Connections are opened per function call and never explicitly closed; `sqlite3`'s context manager
   commits/rolls back but does not close. Handles are released by GC. No transaction spans two calls.
@@ -213,7 +217,7 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 **Implemented:** local SQLite, local-first default, optional per-profile passwords (PBKDF2-HMAC-SHA256,
 260k iterations, per-password random salt), Keychain storage for the optional Zhipu key, no automatic
 external AI send, selected-profile-only AI context with byte budgeting, no persisted chat history,
-medical disclaimer and urgent-warning language, and — as of `2e8261e` — person-scoped record writes.
+medical disclaimer and urgent-warning language, and — as of PR #3 — person-scoped record writes.
 
 **Not implemented:** production authentication, encryption at rest, audit logs, cloud sync, role-based
 permissions, secure provider sharing, HIPAA deployment infrastructure, OAuth, consent tracking, live
@@ -230,7 +234,7 @@ See `docs/domain_invariants.md` §8 for the full list of stated-but-unenforced p
 
 ## 9. The AI layer is duplication, not abstraction
 
-`ai_config.AI_PROVIDER` is read once (ai_config.py:26) and **never branched on**. There is no provider
+`ai_config.AI_PROVIDER` is read once (`ai_config.AI_PROVIDER`) and **never branched on**. There is no provider
 interface, registry, or strategy. Three concerns are each implemented twice:
 
 | Concern | Implementation A | Implementation B |
@@ -247,7 +251,7 @@ collapsing six functions into one adapter.
 
 ## 10. Tests
 
-159 tests, `scripts/verify.sh` = fatal `ruff check .` → `compileall` → `pytest -q`.
+206 tests, `scripts/verify.sh` = fatal `ruff check .` → `compileall` → `pytest -q`.
 
 | File | Covers |
 |---|---|
