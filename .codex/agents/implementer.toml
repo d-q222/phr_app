@@ -1,7 +1,7 @@
 name = "implementer"
-description = "Balanced implementation worker for a bounded module or function after the parent has fixed the interface, files, invariants, and acceptance criteria."
-model = "gpt-5.6-terra"
-model_reasoning_effort = "medium"
+description = "Implementation worker for a bounded module or function after the parent has fixed the interface, files, invariants, and acceptance criteria. Escalate the call to Sol when the change is consequential."
+model = "gpt-5.6-luna"
+model_reasoning_effort = "max"
 model_verbosity = "low"
 sandbox_mode = "workspace-write"
 
