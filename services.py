@@ -40,11 +40,12 @@ def update_person(person_id: int, data: dict, db_path: Path | str = db.DB_PATH) 
 
 
 def delete_person(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
-    db.delete_records_for_person(person_id, db_path=db_path)
-    db.delete_record("people", person_id, db_path=db_path)
+    db.delete_person(person_id, db_path=db_path)
 
 
 def create_item(table: str, person_id: int, data: dict, db_path: Path | str = db.DB_PATH) -> int:
+    if person_id is None:
+        raise ValueError("person_id is required")
     data = dict(data)
     data["person_id"] = person_id
     return db.create_record(table, data, db_path=db_path)
@@ -58,6 +59,10 @@ def update_item(
     `person_id` and `record_id` are keyword-only on purpose: they are adjacent ints, and
     silently swapping them would be an isolation failure rather than a visible error.
     """
+    if person_id is None:
+        raise ValueError("person_id is required")
+    if "person_id" in data:
+        raise ValueError("person_id cannot be changed by an ordinary update")
     db.update_record(table, record_id, data, db_path=db_path, person_id=person_id)
 
 
@@ -68,6 +73,8 @@ def delete_item(
 
     `person_id` and `record_id` are keyword-only for the same reason as `update_item`.
     """
+    if person_id is None:
+        raise ValueError("person_id is required")
     db.delete_record(table, record_id, db_path=db_path, person_id=person_id)
 
 

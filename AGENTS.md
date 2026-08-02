@@ -93,6 +93,22 @@ Do not turn `app.py` into the implementation home for new business logic.
 - Any new AI output path must have a rule-based or safe failure mode and must enforce the same safety
   constraints as `insights.py` and `ai_chat.py`.
 
+### Open P1 safety work
+
+Temporary tracker: delete each item after its fix and regression tests pass; delete this subsection
+when no items remain.
+
+Do not lose these known gaps when planning related changes:
+
+- Add medical post-validation for AI provider output before display, with a safe local/chat or
+  rule-based fallback for diagnosis, medication-change, prognosis, urgent-care, and unsupported
+  raw-lab claims.
+- Enforce locked-profile authorization at reusable context/export boundaries before adding any
+  HTTP, background-job, or other non-Streamlit caller; a supplied `person_id` is not authorization.
+
+The affected functions, prohibited shortcuts, and required regression coverage are documented under
+`Open P1` in `docs/CODEBASE_SWEEP.md` → `Remaining Risks And Follow-Ups`.
+
 ## 6. Work process
 
 For any non-trivial task:
@@ -182,7 +198,7 @@ Delegation limits:
 
 ## 9. Coding standards
 
-- Target Python 3.11+.
+- Target Python 3.12+.
 - Preserve `from __future__ import annotations` in modules that already use it.
 - Follow existing plain-function/module style; do not introduce classes or frameworks without a clear
   need.

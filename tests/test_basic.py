@@ -1,24 +1,42 @@
+import http.client
 import inspect
 import json
 import sqlite3
 import sys
+import time
 import urllib.error
 from io import BytesIO, StringIO
 from pathlib import Path
 
 import pytest
+from streamlit.testing.v1 import AppTest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ai_chat  # noqa: E402
 import ai_config  # noqa: E402
 import app  # noqa: E402
+import body_map_services  # noqa: E402
 import db  # noqa: E402
 import fhir  # noqa: E402
 import imports_exports  # noqa: E402
 import insights  # noqa: E402
 import security  # noqa: E402
 import services  # noqa: E402
+
+CHILD_TABLE_SEEDS = {
+    "allergies": {"allergen": "Peanuts", "severity": "Severe"},
+    "medications": {"name": "Med A"},
+    "lab_results": {"test_name": "A1c", "lab_date": "2026-01-01"},
+    "health_entries": {"title": "Headache", "entry_date": "2026-01-01"},
+    "appointments": {"title": "Checkup", "appointment_date": "2026-01-01"},
+    "reminders": {"reminder_type": "Lab", "title": "Draw", "due_date": "2026-01-01"},
+    "wearable_records": {
+        "metric_type": "Steps",
+        "value": 100,
+        "timestamp": "2026-01-01T08:00:00",
+    },
+}
 
 
 def test_database_initializes(tmp_path):
@@ -291,6 +309,29 @@ def test_delete_person_removes_child_records(tmp_path):
     assert db.list_records("lab_results", person_id=person_id, db_path=db_path) == []
 
 
+def test_delete_person_rolls_back_every_child_when_parent_delete_fails(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Keep Me"}, db_path=db_path)
+    snapshots = {}
+    for table, payload in CHILD_TABLE_SEEDS.items():
+        record_id = services.create_item(table, person_id, payload, db_path=db_path)
+        snapshots[table] = db.get_record(table, record_id, db_path=db_path)
+
+    with db.get_connection(db_path) as connection:
+        connection.execute(
+            """CREATE TRIGGER block_person_delete BEFORE DELETE ON people
+            BEGIN SELECT RAISE(ABORT, 'blocked parent delete'); END"""
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="blocked parent delete"):
+        services.delete_person(person_id, db_path=db_path)
+
+    assert services.get_person(person_id, db_path=db_path)["name"] == "Keep Me"
+    for table, snapshot in snapshots.items():
+        assert db.get_record(table, snapshot["id"], db_path=db_path) == snapshot
+
+
 def _two_profiles_with_allergies(tmp_path):
     """Alice and Bob, each with one allergy. Returns (db_path, alice, bob, bob_record_id)."""
     db_path = tmp_path / "phr.db"
@@ -367,6 +408,9 @@ def test_person_and_record_ids_are_keyword_only_on_scoped_writes():
             "person_id": inspect.Parameter.KEYWORD_ONLY,
             "record_id": inspect.Parameter.KEYWORD_ONLY,
         }, f"{fn.__name__} must keep person_id/record_id keyword-only"
+        signature = inspect.signature(fn).parameters
+        assert signature["person_id"].default is inspect.Parameter.empty
+        assert signature["record_id"].default is inspect.Parameter.empty
 
 
 def test_person_scoped_write_guard_covers_every_child_table(tmp_path):
@@ -375,24 +419,422 @@ def test_person_scoped_write_guard_covers_every_child_table(tmp_path):
     db.init_db(db_path)
     alice = services.create_person({"name": "Alice"}, db_path=db_path)
     bob = services.create_person({"name": "Bob"}, db_path=db_path)
-    seeds = {
-        "allergies": {"allergen": "Peanuts"},
-        "medications": {"name": "Med A"},
-        "lab_results": {"test_name": "A1c", "lab_date": "2026-01-01"},
-        "health_entries": {"title": "Headache", "entry_date": "2026-01-01"},
-        "appointments": {"title": "Checkup", "appointment_date": "2026-01-01"},
-        "reminders": {"reminder_type": "Lab", "title": "Draw", "due_date": "2026-01-01"},
-        "wearable_records": {"metric_type": "Steps", "value": 100, "timestamp": "2026-01-01T08:00:00"},
-    }
-    for table, payload in seeds.items():
+    for table, payload in CHILD_TABLE_SEEDS.items():
         record_id = services.create_item(table, bob, payload, db_path=db_path)
+        protected = db.get_record(table, record_id, db_path=db_path)
         with pytest.raises(db.RecordNotFound):
             services.update_item(
-                table, person_id=alice, record_id=record_id, data=payload, db_path=db_path
+                table,
+                person_id=alice,
+                record_id=record_id,
+                data={next(iter(payload)): "tampered"},
+                db_path=db_path,
             )
         with pytest.raises(db.RecordNotFound):
             services.delete_item(table, person_id=alice, record_id=record_id, db_path=db_path)
-        assert db.get_record(table, record_id, db_path=db_path) is not None
+        assert db.get_record(table, record_id, db_path=db_path) == protected
+
+
+def test_child_db_writes_require_non_null_person_scope(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    owner = services.create_person({"name": "Owner"}, db_path=db_path)
+
+    for table, payload in CHILD_TABLE_SEEDS.items():
+        with pytest.raises(ValueError, match="person_id is required"):
+            db.create_record(table, payload, db_path=db_path)
+        with pytest.raises(ValueError, match="person_id is required"):
+            db.create_record(table, {**payload, "person_id": None}, db_path=db_path)
+        with pytest.raises(ValueError, match="person_id is required"):
+            services.create_item(table, None, payload, db_path=db_path)
+        record_id = services.create_item(table, owner, payload, db_path=db_path)
+        protected = db.get_record(table, record_id, db_path=db_path)
+        for scope in ("omitted", None):
+            update_kwargs = {} if scope == "omitted" else {"person_id": None}
+            with pytest.raises(ValueError, match="person_id is required"):
+                db.update_record(
+                    table,
+                    record_id,
+                    {next(iter(payload)): "tampered"},
+                    db_path=db_path,
+                    **update_kwargs,
+                )
+            with pytest.raises(ValueError, match="person_id is required"):
+                db.delete_record(table, record_id, db_path=db_path, **update_kwargs)
+            assert db.get_record(table, record_id, db_path=db_path) == protected
+
+
+def test_service_writes_reject_none_scope_and_preserve_victim(tmp_path):
+    db_path, _alice, bob, bob_record = _two_profiles_with_allergies(tmp_path)
+    protected = db.get_record("allergies", bob_record, db_path=db_path)
+
+    with pytest.raises(ValueError, match="person_id is required"):
+        services.update_item(
+            "allergies",
+            person_id=None,
+            record_id=bob_record,
+            data={"allergen": "tampered"},
+            db_path=db_path,
+        )
+    with pytest.raises(ValueError, match="person_id is required"):
+        services.delete_item(
+            "allergies", person_id=None, record_id=bob_record, db_path=db_path
+        )
+
+    assert db.get_record("allergies", bob_record, db_path=db_path) == protected
+    assert services.list_items("allergies", bob, db_path=db_path) == [protected]
+
+
+def test_person_id_is_immutable_during_scoped_updates(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    record_id = services.create_item(
+        "allergies", alice, {"allergen": "Dust", "severity": "Moderate"}, db_path=db_path
+    )
+    protected = db.get_record("allergies", record_id, db_path=db_path)
+
+    for update in (services.update_item, db.update_record):
+        with pytest.raises(ValueError, match="person_id cannot be changed"):
+            if update is services.update_item:
+                update(
+                    "allergies",
+                    person_id=alice,
+                    record_id=record_id,
+                    data={"person_id": bob, "allergen": "Injected"},
+                    db_path=db_path,
+                )
+            else:
+                update(
+                    "allergies",
+                    record_id,
+                    {"person_id": bob, "allergen": "Injected"},
+                    db_path=db_path,
+                    person_id=alice,
+                )
+
+    assert db.get_record("allergies", record_id, db_path=db_path) == protected
+    assert services.list_items("allergies", bob, db_path=db_path) == []
+
+
+def test_failed_owner_transfer_stays_out_of_other_profile_surfaces(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    marker = "Alice-only fictional marker"
+    record_id = services.create_item(
+        "health_entries",
+        alice,
+        {
+            "entry_date": "2026-07-31",
+            "title": marker,
+            "body_part": "heart",
+            "note": "Fictional test note",
+        },
+        db_path=db_path,
+    )
+    protected = db.get_record("health_entries", record_id, db_path=db_path)
+
+    with pytest.raises(ValueError, match="person_id cannot be changed"):
+        services.update_item(
+            "health_entries",
+            person_id=alice,
+            record_id=record_id,
+            data={"person_id": bob, "title": "Injected"},
+            db_path=db_path,
+        )
+
+    assert db.get_record("health_entries", record_id, db_path=db_path) == protected
+    alice_surfaces = [
+        json.dumps(services.dashboard_data(alice, db_path=db_path)),
+        services.generate_emergency_snapshot(alice, db_path=db_path),
+        imports_exports.export_json_backup(db_path=db_path, person_id=alice),
+        ai_chat.build_patient_context(alice, db_path=db_path),
+    ]
+    bob_surfaces = [
+        json.dumps(services.dashboard_data(bob, db_path=db_path)),
+        services.generate_emergency_snapshot(bob, db_path=db_path),
+        imports_exports.export_json_backup(db_path=db_path, person_id=bob),
+        ai_chat.build_patient_context(bob, db_path=db_path),
+    ]
+    assert all(marker in surface for surface in alice_surfaces)
+    assert all(marker not in surface for surface in bob_surfaces)
+    assert any(
+        record.display_name == marker
+        for record in body_map_services.get_records_for_body_part(
+            alice, "heart", db_path=db_path
+        )
+    )
+    assert not body_map_services.get_records_for_body_part(bob, "heart", db_path=db_path)
+
+
+def test_ui_payload_normalization_preserves_allergy_text_and_health_severity(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Fictional Person"}, db_path=db_path)
+
+    allergy_data = {"allergen": "Dust", "severity": "Severe"}
+    assert app.FIELD_CONFIGS["allergies"]["validator"](allergy_data) == []
+    allergy_id = services.create_item(
+        "allergies",
+        person_id,
+        app.clean_payload("allergies", allergy_data),
+        db_path=db_path,
+    )
+    allergy_update = {"allergen": "Dust", "severity": "Moderate"}
+    assert app.FIELD_CONFIGS["allergies"]["validator"](allergy_update) == []
+    services.update_item(
+        "allergies",
+        person_id=person_id,
+        record_id=allergy_id,
+        data=app.clean_payload("allergies", allergy_update),
+        db_path=db_path,
+    )
+
+    health_data = {
+        "entry_date": "2026-01-01",
+        "title": "Headache",
+        "severity": "7",
+    }
+    assert app.FIELD_CONFIGS["health_entries"]["validator"](health_data) == []
+    health_id = services.create_item(
+        "health_entries",
+        person_id,
+        app.clean_payload("health_entries", health_data),
+        db_path=db_path,
+    )
+    health_update = {**health_data, "severity": "4"}
+    assert app.FIELD_CONFIGS["health_entries"]["validator"](health_update) == []
+    services.update_item(
+        "health_entries",
+        person_id=person_id,
+        record_id=health_id,
+        data=app.clean_payload("health_entries", health_update),
+        db_path=db_path,
+    )
+
+    allergy = db.get_record("allergies", allergy_id, db_path=db_path)
+    health_entry = db.get_record("health_entries", health_id, db_path=db_path)
+    assert allergy["severity"] == "Moderate"
+    assert isinstance(allergy["severity"], str)
+    assert health_entry["severity"] == 4
+    assert isinstance(health_entry["severity"], int)
+
+
+def test_record_add_draft_is_scoped_to_selected_profile_with_apptest(tmp_path, monkeypatch):
+    db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Allergies"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+
+    alice_scope = app.record_page_scope("allergies", alice, db_path)
+    test_app.button(key=f"{alice_scope}:add:toggle").click().run()
+    test_app.text_input(key=f"{alice_scope}:add:allergen").set_value(
+        "Unsubmitted Alice draft"
+    ).run()
+    test_app.selectbox(key="selected_profile").select(f"Bob (ID {bob})").run()
+
+    bob_scope = app.record_page_scope("allergies", bob, db_path)
+    assert not test_app.exception
+    assert test_app.session_state[f"{bob_scope}:add:open"] is False
+    test_app.button(key=f"{bob_scope}:add:toggle").click().run()
+    assert test_app.text_input(key=f"{bob_scope}:add:allergen").value == ""
+    assert services.list_items("allergies", bob, db_path=db_path) == []
+
+
+def test_record_edit_state_is_scoped_across_databases_with_overlapping_ids(
+    tmp_path, monkeypatch
+):
+    real_db = tmp_path / "real.db"
+    demo_db = tmp_path / "demo.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db)
+    db.init_db(real_db)
+    db.init_db(demo_db)
+    real_person = services.create_person({"name": "Real Person"}, db_path=real_db)
+    demo_person = services.create_person({"name": "Demo Person"}, db_path=demo_db)
+    real_record = services.create_item(
+        "allergies", real_person, {"allergen": "Real allergy"}, db_path=real_db
+    )
+    demo_record = services.create_item(
+        "allergies", demo_person, {"allergen": "Demo allergy"}, db_path=demo_db
+    )
+    assert (real_person, real_record) == (demo_person, demo_record) == (1, 1)
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Allergies"
+    test_app.session_state[app.DEMO_MODE_KEY] = True
+    test_app.session_state[app.DEMO_DB_PATH_KEY] = str(demo_db)
+    test_app.session_state["demo_selected_profile"] = "Demo Person (ID 1)"
+    test_app.run()
+
+    demo_scope = app.record_page_scope("allergies", demo_person, demo_db)
+    test_app.selectbox(key=f"{demo_scope}:edit:selection:0").select("1").run()
+    test_app.text_input(key=f"{demo_scope}:edit:1:allergen").set_value(
+        "Unsubmitted demo edit"
+    ).run()
+
+    test_app.session_state[app.DEMO_MODE_KEY] = False
+    test_app.session_state["selected_profile"] = "Real Person (ID 1)"
+    test_app.run()
+    real_scope = app.record_page_scope("allergies", real_person, real_db)
+    test_app.selectbox(key=f"{real_scope}:edit:selection:0").select("1").run()
+
+    assert not test_app.exception
+    assert test_app.text_input(key=f"{real_scope}:edit:1:allergen").value == "Real allergy"
+    save = next(
+        button
+        for button in test_app.button
+        if button.label == app.action_button_label("Save changes")
+    )
+    save.click().run()
+    assert db.get_record("allergies", 1, db_path=real_db)["allergen"] == "Real allergy"
+    assert db.get_record("allergies", 1, db_path=demo_db)["allergen"] == "Demo allergy"
+
+
+def test_ai_insight_consent_is_scoped_by_profile_and_database(tmp_path, monkeypatch):
+    real_db = tmp_path / "real.db"
+    demo_db = tmp_path / "demo.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db)
+    db.init_db(real_db)
+    db.init_db(demo_db)
+    alice = services.create_person({"name": "Alice"}, db_path=real_db)
+    bob = services.create_person({"name": "Bob"}, db_path=real_db)
+    demo_person = services.create_person({"name": "Demo Person"}, db_path=demo_db)
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Health Insights"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+    alice_key = f"{app.record_page_scope('insights', alice, real_db)}:ai_consent"
+    test_app.checkbox(key=alice_key).check().run()
+    assert test_app.checkbox(key=alice_key).value is True
+
+    test_app.selectbox(key="selected_profile").select(f"Bob (ID {bob})").run()
+    bob_key = f"{app.record_page_scope('insights', bob, real_db)}:ai_consent"
+    assert test_app.checkbox(key=bob_key).value is False
+
+    test_app.session_state[app.DEMO_MODE_KEY] = True
+    test_app.session_state[app.DEMO_DB_PATH_KEY] = str(demo_db)
+    test_app.session_state["demo_selected_profile"] = f"Demo Person (ID {demo_person})"
+    test_app.run()
+    demo_key = f"{app.record_page_scope('insights', demo_person, demo_db)}:ai_consent"
+    assert not test_app.exception
+    assert test_app.checkbox(key=demo_key).value is False
+
+
+def test_stale_owner_update_and_concurrent_delete_fail_closed(tmp_path, monkeypatch):
+    db_path, alice, bob, bob_record = _two_profiles_with_allergies(tmp_path)
+    original_get_connection = db.get_connection
+    stale_connection = db.get_connection(db_path)
+    other_connection = db.get_connection(db_path)
+    try:
+        assert stale_connection.execute(
+            "SELECT person_id FROM allergies WHERE id = ?", (bob_record,)
+        ).fetchone()[0] == bob
+        other_connection.execute(
+            "UPDATE allergies SET person_id = ? WHERE id = ?", (alice, bob_record)
+        )
+        other_connection.commit()
+        protected = dict(
+            other_connection.execute(
+                "SELECT * FROM allergies WHERE id = ?", (bob_record,)
+            ).fetchone()
+        )
+        monkeypatch.setattr(db, "get_connection", lambda _path: stale_connection)
+
+        with pytest.raises(db.RecordNotFound):
+            db.update_record(
+                "allergies",
+                bob_record,
+                {"allergen": "stale overwrite"},
+                db_path=db_path,
+                person_id=bob,
+            )
+        assert dict(
+            stale_connection.execute(
+                "SELECT * FROM allergies WHERE id = ?", (bob_record,)
+            ).fetchone()
+        ) == protected
+    finally:
+        other_connection.close()
+        stale_connection.close()
+
+    monkeypatch.setattr(db, "get_connection", original_get_connection)
+    deleted_record = services.create_item(
+        "allergies", alice, {"allergen": "Pollen"}, db_path=db_path
+    )
+    stale_connection = db.get_connection(db_path)
+    other_connection = db.get_connection(db_path)
+    try:
+        assert stale_connection.execute(
+            "SELECT id FROM allergies WHERE id = ?", (deleted_record,)
+        ).fetchone()
+        other_connection.execute("DELETE FROM allergies WHERE id = ?", (deleted_record,))
+        other_connection.commit()
+        monkeypatch.setattr(db, "get_connection", lambda _path: stale_connection)
+        with pytest.raises(db.RecordNotFound):
+            db.delete_record(
+                "allergies", deleted_record, db_path=db_path, person_id=alice
+            )
+    finally:
+        other_connection.close()
+        stale_connection.close()
+
+
+def test_locked_write_uses_bounded_wait_and_clean_error(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Owner"}, db_path=db_path)
+    record_id = services.create_item(
+        "allergies", person_id, {"allergen": "Dust"}, db_path=db_path
+    )
+    monkeypatch.setattr(db, "DATABASE_BUSY_TIMEOUT_MS", 20)
+    holder = sqlite3.connect(db_path)
+    holder.execute("BEGIN EXCLUSIVE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(db.DatabaseBusyError):
+            services.update_item(
+                "allergies",
+                person_id=person_id,
+                record_id=record_id,
+                data={"allergen": "Duplicate"},
+                db_path=db_path,
+            )
+    finally:
+        holder.rollback()
+        holder.close()
+
+    assert time.monotonic() - started < 1
+    assert db.get_record("allergies", record_id, db_path=db_path)["allergen"] == "Dust"
+
+
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        (db.RecordNotFound(), "no longer available for this profile"),
+        (db.DatabaseBusyError(), "database is busy"),
+    ],
+)
+def test_record_change_errors_return_false_with_clean_ui_message(
+    monkeypatch, error, message
+):
+    messages = []
+    fake_streamlit = type("FakeStreamlit", (), {"error": messages.append})()
+    monkeypatch.setattr(app, "st", fake_streamlit)
+
+    def fail():
+        raise error
+
+    assert app.apply_record_change(fail) is False
+    assert message in messages[0]
 
 
 def test_unscoped_db_writes_reject_tables_that_are_not_person_scoped(tmp_path):
@@ -668,7 +1110,7 @@ def test_ai_insight_prompt_requires_safe_unobtrusive_suggestions(monkeypatch):
     monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
     monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda: "test-key")
 
-    def fake_call(request):
+    def fake_call(request, **_kwargs):
         captured["headers"] = dict(request.header_items())
         captured["body"] = json.loads(request.data.decode("utf-8"))
         return {"choices": [{"message": {"content": "# AI Safety-Checked Insights\n\n- Consider tracking symptoms."}}]}
@@ -707,7 +1149,7 @@ def test_ai_insight_retries_next_model_on_429(monkeypatch):
     monkeypatch.setattr(ai_config, "ZHIPU_FALLBACK_MODELS", "working-model")
     monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda: "test-key")
 
-    def fake_call(request):
+    def fake_call(request, **_kwargs):
         model = json.loads(request.data.decode("utf-8"))["model"]
         seen_models.append(model)
         if model == "busy-model":
@@ -723,7 +1165,7 @@ def test_ai_insight_retries_next_model_on_429(monkeypatch):
     assert "fallback model working-model" in result["warning"]
 
 
-def test_ai_insight_retries_next_model_on_timeout(monkeypatch):
+def test_ai_insight_transport_timeout_does_not_try_fallback_models(monkeypatch):
     seen_models = []
 
     monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
@@ -731,20 +1173,34 @@ def test_ai_insight_retries_next_model_on_timeout(monkeypatch):
     monkeypatch.setattr(ai_config, "ZHIPU_FALLBACK_MODELS", "working-model")
     monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda: "test-key")
 
-    def fake_call(request):
+    def fake_call(request, **_kwargs):
         model = json.loads(request.data.decode("utf-8"))["model"]
         seen_models.append(model)
-        if model == "timeout-model":
-            raise insights.ZhipuRetryableError(str(TimeoutError("The read operation timed out")))
-        return {"choices": [{"message": {"content": "# AI Safety-Checked Insights\n\n- Consider tracking symptoms."}}]}
+        raise insights.ZhipuRetryableError(str(TimeoutError("The read operation timed out")))
 
     monkeypatch.setattr(insights, "_call_zhipu_chat_completion", fake_call)
 
     result = insights.generate_ai_insight_result({"person": {}, "medications": [], "labs": []})
 
-    assert result["used_fallback"] is False
-    assert seen_models == ["timeout-model", "working-model"]
-    assert "fallback model working-model" in result["warning"]
+    assert result["used_fallback"] is True
+    assert seen_models == ["timeout-model"]
+    assert "timed out" in result["warning"].lower()
+
+
+def test_ai_insight_account_error_does_not_retry_or_fallback(monkeypatch):
+    monkeypatch.setattr(ai_config, "ZHIPU_MODEL", "primary")
+    monkeypatch.setattr(ai_config, "ZHIPU_FALLBACK_MODELS", "fallback")
+    attempts = {"count": 0}
+
+    def fake_call(request, **_kwargs):
+        attempts["count"] += 1
+        raise insights.ZhipuAPIError(429, "1113", "no resource package")
+
+    monkeypatch.setattr(insights, "_call_zhipu_chat_completion", fake_call)
+
+    with pytest.raises(insights.ZhipuAPIError):
+        insights._call_zhipu_with_model_fallback("key", [], 20, 0.2)
+    assert attempts["count"] == 1
 
 
 def test_ai_chat_context_is_scoped_to_selected_person(tmp_path):
@@ -945,7 +1401,63 @@ def test_ai_chat_maps_auth_and_invalid_responses(monkeypatch):
         ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
 
 
-def test_insight_urlopen_timeout_retries_without_real_sleep(monkeypatch):
+@pytest.mark.parametrize("raw", [b"\xff", b"not-json"])
+def test_ai_chat_rejects_unreadable_response_bytes(monkeypatch, raw):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "only-model")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return raw
+
+    monkeypatch.setattr(
+        ai_chat.urllib.request, "urlopen", lambda request, timeout: FakeResponse()
+    )
+
+    with pytest.raises(ai_chat.InvalidAIResponseError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+
+@pytest.mark.parametrize("content", [None, {"text": "answer"}, ["answer"]])
+def test_ai_chat_rejects_non_string_content(monkeypatch, content):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "only-model")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": content}}]}
+            ).encode("utf-8")
+
+    monkeypatch.setattr(
+        ai_chat.urllib.request, "urlopen", lambda request, timeout: FakeResponse()
+    )
+
+    with pytest.raises(ai_chat.InvalidAIResponseError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+
+@pytest.mark.parametrize(
+    "read_error", [ConnectionResetError("reset"), http.client.IncompleteRead(b"partial")]
+)
+def test_ai_chat_maps_response_read_transport_failures(monkeypatch, read_error):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "primary")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "fallback")
     attempts = {"count": 0}
 
     class FakeResponse:
@@ -956,18 +1468,116 @@ def test_insight_urlopen_timeout_retries_without_real_sleep(monkeypatch):
             return False
 
         def read(self):
-            return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+            raise read_error
 
     def fake_urlopen(request, timeout):
         attempts["count"] += 1
-        if attempts["count"] < 3:
-            raise TimeoutError("slow")
         return FakeResponse()
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ai_chat.NetworkAIChatError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+    assert attempts["count"] == 1
+
+
+def test_ai_chat_timeout_is_model_independent_and_not_retried(monkeypatch):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "primary")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "fallback-a,fallback-b")
+    timeouts = []
+
+    def fake_urlopen(request, timeout):
+        timeouts.append(timeout)
+        raise TimeoutError("slow")
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ai_chat.NetworkAIChatError):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= ai_chat.CHAT_TIMEOUT_SECONDS
+
+
+def test_ai_chat_fallbacks_share_one_monotonic_deadline(monkeypatch):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "model-1")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "model-2,model-3")
+    monotonic_values = iter([0.0, 0.0, 30.0, 50.0])
+    timeouts = []
+
+    def fake_urlopen(request, timeout):
+        timeouts.append(timeout)
+        body = BytesIO(
+            json.dumps({"error": {"code": "1305", "message": "model busy"}}).encode(
+                "utf-8"
+            )
+        )
+        raise urllib.error.HTTPError(
+            request.full_url, 429, "Too Many Requests", hdrs=None, fp=body
+        )
+
+    monkeypatch.setattr(ai_chat.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(ai_chat.NetworkAIChatError, match="time budget"):
+        ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}])
+
+    assert timeouts == [45.0, 15.0]
+
+
+def test_ai_chat_eligible_429_uses_fallback_model(monkeypatch):
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "test-key")
+    monkeypatch.setenv("ZHIPU_CHAT_MODEL", "busy-model")
+    monkeypatch.setenv("ZHIPU_CHAT_FALLBACK_MODELS", "working-model")
+    seen_models = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": "Fallback answer"}}]}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        model = json.loads(request.data.decode("utf-8"))["model"]
+        seen_models.append(model)
+        if model == "busy-model":
+            body = BytesIO(
+                json.dumps(
+                    {"error": {"code": "1305", "message": "model busy"}}
+                ).encode("utf-8")
+            )
+            raise urllib.error.HTTPError(
+                request.full_url, 429, "Too Many Requests", hdrs=None, fp=body
+            )
+        return FakeResponse()
+
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", fake_urlopen)
+
+    assert ai_chat.call_zhipu_chat([{"role": "user", "content": "Question"}]) == "Fallback answer"
+    assert seen_models == ["busy-model", "working-model"]
+
+
+def test_insight_urlopen_timeout_stops_without_retry_or_sleep(monkeypatch):
+    attempts = {"count": 0}
+
+    def fake_urlopen(request, timeout):
+        attempts["count"] += 1
+        raise TimeoutError("slow")
 
     monkeypatch.setattr(insights.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(insights.time, "sleep", lambda seconds: None)
 
-    payload = insights._call_zhipu_chat_completion(urllib.request.Request("https://example.invalid"))
+    with pytest.raises(insights.ZhipuRetryableError):
+        insights._call_zhipu_chat_completion(
+            urllib.request.Request("https://example.invalid")
+        )
 
-    assert attempts["count"] == 3
-    assert payload["choices"][0]["message"]["content"] == "ok"
+    assert attempts["count"] == 1

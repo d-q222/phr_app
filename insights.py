@@ -313,13 +313,22 @@ def _parse_http_error(exc: urllib.error.HTTPError) -> tuple[str | None, str]:
     return None, f"{exc} ({body[:500]})"
 
 
-def _call_zhipu_chat_completion(request: urllib.request.Request) -> dict:
+def _call_zhipu_chat_completion(
+    request: urllib.request.Request, *, deadline: float | None = None
+) -> dict:
+    deadline = deadline or time.monotonic() + 30
     last_error = None
     for delay in (0, 3, 8):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         if delay:
-            time.sleep(delay)
+            time.sleep(min(delay, remaining))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=remaining) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             provider_code, detail = _parse_http_error(exc)
@@ -329,10 +338,9 @@ def _call_zhipu_chat_completion(request: urllib.request.Request) -> dict:
         except (TimeoutError, urllib.error.URLError) as exc:
             reason = getattr(exc, "reason", exc)
             if isinstance(reason, (TimeoutError, socket.timeout)) or "timed out" in str(exc).lower():
-                last_error = ZhipuRetryableError(str(exc))
-                continue
+                raise ZhipuRetryableError(str(exc)) from exc
             raise
-    raise last_error
+    raise last_error or ZhipuRetryableError("Zhipu AI request deadline expired")
 
 
 def _build_zhipu_request(api_key: str, model: str, messages: list[dict], max_tokens: int, temperature: float) -> urllib.request.Request:
@@ -359,16 +367,15 @@ def _call_zhipu_with_model_fallback(
     temperature: float,
 ) -> tuple[dict, str]:
     last_error = None
+    deadline = time.monotonic() + 30
     for model in ai_config.zhipu_model_candidates():
         request = _build_zhipu_request(api_key, model, messages, max_tokens, temperature)
         try:
-            return _call_zhipu_chat_completion(request), model
+            return _call_zhipu_chat_completion(request, deadline=deadline), model
         except ZhipuAPIError as exc:
             last_error = exc
-            if exc.http_status != 429:
+            if exc.http_status != 429 or exc.provider_code == "1113":
                 raise
-        except ZhipuRetryableError as exc:
-            last_error = exc
     raise last_error
 
 
