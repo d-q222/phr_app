@@ -1822,3 +1822,65 @@ def test_profile_write_busy_shows_clean_error_with_apptest(tmp_path, monkeypatch
 
     assert not test_app.exception
     assert any("database is busy" in error.value for error in test_app.error)
+
+
+def test_omitted_db_path_resolves_at_call_time_not_import_time(tmp_path, monkeypatch):
+    """A bare call must honour a repointed db.DB_PATH.
+
+    This is the property that import-time `db_path=db.DB_PATH` defaults silently broke:
+    the default froze the real database into the function object, so the patch below
+    could never reach it.
+    """
+    patched = tmp_path / "late_bound.db"
+    monkeypatch.setattr(db, "DB_PATH", patched)
+    db.init_db(patched)
+
+    person_id = services.create_person({"name": "Late Bound"})
+
+    assert patched.exists()
+    assert [row["name"] for row in services.list_people()] == ["Late Bound"]
+    assert services.get_person(person_id)["name"] == "Late Bound"
+
+
+def test_no_caller_forwards_none_into_profile_unlock_scoping(tmp_path, monkeypatch):
+    """`security._db_scope(None)` is a real bucket, not a sentinel -- so None must never reach it.
+
+    `_db_scope` hashes a real path but returns the literal "default" for None. If a caller
+    forwarded None, unlock state for a locked profile would be shared across every database,
+    merging demo and real sessions. security.py imports no `db`, so it cannot resolve the
+    path itself; the caller must.
+    """
+    fake_streamlit = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(security, "st", fake_streamlit)
+    monkeypatch.setattr(app, "st", type("FakeAppSt", (), {"markdown": staticmethod(lambda *a, **k: None)})())
+    real_db = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db)
+
+    seen = []
+    original_scope = security._db_scope
+    monkeypatch.setattr(security, "_db_scope", lambda db_path=None: seen.append(db_path) or original_scope(db_path))
+
+    person = {"id": 1, "name": "Scoped Person", "profile_password_enabled": 1}
+    security.unlock_profile(1, db_path=real_db)
+
+    assert app.is_locked_profile(person) is False
+    app.selected_profile_banner(person)
+    app.display_safe_people([person])
+    app.profile_selection_label(person)
+
+    assert seen, "expected the profile helpers to consult _db_scope"
+    assert None not in seen, f"a caller forwarded None into _db_scope: {seen}"
+
+
+def test_locked_profile_stays_locked_when_db_path_is_omitted(tmp_path, monkeypatch):
+    """Unlocking under one database must not unlock a bare call scoped to another."""
+    fake_streamlit = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(security, "st", fake_streamlit)
+    other_db = tmp_path / "other.db"
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "real.db")
+
+    person = {"id": 1, "profile_password_enabled": 1}
+    security.unlock_profile(1, db_path=other_db)
+
+    assert app.is_locked_profile(person, other_db) is False
+    assert app.is_locked_profile(person) is True

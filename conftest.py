@@ -44,15 +44,16 @@ def _is_real_data_path(database: object) -> bool:
 def guard_real_database(tmp_path, monkeypatch, request):
     """Point every test at a temporary database and fail loudly on real-DB access.
 
-    ``db.DB_PATH`` is redirected so that any helper reading the module attribute at
-    call time lands in ``tmp_path``. Note this reaches only late-bound call sites: a
-    function declaring ``db_path: Path | str = DB_PATH`` froze the real path into its
-    default when this module was imported, and no amount of patching reaches it.
+    ``db.DB_PATH`` is redirected so that any helper reaching for the module-level
+    default lands in ``tmp_path``. Every ``db_path`` parameter in the codebase now
+    defaults to ``None`` and resolves ``db.DB_PATH`` in the function body, so this
+    patch is actually honoured -- an import-time ``db_path=DB_PATH`` default would
+    have frozen the real path into the function object and ignored it silently.
 
-    That gap is why the ``sqlite3.connect`` wrapper below exists rather than being
-    belt-and-braces. It is the load-bearing guard: it catches reads as well as writes
-    whatever the call site's binding, and it names the offending test instead of
-    surfacing one anonymous failure at the end of the session.
+    The ``sqlite3.connect`` wrapper is the backstop that does not depend on that
+    discipline holding: it catches reads as well as writes whatever the call site's
+    binding, and it names the offending test instead of surfacing one anonymous
+    failure at the end of the session.
     """
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "phr.db")
 

@@ -196,7 +196,8 @@ def _reminder_groups(person_id: int, db_path: Path | str) -> tuple[list[dict], l
     return overdue, upcoming
 
 
-def _patient_context_packet(person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+def _patient_context_packet(person_id: int, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     person = services.get_person(person_id, db_path=db_path)
     if not person:
         return {}
@@ -277,7 +278,8 @@ def _patient_context_packet(person_id: int, db_path: Path | str = db.DB_PATH) ->
     return _fit_packet_to_budget(packet, CHAT_CONTEXT_BYTE_LIMIT)
 
 
-def build_patient_context(person_id: int, db_path: Path | str = db.DB_PATH) -> str:
+def build_patient_context(person_id: int, db_path: Path | str | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     packet = _patient_context_packet(person_id, db_path=db_path)
     return json.dumps(packet, ensure_ascii=False, indent=2, default=str)
 
@@ -452,7 +454,8 @@ def _example_questions(draft_key: str) -> None:
         st.rerun()
 
 
-def render_ai_chatbot(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
+def render_ai_chatbot(person_id: int, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     person = services.get_person(person_id, db_path=db_path)
     if not person:
         st.error("No selected profile was found. Select or create a profile before using AI Chat.")
