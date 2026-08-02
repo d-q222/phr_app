@@ -125,8 +125,9 @@ def _render_summary(summary: BodyPartHealthSummary, record_count: int) -> None:
 
 
 @st.fragment
-def render_body_map_page(person: dict | None, db_path: Path | str = db.DB_PATH) -> None:
+def render_body_map_page(person: dict | None, db_path: Path | str | None = None) -> None:
     """Render Part 4 for one selected, already-authorized profile."""
+    db_path = db.DB_PATH if db_path is None else db_path
 
     if not person:
         st.info("Select a profile to view the body map.")

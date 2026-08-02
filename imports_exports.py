@@ -37,7 +37,8 @@ BACKUP_VALIDATORS = {
 SYSTEM_COLUMNS = {"id", "person_id", "created_at", "updated_at"}
 
 
-def import_labs_csv(file_obj, person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+def import_labs_csv(file_obj, person_id: int, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     frame = pd.read_csv(file_obj)
     imported = 0
     skipped = []
@@ -65,7 +66,8 @@ def import_labs_csv(file_obj, person_id: int, db_path: Path | str = db.DB_PATH) 
     return {"imported": imported, "skipped": skipped}
 
 
-def import_wearables_csv(file_obj, person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+def import_wearables_csv(file_obj, person_id: int, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     frame = pd.read_csv(file_obj)
     imported = 0
     skipped = []
@@ -87,7 +89,8 @@ def import_wearables_csv(file_obj, person_id: int, db_path: Path | str = db.DB_P
     return {"imported": imported, "skipped": skipped}
 
 
-def _person_scoped_tables(person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+def _person_scoped_tables(person_id: int, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     person = services.get_person(person_id, db_path=db_path)
     tables = {table: [] for table in db.TABLES}
     if not person:
@@ -100,7 +103,8 @@ def _person_scoped_tables(person_id: int, db_path: Path | str = db.DB_PATH) -> d
     return tables
 
 
-def export_json_backup(db_path: Path | str = db.DB_PATH, person_id: int | None = None) -> str:
+def export_json_backup(db_path: Path | str | None = None, person_id: int | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     tables = _person_scoped_tables(person_id, db_path=db_path) if person_id is not None else db.export_all_tables(db_path=db_path)
     return json.dumps({"version": 1, "tables": tables}, indent=2)
 
@@ -135,7 +139,8 @@ def _validate_backup_tables(tables: dict) -> dict:
     return validated
 
 
-def import_json_backup(payload_text: str, clear_existing: bool = False, db_path: Path | str = db.DB_PATH) -> None:
+def import_json_backup(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     payload = json.loads(payload_text)
     if not isinstance(payload, dict):
         raise ValueError("Backup JSON must be an object.")
@@ -146,11 +151,13 @@ def import_json_backup(payload_text: str, clear_existing: bool = False, db_path:
     db.import_all_tables(tables, clear_existing=clear_existing, db_path=db_path)
 
 
-def export_fhir_bundle(version: str = "R4", person_id: int | None = None, db_path: Path | str = db.DB_PATH) -> str:
+def export_fhir_bundle(version: str = "R4", person_id: int | None = None, db_path: Path | str | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     return fhir.export_bundle(version, person_id=person_id, db_path=db_path)
 
 
-def import_fhir_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str = db.DB_PATH) -> dict:
+def import_fhir_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     return fhir.import_bundle(payload_text, clear_existing=clear_existing, db_path=db_path)
 
 

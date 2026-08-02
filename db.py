@@ -104,9 +104,24 @@ TABLE_COLUMNS = {
 }
 
 
-def get_connection(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
+def _resolve_db_path(db_path: Path | str | None) -> Path | str:
+    """Resolve an omitted database path to ``DB_PATH`` at call time.
+
+    ``DB_PATH`` must be read here rather than captured as a default argument.
+    Default arguments are evaluated once when this module is imported, so a
+    ``db_path=DB_PATH`` default freezes the real database into the function
+    object and makes ``monkeypatch.setattr(db, "DB_PATH", ...)`` a silent no-op.
+
+    Every public helper in this module forwards ``db_path`` untouched, so a
+    ``None`` sentinel travels down and resolves exactly once -- here, at the two
+    places that actually touch the filesystem.
+    """
+    return DB_PATH if db_path is None else db_path
+
+
+def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Return a SQLite connection with foreign keys and a bounded native lock wait."""
-    connection = sqlite3.connect(db_path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1_000)
+    connection = sqlite3.connect(_resolve_db_path(db_path), timeout=DATABASE_BUSY_TIMEOUT_MS / 1_000)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(f"PRAGMA busy_timeout = {DATABASE_BUSY_TIMEOUT_MS}")
@@ -114,7 +129,7 @@ def get_connection(db_path: Path | str = DB_PATH) -> sqlite3.Connection:
 
 
 @contextmanager
-def _write_connection(db_path: Path | str):
+def _write_connection(db_path: Path | str | None):
     """Use SQLite's one-shot busy wait and map only busy/locked failures."""
     try:
         with get_connection(db_path) as connection:
@@ -128,9 +143,9 @@ def _write_connection(db_path: Path | str):
         raise
 
 
-def init_db(db_path: Path | str = DB_PATH) -> Path:
+def init_db(db_path: Path | str | None = None) -> Path:
     """Create the local SQLite database and all MVP tables if needed."""
-    db_path = Path(db_path)
+    db_path = Path(_resolve_db_path(db_path))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
@@ -152,7 +167,7 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def create_record(table: str, data: dict, db_path: Path | str = DB_PATH) -> int:
+def create_record(table: str, data: dict, db_path: Path | str | None = None) -> int:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
     if "person_id" in TABLE_COLUMNS[table]:
@@ -188,7 +203,7 @@ def update_record(
     table: str,
     record_id: int,
     data: dict,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     *,
     person_id: int | None = None,
 ) -> None:
@@ -214,7 +229,7 @@ def update_record(
 def delete_record(
     table: str,
     record_id: int,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     *,
     person_id: int | None = None,
 ) -> None:
@@ -230,7 +245,7 @@ def delete_record(
             raise RecordNotFound(f"No {table} record {record_id} for the requested scope")
 
 
-def delete_person(person_id: int, db_path: Path | str = DB_PATH) -> None:
+def delete_person(person_id: int, db_path: Path | str | None = None) -> None:
     """Delete one profile and all child rows atomically."""
     with _write_connection(db_path) as connection:
         for table in reversed(TABLES):
@@ -242,7 +257,7 @@ def delete_person(person_id: int, db_path: Path | str = DB_PATH) -> None:
             raise RecordNotFound(f"No people record {person_id}")
 
 
-def get_record(table: str, record_id: int, db_path: Path | str = DB_PATH) -> dict | None:
+def get_record(table: str, record_id: int, db_path: Path | str | None = None) -> dict | None:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
     with get_connection(db_path) as connection:
@@ -257,7 +272,7 @@ def list_records(  # noqa: C901
     order_by: str = "id",
     descending: bool = True,
     limit: int | None = None,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[dict]:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
@@ -311,15 +326,15 @@ def list_records(  # noqa: C901
     return rows_to_dicts(rows)
 
 
-def list_people(db_path: Path | str = DB_PATH) -> list[dict]:
+def list_people(db_path: Path | str | None = None) -> list[dict]:
     return list_records("people", order_by="name", descending=False, db_path=db_path)
 
 
-def create_person(data: dict, db_path: Path | str = DB_PATH) -> int:
+def create_person(data: dict, db_path: Path | str | None = None) -> int:
     return create_record("people", data, db_path=db_path)
 
 
-def export_all_tables(db_path: Path | str = DB_PATH) -> dict:
+def export_all_tables(db_path: Path | str | None = None) -> dict:
     return {table: list_records(table, order_by="id", descending=False, db_path=db_path) for table in TABLES}
 
 
@@ -344,7 +359,7 @@ def _import_row_sql(table: str, values: dict) -> tuple[str, list]:
     return sql, params
 
 
-def import_all_tables(payload: dict, clear_existing: bool = False, db_path: Path | str = DB_PATH) -> None:
+def import_all_tables(payload: dict, clear_existing: bool = False, db_path: Path | str | None = None) -> None:
     if not isinstance(payload, dict):
         raise ValueError("Backup payload tables must be a JSON object.")
 

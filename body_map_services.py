@@ -176,13 +176,14 @@ def _normalize_record(
 def get_records_for_body_part(
     person_id: int | str,
     body_part_id: str,
-    db_path: Path | str = db.DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[NormalizedBodyRecord]:
     """Return records from the five health-record tables relevant to one body part and person.
 
     Exact stored health-entry mappings override curated name defaults. Every source query is scoped
     to ``person_id``; unknown records are excluded and source records are not modified.
     """
+    db_path = db.DB_PATH if db_path is None else db_path
 
     if body_part_id not in BODY_PARTS:
         raise ValueError(f"Unknown body part ID: {body_part_id}")

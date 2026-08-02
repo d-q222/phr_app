@@ -41,7 +41,8 @@ def normalize_fhir_version(version: str) -> str:
     return normalized
 
 
-def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Path | str = db.DB_PATH) -> str:
+def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Path | str | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     version = normalize_fhir_version(version)
     people = services.list_people(db_path=db_path)
     if person_id is not None:
@@ -77,7 +78,8 @@ def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Pa
     return json.dumps(bundle, indent=2)
 
 
-def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str = db.DB_PATH) -> dict:
+def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     payload = json.loads(payload_text)
     resources = _resources_from_payload(payload)
     if clear_existing:

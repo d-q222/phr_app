@@ -23,27 +23,33 @@ def _safe_float(value: object) -> float | None:
         return None
 
 
-def get_person(person_id: int, db_path: Path | str = db.DB_PATH) -> dict | None:
+def get_person(person_id: int, db_path: Path | str | None = None) -> dict | None:
+    db_path = db.DB_PATH if db_path is None else db_path
     return db.get_record("people", person_id, db_path=db_path)
 
 
-def list_people(db_path: Path | str = db.DB_PATH) -> list[dict]:
+def list_people(db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return db.list_people(db_path=db_path)
 
 
-def create_person(data: dict, db_path: Path | str = db.DB_PATH) -> int:
+def create_person(data: dict, db_path: Path | str | None = None) -> int:
+    db_path = db.DB_PATH if db_path is None else db_path
     return db.create_person(data, db_path=db_path)
 
 
-def update_person(person_id: int, data: dict, db_path: Path | str = db.DB_PATH) -> None:
+def update_person(person_id: int, data: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     db.update_record("people", person_id, data, db_path=db_path)
 
 
-def delete_person(person_id: int, db_path: Path | str = db.DB_PATH) -> None:
+def delete_person(person_id: int, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     db.delete_person(person_id, db_path=db_path)
 
 
-def create_item(table: str, person_id: int, data: dict, db_path: Path | str = db.DB_PATH) -> int:
+def create_item(table: str, person_id: int, data: dict, db_path: Path | str | None = None) -> int:
+    db_path = db.DB_PATH if db_path is None else db_path
     if person_id is None:
         raise ValueError("person_id is required")
     data = dict(data)
@@ -52,13 +58,14 @@ def create_item(table: str, person_id: int, data: dict, db_path: Path | str = db
 
 
 def update_item(
-    table: str, *, person_id: int, record_id: int, data: dict, db_path: Path | str = db.DB_PATH
+    table: str, *, person_id: int, record_id: int, data: dict, db_path: Path | str | None = None
 ) -> None:
     """Update one of `person_id`'s records. Raises db.RecordNotFound if it is not theirs.
 
     `person_id` and `record_id` are keyword-only on purpose: they are adjacent ints, and
     silently swapping them would be an isolation failure rather than a visible error.
     """
+    db_path = db.DB_PATH if db_path is None else db_path
     if person_id is None:
         raise ValueError("person_id is required")
     if "person_id" in data:
@@ -67,12 +74,13 @@ def update_item(
 
 
 def delete_item(
-    table: str, *, person_id: int, record_id: int, db_path: Path | str = db.DB_PATH
+    table: str, *, person_id: int, record_id: int, db_path: Path | str | None = None
 ) -> None:
     """Delete one of `person_id`'s records. Raises db.RecordNotFound if it is not theirs.
 
     `person_id` and `record_id` are keyword-only for the same reason as `update_item`.
     """
+    db_path = db.DB_PATH if db_path is None else db_path
     if person_id is None:
         raise ValueError("person_id is required")
     db.delete_record(table, record_id, db_path=db_path, person_id=person_id)
@@ -85,16 +93,19 @@ def list_items(
     order_by: str = "id",
     descending: bool = True,
     limit: int | None = None,
-    db_path: Path | str = db.DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return db.list_records(table, person_id, filters, order_by, descending, limit, db_path=db_path)
 
 
-def active_medications(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def active_medications(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return list_items("medications", person_id, {"status": "Active"}, order_by="name", descending=False, db_path=db_path)
 
 
-def latest_labs(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def latest_labs(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     labs = list_items("lab_results", person_id, order_by="id", descending=True, db_path=db_path)
     labs = sorted(labs, key=lambda lab: (lab.get("lab_date") or "", int(lab.get("id") or 0)), reverse=True)
     latest_by_test = {}
@@ -103,7 +114,8 @@ def latest_labs(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
     return list(latest_by_test.values())
 
 
-def abnormal_labs(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def abnormal_labs(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return [
         lab
         for lab in latest_labs(person_id, db_path=db_path)
@@ -111,11 +123,13 @@ def abnormal_labs(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict
     ]
 
 
-def recent_health_entries(person_id: int, limit: int = 5, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def recent_health_entries(person_id: int, limit: int = 5, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return list_items("health_entries", person_id, order_by="entry_date", descending=True, limit=limit, db_path=db_path)
 
 
-def upcoming_appointments(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def upcoming_appointments(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return list_items(
         "appointments",
         person_id,
@@ -126,7 +140,8 @@ def upcoming_appointments(person_id: int, db_path: Path | str = db.DB_PATH) -> l
     )
 
 
-def overdue_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def overdue_reminders(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     reminders = list_items("reminders", person_id, order_by="due_date", descending=False, db_path=db_path)
     today = date.today()
     result = []
@@ -139,7 +154,8 @@ def overdue_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list[
     return result
 
 
-def due_soon_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def due_soon_reminders(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     reminders = list_items("reminders", person_id, order_by="due_date", descending=False, db_path=db_path)
     today = date.today()
     result = []
@@ -154,7 +170,8 @@ def due_soon_reminders(person_id: int, db_path: Path | str = db.DB_PATH) -> list
     return result
 
 
-def wearable_summary(person_id: int, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def wearable_summary(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     records = list_items("wearable_records", person_id, order_by="timestamp", descending=True, db_path=db_path)
     groups: dict[str, list[dict]] = defaultdict(list)
     for record in records:
@@ -181,7 +198,8 @@ def wearable_summary(person_id: int, db_path: Path | str = db.DB_PATH) -> list[d
     return summaries
 
 
-def dashboard_data(person_id: int, db_path: Path | str = db.DB_PATH) -> dict:
+def dashboard_data(person_id: int, db_path: Path | str | None = None) -> dict:
+    db_path = db.DB_PATH if db_path is None else db_path
     return {
         "person": get_person(person_id, db_path=db_path),
         "allergies": list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path),
@@ -210,8 +228,9 @@ def filter_health_entries(
     body_system: str | None = None,
     body_part: str | None = None,
     search: str | None = None,
-    db_path: Path | str = db.DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     filters = _date_filter("entry_date", start_date, end_date)
     if body_system:
         filters["body_system"] = body_system
@@ -236,8 +255,9 @@ def filter_labs(
     end_date: str | None = None,
     test_search: str | None = None,
     flag: str | None = None,
-    db_path: Path | str = db.DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     filters = _date_filter("lab_date", start_date, end_date)
     if test_search:
         filters["test_name__like"] = test_search
@@ -246,12 +266,14 @@ def filter_labs(
     return list_items("lab_results", person_id, filters, "lab_date", True, db_path=db_path)
 
 
-def medication_filters(person_id: int, status: str | None = None, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def medication_filters(person_id: int, status: str | None = None, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     filters = {"status": status} if status else {}
     return list_items("medications", person_id, filters, "name", False, db_path=db_path)
 
 
-def reminder_filters(person_id: int, status: str | None = None, db_path: Path | str = db.DB_PATH) -> list[dict]:
+def reminder_filters(person_id: int, status: str | None = None, db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     filters = {"status": status} if status else {}
     return list_items("reminders", person_id, filters, "due_date", False, db_path=db_path)
 
@@ -263,8 +285,9 @@ def generate_provider_summary(
     include_labs: bool = True,
     include_timeline: bool = True,
     include_wearables: bool = True,
-    db_path: Path | str = db.DB_PATH,
+    db_path: Path | str | None = None,
 ) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     person = get_person(person_id, db_path=db_path) or {}
     lines = [
         "# Provider Summary",
@@ -307,7 +330,8 @@ def generate_provider_summary(
     return "\n".join(lines)
 
 
-def generate_emergency_snapshot(person_id: int, db_path: Path | str = db.DB_PATH) -> str:
+def generate_emergency_snapshot(person_id: int, db_path: Path | str | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     person = get_person(person_id, db_path=db_path) or {}
     allergies = list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path)
     meds = active_medications(person_id, db_path=db_path)

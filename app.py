@@ -631,17 +631,20 @@ def page_header(title: str, description: str | None = None, kicker: str = "Local
     )
 
 
-def is_locked_profile(person: dict | None, db_path: Path | str = db.DB_PATH) -> bool:
+def is_locked_profile(person: dict | None, db_path: Path | str | None = None) -> bool:
+    db_path = db.DB_PATH if db_path is None else db_path
     return bool(person and person.get("profile_password_enabled") and not security.health_data_visible(person, db_path=db_path))
 
 
-def profile_selection_label(person: dict, db_path: Path | str = db.DB_PATH) -> str:
+def profile_selection_label(person: dict, db_path: Path | str | None = None) -> str:
+    db_path = db.DB_PATH if db_path is None else db_path
     if is_locked_profile(person, db_path):
         return f"Protected profile (ID {person['id']})"
     return f"{person['name']} (ID {person['id']})"
 
 
-def display_safe_people(people: list[dict], db_path: Path | str = db.DB_PATH) -> list[dict]:
+def display_safe_people(people: list[dict], db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     rows = []
     for person in people:
         if not is_locked_profile(person, db_path):
@@ -657,11 +660,13 @@ def display_safe_people(people: list[dict], db_path: Path | str = db.DB_PATH) ->
     return rows
 
 
-def locked_profiles(db_path: Path | str = db.DB_PATH) -> list[dict]:
+def locked_profiles(db_path: Path | str | None = None) -> list[dict]:
+    db_path = db.DB_PATH if db_path is None else db_path
     return [person for person in services.list_people(db_path=db_path) if is_locked_profile(person, db_path)]
 
 
-def selected_profile_banner(person: dict | None, db_path: Path | str = db.DB_PATH) -> None:
+def selected_profile_banner(person: dict | None, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     if not person:
         return
     if is_locked_profile(person, db_path):
@@ -831,7 +836,8 @@ def input_field(name: str, kind, default=None, key: str | None = None):
     return st.text_input(label, value=str(default or ""), key=key)
 
 
-def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> tuple[str, dict | None]:
+def selected_profile_sidebar(db_path: Path | str | None = None, demo_mode: bool = False) -> tuple[str, dict | None]:
+    db_path = db.DB_PATH if db_path is None else db_path
     people = services.list_people(db_path=db_path)
     names = [profile_selection_label(person, db_path) for person in people]
     label = "Demo profile" if demo_mode else "Selected profile"
@@ -843,7 +849,8 @@ def selected_profile_sidebar(db_path: Path | str = db.DB_PATH, demo_mode: bool =
     return selection, people[index]
 
 
-def unlock_screen(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def unlock_screen(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     st.warning(warning_label("This profile is password-protected."))
     if person.get("profile_password_hint"):
         st.caption(f"Password hint: {person['profile_password_hint']}")
@@ -893,7 +900,8 @@ def profile_form(existing: dict | None = None, key_prefix: str = "profile") -> d
     }
 
 
-def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def password_settings(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     st.subheader("Profile Password")
     if person.get("profile_password_enabled"):
         if not security.health_data_visible(person, db_path=db_path):
@@ -973,7 +981,8 @@ def ai_settings() -> None:
                     st.code(detail)
 
 
-def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+def page_profiles(person: dict | None, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Profiles")
     people = services.list_people(db_path=db_path)
     dataframe(display_safe_people(people, db_path))
@@ -1110,7 +1119,8 @@ def record_page_scope(table: str, person_id: int, db_path: Path | str) -> str:
     return f"{Path(db_path).resolve()}:{person_id}:{table}"
 
 
-def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+def generic_record_page(table: str, person: dict, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+    db_path = db.DB_PATH if db_path is None else db_path
     config = FIELD_CONFIGS[table]
     person_id = int(person["id"])
     state_scope = record_page_scope(table, person_id, db_path)
@@ -1265,7 +1275,8 @@ def generic_record_page(table: str, person: dict, db_path: Path | str = db.DB_PA
                 st.rerun()
 
 
-def page_dashboard(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Dashboard")
     data = services.dashboard_data(int(person["id"]), db_path=db_path)
     st.markdown(
@@ -1297,7 +1308,8 @@ def page_dashboard(person: dict, db_path: Path | str = db.DB_PATH) -> None:
     dataframe(section_map[section])
 
 
-def page_provider_summary(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def page_provider_summary(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Provider Summary")
     start, end = date_range_controls("provider")
     include_labs = st.checkbox("Include labs", value=True)
@@ -1308,14 +1320,16 @@ def page_provider_summary(person: dict, db_path: Path | str = db.DB_PATH) -> Non
     st.markdown(markdown)
 
 
-def page_emergency_snapshot(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def page_emergency_snapshot(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Emergency Snapshot")
     markdown = services.generate_emergency_snapshot(int(person["id"]), db_path=db_path)
     st.download_button(action_button_label("Download Markdown"), markdown, file_name="emergency_snapshot.md", mime="text/markdown")
     st.markdown(markdown)
 
 
-def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+def page_import_export(person: dict | None, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Import/Export")
     if demo_mode:
         st.caption("Imports and restores in demo mode modify only the session demo database.")
@@ -1404,7 +1418,8 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
                 st.rerun()
 
 
-def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def page_insights(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("Health Insights")
     person_id = int(person["id"])
     start, end = date_range_controls("insights")
@@ -1459,7 +1474,8 @@ def page_insights(person: dict, db_path: Path | str = db.DB_PATH) -> None:
             st.markdown(result["report"])
 
 
-def page_ai_chat(person: dict, db_path: Path | str = db.DB_PATH) -> None:
+def page_ai_chat(person: dict, db_path: Path | str | None = None) -> None:
+    db_path = db.DB_PATH if db_path is None else db_path
     page_header("AI Health Assistant", PAGE_DESCRIPTIONS["AI Chat"])
     ai_chat.render_ai_chatbot(int(person["id"]), db_path=db_path)
 
