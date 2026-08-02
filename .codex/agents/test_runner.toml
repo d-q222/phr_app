@@ -3,17 +3,21 @@ description = "Low-cost verification worker that runs existing tests and determi
 model = "gpt-5.6-luna"
 model_reasoning_effort = "low"
 model_verbosity = "low"
-sandbox_mode = "workspace-write"
+sandbox_mode = "read-only"
 
 developer_instructions = """
 Run only the checks requested by the parent or the narrowest checks clearly relevant to the change.
-Do not edit production source, tests, configuration, documentation, or database files.
-Temporary caches and test artifacts created by the test tools are acceptable.
+This agent is read-only by design: the no-edit rule is enforced by the sandbox, not by instructions,
+so a stray write cannot reach source, tests, configuration, or data/phr.db.
 
-Prefer this order:
-1. focused pytest selection,
-2. compile/import check if useful,
-3. full ./scripts/verify.sh only when requested or when the change is stable.
+Always pass -p no:cacheprovider to pytest. Without it pytest writes .pytest_cache into the
+repository and the run fails under the read-only sandbox. Example:
+
+    .venv/bin/python -m pytest -q -p no:cacheprovider tests/test_basic.py -k "profile or export"
+
+Do not run ./scripts/verify.sh here. It writes a ruff cache, compileall bytecode, and .pytest_cache,
+all of which the read-only sandbox refuses. When the change is stable and the full gate is needed,
+report that to the parent and let the write-capable implementation session run it.
 
 Never make real network/AI-provider calls. Never inspect data/phr.db or secrets.
 Return a compact report with:
