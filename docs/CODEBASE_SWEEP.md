@@ -54,7 +54,7 @@ Constants:
 
 Connection and schema:
 
-- `get_connection` opens SQLite with row dictionaries and `PRAGMA foreign_keys = ON`.
+- `get_connection` opens SQLite with row dictionaries, `PRAGMA foreign_keys = ON`, and a bounded one-second busy wait; write helpers map only busy/locked failures to `DatabaseBusyError`.
 - `init_db` creates the DB parent folder and executes `schema.sql`.
 - `now_iso`, `row_to_dict`, and `rows_to_dicts` are formatting helpers.
 
@@ -71,7 +71,7 @@ Backup/restore:
 
 Sweep changes:
 
-- Added `delete_records_for_person` to delete all profile child records in one transaction instead of N+1 row deletes.
+- `delete_person` deletes all profile child records and the parent row in one connection and one transaction, so a parent-delete failure rolls back every child deletion.
 - Replaced restore-time `INSERT OR REPLACE` with real SQLite upsert semantics. This avoids deleting/reinserting parent rows, which can violate foreign keys or drop child records when restoring a backup over an existing DB.
 - Added shape validation for backup table payloads so malformed JSON fails with clear `ValueError` messages.
 
@@ -168,7 +168,7 @@ Markdown exports:
 
 Sweep changes:
 
-- `delete_person` now uses bulk child deletion through `db.delete_records_for_person`.
+- `delete_person` delegates to `db.delete_person`, which removes child rows and the parent atomically in one transaction.
 - Added robust date parsing for reminder due-date calculations. Invalid imported reminder dates are skipped instead of being compared lexicographically or raising errors.
 
 ### `imports_exports.py`

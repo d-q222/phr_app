@@ -171,7 +171,7 @@ The AI request sends a compact insight packet instead of the full local health d
 
 For AI safety-checked insights, the app asks BigModel for possible patterns, potential issues, safe low-risk actions, clinician questions, and a safety note. It explicitly blocks diagnosis, prescription advice, medication or supplement changes, urgent-symptom home management, restrictive diets, intense exercise, invasive actions, or anything that could delay urgent care.
 
-The app sets `temperature=0.2`, disables model thinking, and defaults to `glm-4.5-flash`. If BigModel returns HTTP 429 for the primary model, the app automatically retries the configured fallback models before showing the rule-based report.
+The app sets `temperature=0.2`, disables model thinking, and defaults to `glm-4.5-flash`. If BigModel returns HTTP 429 for the primary model, the app automatically retries the configured fallback models before showing the rule-based report. Each insight request shares one 30-second monotonic deadline across in-model retries and fallback models; no new request starts after it expires.
 
 If the AI report is unavailable, the app shows a Streamlit warning and falls back to the rule-based report. Zhipu business error `1113` is treated as an account balance/quota problem and is not retried.
 
@@ -185,10 +185,11 @@ For chat, the app reads `ZAI_API_KEY` or `ZHIPU_API_KEY` from Streamlit secrets 
 
 If Zhipu returns an account/resource-package error for `glm-5.1`, set `ZHIPU_CHAT_MODEL` to a model your account can use, such as the same model configured for Health Insights. When `ZHIPU_CHAT_FALLBACK_MODELS` is not set, chat automatically tries the existing `ZHIPU_MODEL` and `ZHIPU_FALLBACK_MODELS` after `glm-5.1`.
 
-Each chat action has one 45-second monotonic deadline shared by all model candidates.
-Eligible provider/model errors can use a fallback model within the remaining time;
-model-independent transport failures stop immediately instead of restarting the full
-timeout for every model.
+Each chat action has one 45-second monotonic deadline shared by all model candidates:
+no new request starts after it expires, and each network operation within a request is
+capped by the remaining time. Eligible provider/model errors can use a fallback model
+within the remaining time; model-independent transport failures stop immediately
+instead of restarting the full timeout for every model.
 
 ## Current Limitations
 

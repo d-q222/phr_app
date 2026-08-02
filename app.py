@@ -802,10 +802,11 @@ def clean_payload(table: str, payload: dict) -> dict:
                 cleaned[key] = validation.normalize_optional_number(cleaned[key])
     if table == "wearable_records" and "value" in cleaned and not validation.is_blank(cleaned["value"]):
         cleaned["value"] = float(cleaned["value"])
-    if table == "health_entries" and "severity" in cleaned:
-        cleaned["severity"] = (
-            None if validation.is_blank(cleaned["severity"]) else int(cleaned["severity"])
-        )
+    if table in {"allergies", "health_entries"} and "severity" in cleaned:
+        if validation.is_blank(cleaned["severity"]):
+            cleaned["severity"] = None
+        elif table == "health_entries":
+            cleaned["severity"] = int(cleaned["severity"])
     return cleaned
 
 
@@ -907,14 +908,16 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
             if not confirm_remove:
                 st.error("Confirm password removal before continuing.")
                 return
-            services.update_person(
-                int(person["id"]),
-                {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
-                db_path=db_path,
-            )
-            security.unlock_profile(int(person["id"]), db_path=db_path)
-            st.success("Password removed.")
-            st.rerun()
+            if apply_record_change(
+                lambda: services.update_person(
+                    int(person["id"]),
+                    {"profile_password_enabled": 0, "profile_password_hash": None, "profile_password_hint": None},
+                    db_path=db_path,
+                )
+            ):
+                security.unlock_profile(int(person["id"]), db_path=db_path)
+                st.success("Password removed.")
+                st.rerun()
     with st.form(f"password_form_{person['id']}"):
         password = st.text_input("Set/change password", type="password")
         hint = st.text_input("Password hint", value=person.get("profile_password_hint") or "")
@@ -922,8 +925,8 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
         if submitted:
             if not password:
                 st.error("Password cannot be blank.")
-            else:
-                services.update_person(
+            elif apply_record_change(
+                lambda: services.update_person(
                     int(person["id"]),
                     {
                         "profile_password_enabled": 1,
@@ -932,6 +935,7 @@ def password_settings(person: dict, db_path: Path | str = db.DB_PATH) -> None:
                     },
                     db_path=db_path,
                 )
+            ):
                 security.lock_profile(int(person["id"]), db_path=db_path)
                 st.success("Password saved. Profile is now locked.")
 
@@ -1009,10 +1013,12 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
                         data["profile_password_enabled"] = 1
                         data["profile_password_hash"] = security.hash_password(password)
                         data["profile_password_hint"] = hint
-                    services.create_person(clean_payload("people", data), db_path=db_path)
-                    st.success("Profile created.")
-                    st.session_state[add_profile_key] = False
-                    st.rerun()
+                    if apply_record_change(
+                        lambda: services.create_person(clean_payload("people", data), db_path=db_path)
+                    ):
+                        st.success("Profile created.")
+                        st.session_state[add_profile_key] = False
+                        st.rerun()
 
     if not people:
         return
@@ -1054,16 +1060,17 @@ def page_profiles(person: dict | None, db_path: Path | str = db.DB_PATH, demo_mo
             if not confirm_delete:
                 st.error("Confirm profile delete before continuing.")
                 return
-            services.delete_person(int(row["id"]), db_path=db_path)
-            st.warning(warning_label("Profile deleted."))
-            st.session_state[profile_edit_reset_key] += 1
-            st.rerun()
+            if apply_record_change(lambda: services.delete_person(int(row["id"]), db_path=db_path)):
+                st.warning(warning_label("Profile deleted."))
+                st.session_state[profile_edit_reset_key] += 1
+                st.rerun()
         if submitted:
             errors = validation.validate_person(data)
             if errors:
                 show_errors(errors)
-            else:
-                services.update_person(int(row["id"]), clean_payload("people", data), db_path=db_path)
+            elif apply_record_change(
+                lambda: services.update_person(int(row["id"]), clean_payload("people", data), db_path=db_path)
+            ):
                 st.success("Profile updated.")
                 st.session_state[profile_edit_reset_key] += 1
                 st.rerun()
@@ -1083,14 +1090,14 @@ def date_range_controls(prefix: str) -> tuple[str | None, str | None]:
 def apply_record_change(action: Callable[[], None]) -> bool:
     """Run a person-scoped write, reporting a clean message if the record is not available.
 
-    `db.RecordNotFound` means the record does not belong to the selected profile, or no
-    longer exists. It should be unreachable from this page, which only offers record ids
-    drawn from the selected profile's own rows.
+    `db.RecordNotFound` means the target — a record, or the profile itself for
+    profile-level writes — no longer exists or is out of scope for the caller, e.g.
+    after a concurrent delete in another session.
     """
     try:
         action()
     except db.RecordNotFound:
-        st.error("That record is no longer available for this profile. Refresh and try again.")
+        st.error("That record is no longer available. Refresh and try again.")
         return False
     except db.DatabaseBusyError:
         st.error("The health record database is busy. Wait a moment and try again.")
@@ -1316,10 +1323,16 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         st.subheader("CSV Imports")
         labs_file = st.file_uploader("Import labs CSV", type=["csv"])
         if labs_file and st.button(action_button_label("Import labs")):
-            st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
+            try:
+                st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
+            except db.DatabaseBusyError as exc:
+                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
         wearable_file = st.file_uploader("Import wearables CSV", type=["csv"])
         if wearable_file and st.button(action_button_label("Import wearables")):
-            st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
+            try:
+                st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
+            except db.DatabaseBusyError as exc:
+                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
         st.download_button(action_button_label("Download sample labs CSV"), imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
         st.download_button(action_button_label("Download sample wearables CSV"), imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
 
@@ -1354,7 +1367,7 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         else:
             try:
                 result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
                 st.error(f"FHIR import failed: {exc}")
             else:
                 st.write(result)
@@ -1384,7 +1397,7 @@ def page_import_export(person: dict | None, db_path: Path | str = db.DB_PATH, de
         else:
             try:
                 imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
-            except (ValueError, json.JSONDecodeError) as exc:
+            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
                 st.error(f"Backup restore failed: {exc}")
             else:
                 st.success("Backup restored.")
@@ -1455,7 +1468,13 @@ def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff
-    db.init_db()
+    try:
+        # Pass the module attribute explicitly: the keyword default was bound at import
+        # time, and tests repoint db.DB_PATH at temporary databases.
+        db.init_db(db.DB_PATH)
+    except db.DatabaseBusyError as exc:
+        st.error(str(exc))
+        st.stop()
 
     with st.sidebar:
         st.markdown("### Family PHR")

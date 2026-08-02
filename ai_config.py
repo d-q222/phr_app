@@ -19,6 +19,9 @@ DEFAULT_ZHIPU_MODEL = "glm-4.5-flash"
 DEFAULT_ZHIPU_FALLBACK_MODELS = "glm-4.7-flash"
 DEFAULT_ZHIPU_MAX_TOKENS = 220
 DEFAULT_ZHIPU_CONTEXT_BYTE_LIMIT = 1200
+# Cap on provider response bodies read into memory before JSON parsing; a
+# misbehaving provider must not be able to exhaust memory through one response.
+ZHIPU_RESPONSE_BYTE_LIMIT = 5_000_000
 ZHIPU_API_URL = os.getenv(
     "ZHIPU_API_URL",
     "https://open.bigmodel.cn/api/paas/v4/chat/completions",

@@ -309,7 +309,7 @@ def _parse_http_error(exc: urllib.error.HTTPError) -> tuple[str | None, str]:
         return None, str(exc)
     try:
         parsed = json.loads(body)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return None, f"{exc} ({body[:500]})"
     if isinstance(parsed, dict):
         error = parsed.get("error") or parsed
@@ -393,7 +393,10 @@ def _call_zhipu_chat_model(
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            raw = response.read(ai_config.ZHIPU_RESPONSE_BYTE_LIMIT + 1)
+            if len(raw) > ai_config.ZHIPU_RESPONSE_BYTE_LIMIT:
+                raise InvalidAIResponseError("Zhipu AI returned an oversized response.")
+            payload = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         provider_code, detail = _parse_http_error(exc)
         if exc.code == 429:
@@ -408,7 +411,7 @@ def _call_zhipu_chat_model(
         raise AIChatError("Zhipu AI returned an error.", detail) from exc
     except (OSError, http.client.HTTPException) as exc:
         raise NetworkAIChatError("Could not reach Zhipu AI. Check your network connection and try again.", str(exc)) from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise InvalidAIResponseError("Zhipu AI returned a response the app could not read.", str(exc)) from exc
 
     try:

@@ -134,7 +134,7 @@ def init_db(db_path: Path | str = DB_PATH) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_PATH.read_text(encoding="utf-8")
 
-    with get_connection(db_path) as connection:
+    with _write_connection(db_path) as connection:
         connection.executescript(schema)
 
     return db_path
@@ -155,8 +155,11 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
 def create_record(table: str, data: dict, db_path: Path | str = DB_PATH) -> int:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
-    if "person_id" in TABLE_COLUMNS[table] and data.get("person_id") is None:
-        raise ValueError(f"person_id is required for table {table}")
+    if "person_id" in TABLE_COLUMNS[table]:
+        if data.get("person_id") is None:
+            raise ValueError(f"person_id is required for table {table}")
+    elif "person_id" in data:
+        raise ValueError(f"Table {table} is not person-scoped; omit person_id")
     values = {key: value for key, value in data.items() if key in TABLE_COLUMNS[table]}
     stamp = now_iso()
     if "created_at" in TABLE_COLUMNS[table]:
