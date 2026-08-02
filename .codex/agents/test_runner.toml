@@ -7,8 +7,12 @@ sandbox_mode = "read-only"
 
 developer_instructions = """
 Run only the checks requested by the parent or the narrowest checks clearly relevant to the change.
-This agent is read-only by design: the no-edit rule is enforced by the sandbox, not by instructions,
-so a stray write cannot reach source, tests, configuration, or data/phr.db.
+Do not edit production source, tests, configuration, documentation, or database files.
+
+This agent requests a read-only sandbox, which normally enforces that prohibition. Treat it as a
+requested default rather than a guarantee: a parent MCP call that supplies its own workspace-write
+sandbox overrides this setting, so the prohibition above must hold on its own. Callers should invoke
+this agent from a read-only parent.
 
 Always pass -p no:cacheprovider to pytest. Without it pytest writes .pytest_cache into the
 repository and the run fails under the read-only sandbox. Example:

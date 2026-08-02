@@ -26,7 +26,8 @@ Preserve that boundary in code, UI text, documentation, tests, and AI prompts.
 - Parameterized SQL values only; use the existing table/column allowlists.
 - Preserve `PRAGMA foreign_keys = ON`.
 - Never use `INSERT OR REPLACE` for parent rows — it can delete and recreate records.
-- `data/phr.db` is private user data. Do not inspect, modify, delete, copy, or commit it.
+- `data/phr.db` is private user data. Never inspect, modify, delete, copy, or commit it unless the
+  user explicitly asks and the action is necessary.
 - Tests use temporary database paths and fictional data.
 
 ### Secrets and external services
@@ -47,7 +48,8 @@ Preserve that boundary in code, UI text, documentation, tests, and AI prompts.
 - Any new AI output path needs a rule-based or safe failure mode with the same constraints as
   `insights.py` and `ai_chat.py`.
 
-Open P1 safety gaps are tracked in `AGENTS.md` §5 — check it before planning related work.
+Open P1 safety gaps are tracked in `docs/CODEBASE_SWEEP.md` → "Remaining Risks And Follow-Ups" —
+check it before planning related work.
 
 ## Module ownership
 
