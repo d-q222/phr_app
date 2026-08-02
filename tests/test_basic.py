@@ -186,6 +186,7 @@ def test_person_medication_active_filter_lab_latest_password_reminder_insights_b
         None,
         include_appointments=False,
         include_wearables=False,
+        db_path=db_path,
     )
     report = insights.generate_rule_based_insights(context)
     assert "Health Insights Report" in report
