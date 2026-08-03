@@ -17,8 +17,10 @@ This application is for personal organization and education only. It is not a me
 - Multiple family profiles.
 - Optional lightweight per-profile passwords.
 - Local SQLite storage.
-- CRUD pages for allergies, medications, labs, health timeline entries, appointments, reminders, and wearable records.
-- Profile-specific dashboard.
+- CRUD pages for allergies, medications, labs, health timeline entries, appointments, reminders, wearable records, and chronic conditions.
+- Chronic conditions are tagged by you and attributed to whoever reported them (for example "Diabetes — Endocrinologist"). They are not detected automatically from incoming records.
+- Condition Focus page collecting the records commonly tracked alongside a condition you have noted. The condition-to-record links come from a hand-written mapping table, not from clinical inference, and the page is hidden for profiles with no conditions.
+- Profile-specific dashboard, including a tracked-conditions list.
 - Interactive profile-specific body map with synchronized organ highlighting and record filtering.
 - Filters for dates, body system, body part, medication status, lab flag, reminder status, and keyword search where useful.
 - CSV import for labs and wearable records.

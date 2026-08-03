@@ -17,16 +17,24 @@ Companion documents: `docs/domain_invariants.md` (what must always hold),
 A local-first family personal health record. One user runs it on their own machine; the SQLite file
 holds every family member's records. Selecting a profile in the sidebar scopes everything on screen.
 
-Sixteen pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
+Eighteen pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
 
-- **Overview** — Dashboard, Body Map
-- **Records** — Profiles, Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables
+- **Overview** — Dashboard, Body Map, Condition Focus
+- **Records** — Profiles, Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
+  Chronic Conditions
 - **Documents** — Provider Summary, Emergency Snapshot, Health Insights, AI Chat
 - **Admin** — Import/Export, Settings
 
-Seven of those (Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables) are
-rendered by a **single** function, `app.generic_record_page`, driven by the `app.FIELD_CONFIGS` table.
-Adding a record type is a config change, not a new page.
+Eight of those (Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
+Chronic Conditions) are rendered by a **single** function, `app.generic_record_page`, driven by the
+`app.FIELD_CONFIGS` table. Adding a record type is mostly a config change rather than a new page —
+though it also requires entries in `db.TABLES` (which drives `delete_person` and person-scoped
+export) and `imports_exports.BACKUP_VALIDATORS` (consulted for every table in `db.TABLES`, so an
+omission makes backup restore raise `KeyError`).
+
+**Condition Focus** is not a record page. It selects one of the profile's tracked conditions and
+shows the records a hand-written mapping associates with it. Its nav entry is hidden when the
+profile has no conditions, is locked, or is unselected — see §3.
 
 Supporting capabilities: CSV import for labs and wearables, whole-database JSON backup/restore,
 FHIR R4/R5 Bundle export and import, deterministic rule-based insights, optional external AI
@@ -43,23 +51,26 @@ not authorization.
 
 | Module | Lines | Role | Imports Streamlit? |
 |---|---|---|---|
-| `app.py` | 1516 | All UI, routing, forms, presentation, demo mode | yes |
-| `fhir.py` | 711 | FHIR R4/R5 Bundle export and import | no |
-| `insights.py` | 579 | Deterministic analytics + safety-gated AI reports | no |
-| `ai_chat.py` | 502 | AI chat page: context assembly, HTTP transport, rendering | yes |
+| `app.py` | 1686 | All UI, routing, forms, presentation, demo mode | yes |
+| `fhir.py` | 713 | FHIR R4/R5 Bundle export and import | no |
+| `insights.py` | 596 | Deterministic analytics + safety-gated AI reports | no |
+| `ai_chat.py` | 526 | AI chat page: context assembly, HTTP transport, rendering | yes |
 | `body_map_config.py` | 393 | Body-part/system taxonomy and record mapping (static) | no |
-| `db.py` | 343 | Repository: connections, schema init, generic CRUD | no |
-| `services.py` | 325 | Service layer: person-scoped operations, derived reads | no |
-| `body_map_services.py` | 204 | Normalizes records into `NormalizedBodyRecord` per body part | no |
+| `db.py` | 383 | Repository: connections, schema init, generic CRUD | no |
+| `services.py` | 368 | Service layer: person-scoped operations, derived reads | no |
+| `body_map_services.py` | 205 | Normalizes records into `NormalizedBodyRecord` per body part | no |
 | `body_map_summary.py` | 196 | Conservative current/historical status summarization | no |
-| `imports_exports.py` | 192 | CSV / JSON-backup / FHIR facade | no |
-| `body_map_ui.py` | 190 | Body-map rendering and state sync | yes |
-| `ai_config.py` | 135 | Provider config and key lookup | yes |
-| `validation.py` | 126 | Pure field validators | no |
+| `imports_exports.py` | 201 | CSV / JSON-backup / FHIR facade | no |
+| `body_map_ui.py` | 191 | Body-map rendering and state sync | yes |
+| `condition_ui.py` | 234 | Condition Focus rendering, preview, and state sync | yes |
+| `condition_config.py` | 55 | Condition→record-name mapping (static; a cross-agent contract) | no |
+| `condition_services.py` | 45 | Profile-scoped retrieval of records mapped to a condition | no |
+| `ai_config.py` | 138 | Provider config and key lookup | yes |
+| `validation.py` | 139 | Pure field validators | no |
 | `security.py` | 72 | Password hashing + profile unlock state | yes |
-| `models.py` | 35 | Controlled vocabularies only | no |
+| `models.py` | 67 | Controlled vocabularies only | no |
 
-**5,519 lines of application code; 2,027 lines of tests across 5 files.** Also
+**6,208 lines of application code; 3,451 lines of tests across 6 files.** Also
 `components/body_map/index.html` (31 lines of vanilla JS, a Streamlit custom component), `schema.sql`,
 and `scripts/verify.sh`.
 
@@ -82,8 +93,18 @@ app.main()
               → sqlite3
 ```
 
-Body map and AI chat branch off to `body_map_ui.render_body_map_page(person, db_path)` and
+Body map, Condition Focus, and AI chat branch off to `body_map_ui.render_body_map_page(person, db_path)`,
+`condition_ui.render_condition_focus_page(person, db_path)`, and
 `ai_chat.render_ai_chatbot(person_id, db_path)`.
+
+**Navigation now depends on profile data.** `app.page_navigation(container, hidden_pages)` takes the
+set of pages to hide, computed by `app.hidden_nav_pages(person, db_path)`. Because that set depends on
+the selected profile, which `main()` resolves *after* the nav used to render, the sidebar creates the
+`nav_menu` container in position and fills it afterwards — position and CSS key are unchanged. A
+hidden current page falls back to the Dashboard and the fallback is written back to session state.
+`hidden_nav_pages` returns for a locked profile *before* querying conditions: whether a locked profile
+has conditions is health data, and nav visibility is an observable side channel that `main()`'s lock
+gate — which runs after the sidebar — cannot cover.
 
 ### Layering is cleaner than it looks
 
@@ -100,11 +121,16 @@ signature change rather than a rewrite for roughly 2,300 of these lines.
 
 ## 4. Schema and data model
 
-`schema.sql`: eight tables. `people` plus seven child tables, each with
+`schema.sql`: nine tables. `people` plus eight child tables, each with
 `person_id INTEGER NOT NULL REFERENCES people(id)` and a `(person_id, ...)` composite index.
 
 `people`, `allergies`, `medications`, `lab_results`, `health_entries`, `appointments`, `reminders`,
-`wearable_records`.
+`wearable_records`, `conditions`.
+
+`conditions` records what the user entered and who reported it (`condition_name`, `source`,
+`noted_date`, `notes`). There is deliberately no status column: nothing in the app can keep one
+current, so a row's existence is the only signal. `source` carries a `Self-reported` option, which
+records provenance without the app asserting anything clinical.
 
 Facts that matter for migration:
 
