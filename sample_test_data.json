@@ -1829,6 +1829,18 @@
         "source": "Clinic scale",
         "created_at": "2026-04-28T09:19:00"
       }
+    ],
+    "conditions": [
+      {
+        "id": 1,
+        "person_id": 1,
+        "condition_name": "Diabetes",
+        "source": "Endocrinologist",
+        "noted_date": "2026-01-15",
+        "notes": "Placeholder demo row. Fictional. A later pass will expand the sample data into a fuller, self-consistent story; keep names aligned with condition_config.CONDITION_RECORD_MAPPINGS.",
+        "created_at": "2026-01-15T09:00:00",
+        "updated_at": "2026-01-15T09:00:00"
+      }
     ]
   }
 }

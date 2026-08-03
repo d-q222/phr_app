@@ -33,6 +33,7 @@ TABLES = [
     "appointments",
     "reminders",
     "wearable_records",
+    "conditions",
 ]
 
 TABLE_COLUMNS = {
@@ -101,6 +102,7 @@ TABLE_COLUMNS = {
     ],
     "reminders": ["person_id", "reminder_type", "title", "due_date", "status", "notes", "created_at", "updated_at"],
     "wearable_records": ["person_id", "metric_type", "value", "unit", "timestamp", "source", "created_at"],
+    "conditions": ["person_id", "condition_name", "source", "noted_date", "notes", "created_at", "updated_at"],
 }
 
 

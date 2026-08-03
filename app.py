@@ -24,6 +24,7 @@ import validation
 from models import (
     APPOINTMENT_STATUSES,
     BODY_SYSTEMS,
+    CONDITION_SOURCES,
     LAB_FLAGS,
     MEDICATION_STATUSES,
     REMINDER_STATUSES,
@@ -46,6 +47,7 @@ PAGES = [
     "Appointments",
     "Reminders",
     "Wearables",
+    "Chronic Conditions",
     "Provider Summary",
     "Emergency Snapshot",
     "Health Insights",
@@ -56,7 +58,16 @@ PAGES = [
 
 NAV_SECTIONS = {
     "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
-    "Records": ["Health Timeline", "Medications", "Allergies", "Labs", "Appointments", "Reminders", "Wearables"],
+    "Records": [
+        "Health Timeline",
+        "Medications",
+        "Allergies",
+        "Labs",
+        "Appointments",
+        "Reminders",
+        "Wearables",
+        "Chronic Conditions",
+    ],
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
 }
@@ -72,6 +83,7 @@ PAGE_EMOJIS = {
     "Appointments": "📅",
     "Reminders": "🔔",
     "Wearables": "⌚",
+    "Chronic Conditions": "🩺",
     "Provider Summary": "📝",
     "Emergency Snapshot": "🚑",
     "Health Insights": "💡",
@@ -126,6 +138,7 @@ PAGE_DESCRIPTIONS = {
     "Appointments": "Track provider visits, status, location, and preparation notes.",
     "Reminders": "Manage follow-up items and routine health tasks.",
     "Wearables": "Import and review manually recorded wearable metrics.",
+    "Chronic Conditions": "Track ongoing conditions and note who reported each one.",
     "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
     "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
     "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
@@ -142,6 +155,7 @@ SINGULAR_TITLES = {
     "Appointments": "Appointment",
     "Reminders": "Reminder",
     "Wearables": "Wearable record",
+    "Chronic Conditions": "Condition",
 }
 
 DISPLAY_COLUMN_LABELS = {
@@ -185,6 +199,8 @@ DISPLAY_COLUMN_LABELS = {
     "reminder_type": "Reminder Type",
     "due_date": "Due Date",
     "metric_type": "Metric",
+    "condition_name": "Condition",
+    "noted_date": "Noted",
     "value": "Value",
     "timestamp": "Timestamp",
     "source": "Source",
@@ -206,6 +222,7 @@ DATE_DISPLAY_COLUMNS = {
     "entry_date",
     "appointment_date",
     "due_date",
+    "noted_date",
 }
 
 DATETIME_DISPLAY_COLUMNS = {
@@ -564,6 +581,17 @@ FIELD_CONFIGS = {
         "validator": validation.validate_wearable,
         "order_by": "timestamp",
     },
+    "conditions": {
+        "title": "Chronic Conditions",
+        "fields": [
+            ("condition_name", "text"),
+            ("source", ["", *CONDITION_SOURCES]),
+            ("noted_date", "date_text"),
+            ("notes", "textarea"),
+        ],
+        "validator": validation.validate_condition,
+        "order_by": "condition_name",
+    },
 }
 
 
@@ -885,7 +913,14 @@ def close_form(key: str) -> None:
 
 
 def record_label(row: dict) -> str:
-    label = row.get("title") or row.get("name") or row.get("test_name") or row.get("allergen") or row.get("metric_type")
+    label = (
+        row.get("title")
+        or row.get("name")
+        or row.get("test_name")
+        or row.get("allergen")
+        or row.get("metric_type")
+        or row.get("condition_name")
+    )
     return f"{label or 'Record'} (ID {row['id']})"
 
 
@@ -1148,7 +1183,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
         status = st.selectbox("Reminder status", ["", *REMINDER_STATUSES])
         rows = services.reminder_filters(person_id, status or None, db_path=db_path)
     else:
-        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications"}, db_path=db_path)
+        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications", "conditions"}, db_path=db_path)
 
     dataframe(rows)
 
@@ -1275,6 +1310,22 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
                 st.rerun()
 
 
+def condition_display_lines(rows: list[dict]) -> list[str]:
+    """Format tracked-condition rows as "Condition — Source" display lines.
+
+    Pure formatting over rows already scoped to a single profile. The source is omitted when the
+    record does not carry one; nothing is inferred about the condition beyond what was entered.
+    """
+    lines = []
+    for row in rows:
+        name = str(row.get("condition_name") or "").strip()
+        if not name:
+            continue
+        source = str(row.get("source") or "").strip()
+        lines.append(f"{name} — {source}" if source else name)
+    return lines
+
+
 def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     db_path = db.DB_PATH if db_path is None else db_path
     page_header("Dashboard")
@@ -1306,6 +1357,13 @@ def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     section = st.selectbox("Dashboard section", list(section_map), key="dashboard_section")
     st.subheader(section)
     dataframe(section_map[section])
+    st.subheader("Tracked Conditions")
+    condition_lines = condition_display_lines(data["conditions"])
+    if condition_lines:
+        for line in condition_lines:
+            st.markdown(f"- {line}")
+    else:
+        st.caption("No conditions are being tracked.")
 
 
 def page_provider_summary(person: dict, db_path: Path | str | None = None) -> None:
@@ -1559,6 +1617,8 @@ def main() -> None:  # noqa: C901, PLR0915
         generic_record_page("reminders", person, current_db_path, demo_mode=demo_mode)
     elif page == "Wearables":
         generic_record_page("wearable_records", person, current_db_path, demo_mode=demo_mode)
+    elif page == "Chronic Conditions":
+        generic_record_page("conditions", person, current_db_path, demo_mode=demo_mode)
     elif page == "Provider Summary":
         page_provider_summary(person, db_path=current_db_path)
     elif page == "Emergency Snapshot":

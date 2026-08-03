@@ -104,6 +104,17 @@ def active_medications(person_id: int, db_path: Path | str | None = None) -> lis
     return list_items("medications", person_id, {"status": "Active"}, order_by="name", descending=False, db_path=db_path)
 
 
+def tracked_conditions(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    """Return the selected profile's tracked conditions, ordered by name for stable output.
+
+    Reads only the person-scoped `conditions` table. A row is exactly what the user (or demo seed
+    data) entered, attributed to whoever reported it; nothing is inferred from other records.
+    Callers are responsible for authorization -- this does not check locked-profile state.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    return list_items("conditions", person_id, order_by="condition_name", descending=False, db_path=db_path)
+
+
 def latest_labs(person_id: int, db_path: Path | str | None = None) -> list[dict]:
     db_path = db.DB_PATH if db_path is None else db_path
     labs = list_items("lab_results", person_id, order_by="id", descending=True, db_path=db_path)
@@ -203,6 +214,7 @@ def dashboard_data(person_id: int, db_path: Path | str | None = None) -> dict:
     return {
         "person": get_person(person_id, db_path=db_path),
         "allergies": list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path),
+        "conditions": tracked_conditions(person_id, db_path=db_path),
         "active_medications": active_medications(person_id, db_path=db_path),
         "latest_labs": latest_labs(person_id, db_path=db_path),
         "recent_entries": recent_health_entries(person_id, db_path=db_path),

@@ -23,6 +23,7 @@ import imports_exports  # noqa: E402
 import insights  # noqa: E402
 import security  # noqa: E402
 import services  # noqa: E402
+import validation  # noqa: E402
 
 CHILD_TABLE_SEEDS = {
     "allergies": {"allergen": "Peanuts", "severity": "Severe"},
@@ -36,6 +37,7 @@ CHILD_TABLE_SEEDS = {
         "value": 100,
         "timestamp": "2026-01-01T08:00:00",
     },
+    "conditions": {"condition_name": "Asthma"},
 }
 
 
@@ -1885,3 +1887,180 @@ def test_locked_profile_stays_locked_when_db_path_is_omitted(tmp_path, monkeypat
 
     assert app.is_locked_profile(person, other_db) is False
     assert app.is_locked_profile(person) is True
+
+
+# --- Chronic conditions (person-scoped record type) ---------------------------------------------
+
+
+def _two_profiles_with_conditions(tmp_path):
+    """Alice and Bob, each with one condition. Returns (db_path, alice, bob, bob_record_id)."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    services.create_item(
+        "conditions", alice, {"condition_name": "Diabetes", "source": "Endocrinologist"}, db_path=db_path
+    )
+    bob_record = services.create_item(
+        "conditions", bob, {"condition_name": "Hypertension", "source": "Cardiologist"}, db_path=db_path
+    )
+    return db_path, alice, bob, bob_record
+
+
+def test_condition_crud_round_trip(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+
+    record_id = services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"},
+        db_path=db_path,
+    )
+    rows = services.tracked_conditions(person_id, db_path=db_path)
+    assert [row["condition_name"] for row in rows] == ["Diabetes"]
+    assert rows[0]["source"] == "Endocrinologist"
+
+    services.update_item(
+        "conditions",
+        person_id=person_id,
+        record_id=record_id,
+        data={"source": "Primary Care"},
+        db_path=db_path,
+    )
+    assert services.tracked_conditions(person_id, db_path=db_path)[0]["source"] == "Primary Care"
+
+    services.delete_item("conditions", person_id=person_id, record_id=record_id, db_path=db_path)
+    assert services.tracked_conditions(person_id, db_path=db_path) == []
+
+
+def test_tracked_conditions_orders_by_name_ascending(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    for name in ("Hypertension", "Asthma", "Diabetes"):
+        services.create_item("conditions", person_id, {"condition_name": name}, db_path=db_path)
+
+    names = [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)]
+    assert names == ["Asthma", "Diabetes", "Hypertension"]
+
+
+def test_validate_condition_accepts_and_rejects():
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"}
+    ) == []
+    # A blank source is allowed; the column is optional.
+    assert validation.validate_condition({"condition_name": "Diabetes", "source": ""}) == []
+    assert validation.validate_condition({"condition_name": ""}) == ["Condition name is required."]
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "source": "Astrologer"}
+    ) != []
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "noted_date": "not-a-date"}
+    ) != []
+
+
+def test_validate_condition_does_not_mutate_input():
+    data = {"condition_name": "Diabetes", "source": "Endocrinologist"}
+    validation.validate_condition(data)
+    assert data == {"condition_name": "Diabetes", "source": "Endocrinologist"}
+
+
+def test_conditions_are_isolated_between_profiles(tmp_path):
+    db_path, alice, bob, _ = _two_profiles_with_conditions(tmp_path)
+
+    alice_names = [row["condition_name"] for row in services.tracked_conditions(alice, db_path=db_path)]
+    bob_names = [row["condition_name"] for row in services.tracked_conditions(bob, db_path=db_path)]
+    assert alice_names == ["Diabetes"]
+    assert bob_names == ["Hypertension"]
+
+    alice_dashboard = services.dashboard_data(alice, db_path=db_path)
+    assert [row["condition_name"] for row in alice_dashboard["conditions"]] == ["Diabetes"]
+    assert "Hypertension" not in json.dumps(alice_dashboard)
+
+
+def test_selected_json_backup_excludes_other_profiles_conditions(tmp_path):
+    db_path, alice, _, _ = _two_profiles_with_conditions(tmp_path)
+
+    backup = json.loads(imports_exports.export_json_backup(db_path=db_path, person_id=alice))
+
+    assert [row["condition_name"] for row in backup["tables"]["conditions"]] == ["Diabetes"]
+    assert "Hypertension" not in json.dumps(backup)
+    assert "Cardiologist" not in json.dumps(backup)
+
+
+def test_condition_update_rejects_a_record_owned_by_another_profile(tmp_path):
+    db_path, alice, _, bob_record = _two_profiles_with_conditions(tmp_path)
+
+    with pytest.raises(db.RecordNotFound):
+        services.update_item(
+            "conditions", person_id=alice, record_id=bob_record, data={"condition_name": "Owned"}, db_path=db_path
+        )
+    with pytest.raises(db.RecordNotFound):
+        services.delete_item("conditions", person_id=alice, record_id=bob_record, db_path=db_path)
+
+
+def test_delete_person_removes_conditions_without_foreign_key_error(tmp_path):
+    """Regression: conditions must be in db.TABLES or this raises IntegrityError."""
+    db_path, alice, bob, _ = _two_profiles_with_conditions(tmp_path)
+
+    db.delete_person(alice, db_path=db_path)
+
+    assert services.tracked_conditions(alice, db_path=db_path) == []
+    assert [row["condition_name"] for row in services.tracked_conditions(bob, db_path=db_path)] == [
+        "Hypertension"
+    ]
+
+
+def test_json_backup_round_trip_preserves_conditions(tmp_path):
+    """Regression: conditions must be in BACKUP_VALIDATORS or restore raises KeyError."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"},
+        db_path=db_path,
+    )
+
+    backup = imports_exports.export_json_backup(db_path=db_path, person_id=person_id)
+
+    restore_path = tmp_path / "restored.db"
+    db.init_db(restore_path)
+    imports_exports.import_json_backup(backup, db_path=restore_path)
+
+    restored_people = services.list_people(db_path=restore_path)
+    assert len(restored_people) == 1
+    rows = services.tracked_conditions(int(restored_people[0]["id"]), db_path=restore_path)
+    assert [(row["condition_name"], row["source"]) for row in rows] == [("Diabetes", "Endocrinologist")]
+
+
+def test_init_db_adds_conditions_table_to_a_pre_existing_database(tmp_path):
+    """Schema idempotency: an older database gains the table, and re-running is a no-op."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP TABLE conditions")
+        connection.commit()
+
+    db.init_db(db_path)
+    db.init_db(db_path)
+
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    services.create_item("conditions", person_id, {"condition_name": "Asthma"}, db_path=db_path)
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == [
+        "Asthma"
+    ]
+
+
+def test_condition_display_lines_omits_missing_source_and_blank_rows():
+    lines = app.condition_display_lines(
+        [
+            {"condition_name": "Diabetes", "source": "Endocrinologist"},
+            {"condition_name": "Asthma", "source": None},
+            {"condition_name": "  ", "source": "Primary Care"},
+        ]
+    )
+    assert lines == ["Diabetes — Endocrinologist", "Asthma"]

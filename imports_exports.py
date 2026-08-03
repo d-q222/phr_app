@@ -14,6 +14,7 @@ from validation import (
     normalize_optional_number,
     validate_allergy,
     validate_appointment,
+    validate_condition,
     validate_health_entry,
     validate_lab,
     validate_medication,
@@ -31,6 +32,7 @@ BACKUP_VALIDATORS = {
     "appointments": validate_appointment,
     "reminders": validate_reminder,
     "wearable_records": validate_wearable,
+    "conditions": validate_condition,
 }
 
 

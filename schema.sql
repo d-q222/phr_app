@@ -111,6 +111,18 @@ CREATE TABLE IF NOT EXISTS wearable_records (
     FOREIGN KEY(person_id) REFERENCES people(id)
 );
 
+CREATE TABLE IF NOT EXISTS conditions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    person_id INTEGER NOT NULL,
+    condition_name TEXT NOT NULL,
+    source TEXT,
+    noted_date TEXT,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(person_id) REFERENCES people(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_people_name ON people(name);
 CREATE INDEX IF NOT EXISTS idx_allergies_person_allergen ON allergies(person_id, allergen);
 CREATE INDEX IF NOT EXISTS idx_medications_person_status_name ON medications(person_id, status, name);
@@ -121,3 +133,4 @@ CREATE INDEX IF NOT EXISTS idx_appointments_person_date ON appointments(person_i
 CREATE INDEX IF NOT EXISTS idx_reminders_person_due_status ON reminders(person_id, due_date, status);
 CREATE INDEX IF NOT EXISTS idx_wearable_records_person_timestamp ON wearable_records(person_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_wearable_records_person_metric ON wearable_records(person_id, metric_type);
+CREATE INDEX IF NOT EXISTS idx_conditions_person_name ON conditions(person_id, condition_name);
