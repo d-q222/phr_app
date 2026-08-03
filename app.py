@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
@@ -14,6 +14,7 @@ import streamlit as st
 import ai_chat
 import ai_config
 import body_map_ui
+import condition_ui
 import db
 import fhir
 import imports_exports
@@ -39,6 +40,7 @@ DEMO_DB_PATH_KEY = "demo_db_path"
 PAGES = [
     "Dashboard",
     "Body Map",
+    "Condition Focus",
     "Profiles",
     "Health Timeline",
     "Medications",
@@ -57,7 +59,7 @@ PAGES = [
 ]
 
 NAV_SECTIONS = {
-    "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
+    "Overview": ["Dashboard", "Body Map", "Condition Focus", "Health Insights", "AI Chat"],
     "Records": [
         "Health Timeline",
         "Medications",
@@ -75,6 +77,7 @@ NAV_SECTIONS = {
 PAGE_EMOJIS = {
     "Dashboard": "📊",
     "Body Map": "🫀",
+    "Condition Focus": "🎯",
     "Profiles": "👤",
     "Health Timeline": "🗓️",
     "Medications": "💊",
@@ -130,6 +133,7 @@ ACTION_PREFIX_EMOJIS = {
 PAGE_DESCRIPTIONS = {
     "Dashboard": "A quick operational view of medications, allergies, labs, reminders, appointments, and recent notes.",
     "Body Map": "Explore profile-specific records by body area without medical interpretation.",
+    "Condition Focus": "Review the records commonly tracked for a condition you have noted.",
     "Profiles": "Manage family member profiles and local profile access settings.",
     "Health Timeline": "Record symptoms, observations, body systems, and dated health notes.",
     "Medications": "Track current and past medications, dose details, reasons, and notes.",
@@ -727,14 +731,39 @@ def selected_profile_banner(person: dict | None, db_path: Path | str | None = No
     )
 
 
-def page_navigation() -> str:
-    current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
+def hidden_nav_pages(person: dict | None, db_path: Path | str | None = None) -> frozenset[str]:
+    """Pages hidden from navigation for the currently selected profile.
 
-    with st.sidebar.container(key="nav_menu"):
+    Condition Focus is hidden when no profile is selected, when the profile is locked, or when the
+    profile tracks no conditions. The locked branch returns before any condition query runs: whether
+    a locked profile has conditions is itself health data, and nav visibility is an observable side
+    channel. main()'s lock gate gets to run only after the sidebar, so it cannot cover this.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    if person is None or is_locked_profile(person, db_path):
+        return frozenset({"Condition Focus"})
+    if not services.tracked_conditions(int(person["id"]), db_path=db_path):
+        return frozenset({"Condition Focus"})
+    return frozenset()
+
+
+def page_navigation(container=None, hidden_pages: Collection[str] = ()) -> str:
+    current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
+    if current_page in hidden_pages:
+        # Storing the fallback matters: leaving a hidden page in session state would leave no nav
+        # button marked current. Happens when the last condition is deleted while viewing it.
+        current_page = NAV_SECTIONS["Overview"][0]
+        st.session_state["nav_page"] = current_page
+
+    target = st.sidebar.container(key="nav_menu") if container is None else container
+    with target:
         st.caption("Navigation")
         for section, pages in NAV_SECTIONS.items():
+            visible = [page for page in pages if page not in hidden_pages]
+            if not visible:
+                continue
             st.markdown(f"**{section}**")
-            for page in pages:
+            for page in visible:
                 is_current = page == current_page
                 if st.button(
                     page_button_label(page),
@@ -1326,6 +1355,28 @@ def condition_display_lines(rows: list[dict]) -> list[str]:
     return lines
 
 
+def render_dashboard_conditions(person_id: int, rows: list[dict], db_path: Path | str) -> None:
+    """Render the dashboard's tracked-condition list and the preview for the selected one.
+
+    Reads only rows already scoped to `person_id`. Selecting a condition shows the records the
+    deterministic mapping associates with it; nothing here interprets those records.
+    """
+    lines = condition_display_lines(rows)
+    if not lines:
+        st.caption("No conditions are being tracked.")
+        return
+    for line in lines:
+        st.markdown(f"- {line}")
+    names = [str(row.get("condition_name") or "").strip() for row in rows]
+    names = [name for name in dict.fromkeys(names) if name]
+    condition_ui.sync_profile_state(st.session_state, person_id, db_path, names)
+    selected = st.pills(
+        "Condition preview", names, default=names[0], key=condition_ui.SELECTED_CONDITION_KEY
+    )
+    if isinstance(selected, str) and selected in names:
+        condition_ui.render_condition_preview(person_id, selected, db_path=db_path)
+
+
 def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     db_path = db.DB_PATH if db_path is None else db_path
     page_header("Dashboard")
@@ -1358,12 +1409,7 @@ def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     st.subheader(section)
     dataframe(section_map[section])
     st.subheader("Tracked Conditions")
-    condition_lines = condition_display_lines(data["conditions"])
-    if condition_lines:
-        for line in condition_lines:
-            st.markdown(f"- {line}")
-    else:
-        st.caption("No conditions are being tracked.")
+    render_dashboard_conditions(int(person["id"]), data["conditions"], db_path)
 
 
 def page_provider_summary(person: dict, db_path: Path | str | None = None) -> None:
@@ -1556,7 +1602,9 @@ def main() -> None:  # noqa: C901, PLR0915
         st.divider()
         demo_mode_controls()
         st.divider()
-        page = page_navigation()
+        # Created here so navigation keeps its position in the sidebar, but filled below: which
+        # pages are visible depends on the selected profile, which is not resolved until after.
+        nav_slot = st.container(key="nav_menu")
         st.divider()
         demo_mode = is_demo_mode()
         current_db_path = active_db_path()
@@ -1564,6 +1612,7 @@ def main() -> None:  # noqa: C901, PLR0915
         if person:
             label = "Demo profile" if demo_mode else "Active profile"
             st.caption(f"{label}: {profile_selection_label(person, current_db_path)}")
+        page = page_navigation(nav_slot, hidden_pages=hidden_nav_pages(person, current_db_path))
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)
@@ -1601,6 +1650,10 @@ def main() -> None:  # noqa: C901, PLR0915
     elif page == "Body Map":
         page_header("Body Map")
         body_map_ui.render_body_map_page(person, db_path=current_db_path)
+    elif page == "Condition Focus":
+        # Deliberately no pre-auth branch like Body Map's above: this page stays behind the lock gate.
+        page_header("Condition Focus")
+        condition_ui.render_condition_focus_page(person, db_path=current_db_path)
     elif page == "Import/Export":
         page_import_export(person, current_db_path, demo_mode=demo_mode)
     elif page == "Health Timeline":
