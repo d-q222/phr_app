@@ -19,11 +19,11 @@ holds every family member's records. Selecting a profile in the sidebar scopes e
 
 Eighteen pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
 
-- **Overview** — Dashboard, Body Map, Condition Focus
-- **Records** — Profiles, Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
+- **Overview** — Dashboard, Body Map, Condition Focus, Health Insights, AI Chat
+- **Records** — Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
   Chronic Conditions
-- **Documents** — Provider Summary, Emergency Snapshot, Health Insights, AI Chat
-- **Admin** — Import/Export, Settings
+- **Documents** — Provider Summary, Emergency Snapshot, Import/Export
+- **Admin** — Profiles, Settings
 
 Eight of those (Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
 Chronic Conditions) are rendered by a **single** function, `app.generic_record_page`, driven by the

@@ -329,3 +329,104 @@ def test_condition_focus_is_unreachable_for_a_profile_with_no_conditions(tmp_pat
 
     assert not test_app.exception
     assert test_app.session_state["nav_page"] == "Dashboard"
+
+
+# --- review follow-ups: state hygiene at the profile-selection site ------------------------------
+
+
+def test_scope_sync_needs_no_condition_query_and_clears_across_profiles():
+    """Called on every rerun, including for locked/unselected profiles, so it must not query."""
+    state = {
+        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
+        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
+        condition_ui.TREND_STATE_KEY: "Hemoglobin A1c",
+        "unrelated": True,
+    }
+
+    condition_ui.sync_profile_scope(state, 2, "real.db")
+
+    assert state == {
+        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 2),
+        "unrelated": True,
+    }
+
+
+def test_scope_sync_handles_no_selected_profile():
+    state = {
+        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
+        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
+    }
+
+    condition_ui.sync_profile_scope(state, None, "real.db")
+
+    assert condition_ui.SELECTED_CONDITION_KEY not in state
+
+
+def test_scope_sync_is_idempotent_within_one_profile():
+    """It runs on every rerun, so it must not wipe a live selection."""
+    state = {condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1)}
+    condition_ui.sync_profile_scope(state, 1, "real.db")
+    state[condition_ui.SELECTED_CONDITION_KEY] = "Diabetes"
+
+    condition_ui.sync_profile_scope(state, 1, "real.db")
+
+    assert state[condition_ui.SELECTED_CONDITION_KEY] == "Diabetes"
+
+
+def test_switching_profiles_on_an_unrelated_page_clears_condition_state(tmp_path, monkeypatch):
+    """The leak path: the Dashboard and Condition Focus never render, so only main() can clear."""
+    app_db_path = tmp_path / "switch.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    first = services.create_person({"name": "First"}, db_path=app_db_path)
+    services.create_person({"name": "Second"}, db_path=app_db_path)
+    services.create_item("conditions", first, {"condition_name": "Diabetes"}, db_path=app_db_path)
+    labels = [
+        app.profile_selection_label(person, app_db_path)
+        for person in services.list_people(db_path=app_db_path)
+    ]
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Labs"
+    test_app.run()
+    test_app.session_state[condition_ui.SELECTED_CONDITION_KEY] = "Diabetes"
+    test_app.selectbox(key="selected_profile").select(labels[1]).run()
+
+    assert not test_app.exception
+    assert condition_ui.SELECTED_CONDITION_KEY not in test_app.session_state
+
+
+# --- review follow-ups: the app must not invent data or overclaim --------------------------------
+
+
+def test_noted_date_is_not_prefilled_with_today():
+    """`date_text` would default a blank date to today, inventing a date the user never gave."""
+    fields = dict(app.FIELD_CONFIGS["conditions"]["fields"])
+
+    assert fields["noted_date"] == "text"
+
+
+def test_a_condition_saved_without_a_date_keeps_a_blank_date(db_path):
+    person_id = _person(db_path)
+    record_id = _add("conditions", person_id, {"condition_name": "Asthma", "noted_date": ""}, db_path)
+
+    row = services.tracked_conditions(person_id, db_path=db_path)[0]
+
+    assert row["id"] == record_id
+    assert not row["noted_date"]
+
+
+def test_user_facing_condition_copy_makes_no_currency_or_attachment_claim():
+    """Without a status column the app cannot claim a condition is ongoing, and the mapping is
+    type-level, so no copy may say a specific record belongs to a condition."""
+    text = " ".join(
+        [
+            app.PAGE_DESCRIPTIONS["Chronic Conditions"],
+            app.PAGE_DESCRIPTIONS["Condition Focus"],
+            Path(condition_ui.__file__).read_text(encoding="utf-8"),
+        ]
+    ).lower()
+
+    assert "ongoing" not in text
+    assert "matching this condition" not in text
+    assert "relevant to" not in text

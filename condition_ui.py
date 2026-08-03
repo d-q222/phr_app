@@ -60,19 +60,35 @@ _NUMERIC_FIELDS = {
 _EMPTY_TREND_COLUMNS = ["date", "value", "record"]
 
 
+def sync_profile_scope(
+    state: MutableMapping[str, object],
+    person_id: int | None,
+    db_path: Path | str,
+) -> None:
+    """Drop condition selection state whenever the profile or database scope changes.
+
+    Deliberately requires no condition query, so it is safe to call unconditionally on every rerun --
+    including for a locked or unselected profile, where querying conditions would itself be a leak.
+    Call this where the profile is *selected*, not from a page: a page-local call only runs when that
+    page renders, which would leave one profile's selection parked in session state while a different
+    profile is active.
+    """
+    scope = (str(Path(db_path).resolve()), person_id)
+    if state.get(PROFILE_STATE_KEY) != scope:
+        state[PROFILE_STATE_KEY] = scope
+        state.pop(SELECTED_CONDITION_KEY, None)
+        state.pop(TREND_STATE_KEY, None)
+
+
 def sync_profile_state(
     state: MutableMapping[str, object],
     person_id: int,
     db_path: Path | str,
     valid_names: Collection[str],
 ) -> None:
-    """Clear condition selection and trend state when profile, database, or valid names change."""
+    """Apply the scope check, then drop a selection that is not one of this profile's conditions."""
 
-    scope = (str(Path(db_path).resolve()), person_id)
-    if state.get(PROFILE_STATE_KEY) != scope:
-        state[PROFILE_STATE_KEY] = scope
-        state.pop(SELECTED_CONDITION_KEY, None)
-        state.pop(TREND_STATE_KEY, None)
+    sync_profile_scope(state, person_id, db_path)
     if state.get(SELECTED_CONDITION_KEY) not in valid_names:
         state.pop(SELECTED_CONDITION_KEY, None)
 
@@ -136,11 +152,11 @@ def _render_preview_table(table: str, rows: Sequence[dict]) -> None:
 
 def _render_record_table(table: str, rows: Sequence[dict]) -> None:
     st.subheader(_table_label(table))
-    st.caption(f"{len(rows)} record(s) matching this condition.")
+    st.caption(f"{len(rows)} record(s) of a type commonly tracked for this condition.")
     if rows:
         st.dataframe(pd.DataFrame(_record_rows(rows, table)), width="stretch", hide_index=True)
     else:
-        st.info("No records matching this condition were found in this record type.")
+        st.info("No records of this type were found for this profile.")
 
 
 def _render_trends(records_by_table: Mapping[str, Sequence[dict]]) -> None:
@@ -177,7 +193,7 @@ def render_condition_preview(
         st.error("Condition records could not be loaded. Please try again.")
         return
 
-    st.caption("Commonly tracked for this condition. Records matching this condition are shown below.")
+    st.caption("Record types commonly tracked for this condition.")
     for table in mapping:
         _render_preview_table(table, records_by_table.get(table, []))
 
@@ -224,7 +240,10 @@ def render_condition_focus_page(
         return
 
     st.header(selected)
-    st.caption("Commonly tracked for this condition. Records matching this condition are shown by record type.")
+    st.caption(
+        "Record types commonly tracked for this condition, grouped by type. "
+        "Listing a record here does not mean it was recorded for this condition."
+    )
     tables = list(mapping)
     tabs = st.tabs([_table_label(table) for table in tables] + ["Numeric trends"])
     for tab, table in zip(tabs[:-1], tables, strict=True):

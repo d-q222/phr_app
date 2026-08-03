@@ -142,7 +142,7 @@ PAGE_DESCRIPTIONS = {
     "Appointments": "Track provider visits, status, location, and preparation notes.",
     "Reminders": "Manage follow-up items and routine health tasks.",
     "Wearables": "Import and review manually recorded wearable metrics.",
-    "Chronic Conditions": "Track ongoing conditions and note who reported each one.",
+    "Chronic Conditions": "Record conditions you are tracking and note who reported each one.",
     "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
     "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
     "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
@@ -590,7 +590,10 @@ FIELD_CONFIGS = {
         "fields": [
             ("condition_name", "text"),
             ("source", ["", *CONDITION_SOURCES]),
-            ("noted_date", "date_text"),
+            # Plain text, not "date_text": that kind prefills today when empty, which would invent a
+            # date the user never gave and re-stamp one on every unrelated edit. Still format-checked
+            # by validate_condition, and still rendered as a date via DATE_DISPLAY_COLUMNS.
+            ("noted_date", "text"),
             ("notes", "textarea"),
         ],
         "validator": validation.validate_condition,
@@ -1362,14 +1365,15 @@ def render_dashboard_conditions(person_id: int, rows: list[dict], db_path: Path 
     deterministic mapping associates with it; nothing here interprets those records.
     """
     lines = condition_display_lines(rows)
+    names = [str(row.get("condition_name") or "").strip() for row in rows]
+    names = [name for name in dict.fromkeys(names) if name]
+    # Before the empty-profile return, so a stale selection is dropped either way.
+    condition_ui.sync_profile_state(st.session_state, person_id, db_path, names)
     if not lines:
         st.caption("No conditions are being tracked.")
         return
     for line in lines:
         st.markdown(f"- {line}")
-    names = [str(row.get("condition_name") or "").strip() for row in rows]
-    names = [name for name in dict.fromkeys(names) if name]
-    condition_ui.sync_profile_state(st.session_state, person_id, db_path, names)
     selected = st.pills(
         "Condition preview", names, default=names[0], key=condition_ui.SELECTED_CONDITION_KEY
     )
@@ -1612,6 +1616,11 @@ def main() -> None:  # noqa: C901, PLR0915
         if person:
             label = "Demo profile" if demo_mode else "Active profile"
             st.caption(f"{label}: {profile_selection_label(person, current_db_path)}")
+        # Unconditional, and here rather than in a page: switching profiles while on any other page
+        # must still drop the previous profile's condition selection out of session state.
+        condition_ui.sync_profile_scope(
+            st.session_state, int(person["id"]) if person else None, current_db_path
+        )
         page = page_navigation(nav_slot, hidden_pages=hidden_nav_pages(person, current_db_path))
 
     if page == "Profiles":
