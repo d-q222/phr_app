@@ -255,8 +255,9 @@ Maintain:
 - `docs/target_architecture.md`
 - `docs/migration_map.md`
 - `docs/domain_invariants.md`
-- `docs/architecture/<subsystem>.md`
-- architecture decision records for consequential choices
+- `docs/architecture/<subsystem>.md` (planned — created per subsystem as each is
+  documented; no subsystem notes exist yet)
+- architecture decision records for consequential choices (in `docs/adr/`)
 
 AI may draft documentation from repository evidence. Daniel must verify that it matches the actual system and decisions. Daniel does not need to write the first draft manually.
 
