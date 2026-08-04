@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -78,10 +79,6 @@ def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Pa
     return json.dumps(bundle, indent=2)
 
 
-# Columns of `people` that a Patient resource carries back holding the value the record actually
-# had. `notes` is deliberately absent: `_person_from_patient` writes a fixed "Imported from FHIR."
-# string rather than the stored note, so a profile's own note does not survive a clear-and-replace.
-FAITHFUL_PERSON_COLUMNS = frozenset({"name", "date_of_birth", "sex", "relationship", "emergency_contact"})
 # Regenerated on insert. Losing the previous values is bookkeeping, not data loss.
 _PERSON_BOOKKEEPING_COLUMNS = frozenset({"created_at", "updated_at"})
 # Phrasing for the columns whose loss needs more explanation than a column name gives. Anything not
@@ -91,6 +88,11 @@ _PERSON_LOSS_DESCRIPTIONS = {
     "profile_password_hash": "stored profile passwords",
     "profile_password_hint": "profile password hints",
     "notes": "profile notes (replaced with a fixed 'Imported from FHIR.' string)",
+    "sex": "profile sex values FHIR cannot represent",
+    "name": "profile names FHIR cannot represent",
+    "date_of_birth": "profile dates of birth",
+    "relationship": "profile relationships",
+    "emergency_contact": "profile emergency contacts",
 }
 
 
@@ -111,16 +113,45 @@ def restorable_tables() -> set[str]:
     return {"people", *FHIR_VALIDATORS}
 
 
+def _lossy_person_columns(people: Sequence[dict]) -> set[str]:
+    """Which `people` columns actually lose their value in a Patient round trip, for these rows.
+
+    Measured, not declared. An earlier version listed the "faithful" columns by hand and the list was
+    wrong: `sex` looked faithful because Male/Female survive, but `_gender_to_fhir` collapses
+    anything outside its vocabulary to "unknown" and `profile_form` takes free text, so a profile
+    recorded as "Nonbinary" came back "Unknown" and the guard permitted the clear. A hand-written
+    list also cannot notice a converter that later stops carrying a field.
+
+    Round-tripping each real row through both converters answers the question directly, per value:
+    "Female" is not flagged, "Nonbinary" is. It also stops a re-import loop from being blocked
+    forever -- a profile already carrying the importer's own "Imported from FHIR." note round-trips
+    to the identical string, so there is nothing to lose and nothing to refuse.
+    """
+
+    lossy: set[str] = set()
+    for row in people:
+        restored = _person_from_patient(_patient_resource(row))
+        for column in db.TABLE_COLUMNS["people"]:
+            if column in _PERSON_BOOKKEEPING_COLUMNS or column in lossy:
+                continue
+            stored = row.get(column)
+            if stored in (None, "", 0):
+                continue
+            if restored.get(column) != stored:
+                lossy.add(column)
+    return lossy
+
+
 def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: int | None = None) -> list[str]:
     """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
 
     Three levels, because each of the first two alone gave false assurance:
 
     * whole tables no FHIR resource maps to -- ``conditions`` today;
-    * columns of ``people`` a ``Patient`` cannot carry, derived as ``db.TABLE_COLUMNS["people"]``
-      minus the faithful set minus bookkeeping -- a password-protected profile with no conditions
-      passed the table-level check and came back with ``profile_password_enabled`` reset to 0,
-      silently unlocked by an import;
+    * columns of ``people`` a ``Patient`` cannot carry, measured by round-tripping each real row
+      through both converters (see ``_lossy_person_columns``) -- a password-protected profile with
+      no conditions passed the table-level check and came back with ``profile_password_enabled``
+      reset to 0, silently unlocked by an import;
     * **profiles this particular bundle does not contain.** The clear is database-wide while a
       bundle is usually one profile's export, so importing profile B's bundle over a two-profile
       database deleted profile A outright -- every table, restorable or not. Being *representable*
@@ -146,17 +177,8 @@ def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: 
             losses.append(table)
 
     people = db.list_records("people", db_path=db_path)
-    at_risk = set(db.TABLE_COLUMNS["people"]) - FAITHFUL_PERSON_COLUMNS - _PERSON_BOOKKEEPING_COLUMNS
-    for column in sorted(at_risk):
-        if any(row.get(column) not in (None, "", 0) for row in people):
-            losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
-
-    # `sex` is in the faithful set because the common values do round-trip, but the check has to be
-    # per value, not per column: `profile_form` takes free text, and `_gender_to_fhir` collapses
-    # anything outside its vocabulary to "unknown", so a profile recorded as "Nonbinary" comes back
-    # as "Unknown". Flagging the whole column would block every profile that has a sex at all.
-    if any(row.get("sex") and _gender_from_fhir(_gender_to_fhir(row["sex"])) != row["sex"] for row in people):
-        losses.append("profile sex values FHIR cannot represent")
+    for column in sorted(_lossy_person_columns(people)):
+        losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
 
     if bundle_patient_count is not None and len(people) > bundle_patient_count:
         losses.append("profiles this bundle does not contain")

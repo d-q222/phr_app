@@ -2136,30 +2136,63 @@ def test_fhir_replace_import_refuses_to_unlock_a_password_protected_profile(tmp_
     assert security.verify_password("correct horse", row["profile_password_hash"])
 
 
-def test_faithful_person_columns_match_what_a_patient_resource_actually_carries(tmp_path):
-    """Anti-drift: the declared faithful set must not out-run `_person_from_patient`.
+def test_the_guard_measures_person_round_trip_loss_rather_than_declaring_it(tmp_path):
+    """The premise is checked by round-tripping, so no hand-written list can drift out of date.
 
-    If a column is added to `FAITHFUL_PERSON_COLUMNS` without the converter learning to restore it,
-    the guard starts permitting exactly the loss it exists to block -- silently.
+    The previous version declared which columns were "faithful" and the list was wrong: `sex` looked
+    faithful because Male and Female survive, but `_gender_to_fhir` collapses anything outside its
+    vocabulary to "unknown". Seven mutations that made a converter keep a key and drop its value
+    survived the suite, because the test asserted key presence rather than value fidelity.
     """
-    produced = fhir._person_from_patient(
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    services.create_person(
         {
-            "id": "person-1",
-            "name": [{"text": "Test Person"}],
-            "birthDate": "1990-01-01",
-            "gender": "female",
-            "contact": [{"name": {"text": "Next Of Kin"}}],
-            "extension": [{"url": "http://example.org/profile-relationship", "valueString": "Self"}],
-        }
+            "name": "Test Person",
+            "date_of_birth": "1990-01-01",
+            "sex": "Female",
+            "relationship": "Self",
+            "emergency_contact": "Next Of Kin",
+        },
+        db_path=database,
     )
+    people = db.list_records("people", db_path=database)
 
-    # Every faithful column is one the converter actually produces...
-    assert fhir.FAITHFUL_PERSON_COLUMNS <= set(produced)
-    # ...and `notes` is produced but deliberately excluded, because the value is invented.
-    assert produced["notes"] == "Imported from FHIR."
-    assert "notes" not in fhir.FAITHFUL_PERSON_COLUMNS
-    # Nothing faithful may be missing from the real people schema either.
-    assert fhir.FAITHFUL_PERSON_COLUMNS <= set(db.TABLE_COLUMNS["people"])
+    # Nothing here is lossy, so nothing is reported and clear-import stays available.
+    assert fhir._lossy_person_columns(people) == set()
+
+    # Every one of those columns must actually survive both converters, by value.
+    restored = fhir._person_from_patient(fhir._patient_resource(people[0]))
+    for column in ("name", "date_of_birth", "sex", "relationship", "emergency_contact"):
+        assert restored[column] == people[0][column], column
+    # And a converter that keeps the key while dropping the value is caught, which is the whole point.
+    assert fhir._lossy_person_columns([{**people[0], "sex": "Nonbinary"}]) == {"sex"}
+    assert fhir._lossy_person_columns([{**people[0], "notes": "Keep private."}]) == {"notes"}
+
+
+def test_a_profile_already_imported_from_fhir_can_be_replaced_again(tmp_path):
+    """The guard must not block the re-import-over-the-top workflow forever.
+
+    `_person_from_patient` stamps `notes` with "Imported from FHIR.". Treating `notes` as
+    categorically unrestorable meant that after one import, every later clear-and-replace refused --
+    protecting a placeholder the importer would rewrite byte-identically.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    source = tmp_path / "fhir_source.db"
+    db.init_db(source)
+    person_id = services.create_person({"name": "Test Person"}, db_path=source)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=source)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=source)
+
+    imports_exports.import_fhir_bundle(bundle, clear_existing=False, db_path=database)
+    assert db.list_records("people", db_path=database)[0]["notes"] == "Imported from FHIR."
+
+    # The same bundle again, this time replacing: nothing is at risk, so it must go through.
+    result = imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert result["imported"]["medications"] == 1
+    assert len(db.list_records("people", db_path=database)) == 1
 
 
 def test_fhir_replace_import_still_works_when_nothing_would_be_lost(tmp_path):

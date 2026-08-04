@@ -129,8 +129,13 @@ def _row_id(value: object) -> int:
         return 0
     if isinstance(value, int):
         return value
-    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
-        return int(value)
+    if isinstance(value, str):
+        # `int()` inside a guard, not after one: "--5" survives `lstrip("-").isdigit()` and then
+        # raises, which would turn an ordering helper into a page crash.
+        try:
+            return int(value.strip())
+        except ValueError:
+            return 0
     return 0
 
 

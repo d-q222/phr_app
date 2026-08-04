@@ -763,3 +763,16 @@ def test_the_page_shows_a_most_recent_date_for_a_medication_only_condition(tmp_p
     # "Feb" would fail under a non-English LC_TIME rather than because the behaviour broke.
     assert format_display_date("2026-02-01") in values
     assert "None" not in values
+
+
+def test_most_recent_record_keeps_the_calendar_day_across_a_day_crossing_offset():
+    """The `Z` case above has a zero offset, so UTC conversion and wall clock agree there.
+
+    `2026-01-01T00:30:00+14:00` is 2025-12-31 in UTC, so a UTC normalisation made the metric name a
+    day the record does not -- while the cadence chart and the record table still said Jan 1.
+    """
+    latest = condition_ui._most_recent_record_date(
+        {"wearable_records": [{"metric_type": "Glucose", "timestamp": "2026-01-01T00:30:00+14:00"}]}
+    )
+
+    assert latest.date().isoformat() == "2026-01-01"

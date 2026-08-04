@@ -688,3 +688,44 @@ def test_the_sparkline_series_carries_row_ids_and_orders_by_them(tmp_path):
     # The frame puts them back in recorded order regardless of how they arrived.
     assert list(frame["value"]) == [5.9, 6.4]
     assert list(frame["row_id"]) == sorted(frame["row_id"])
+
+
+def test_the_trend_line_does_not_join_readings_stored_in_different_units():
+    """The table withholds the subtraction; the chart must not draw it either.
+
+    Grouping the line by record name alone drew one continuous path from 232 lb down to 93 kg --
+    a 60% fall the "First and most recent" table beside it deliberately refuses to quantify.
+    """
+    rows = [
+        {"lab_date": "2026-01-01", "numeric_value": 232.0, "test_name": "Weight", "unit": "lb", "flag": None},
+        {"lab_date": "2026-02-01", "numeric_value": 93.0, "test_name": "Weight", "unit": "kg", "flag": None},
+    ]
+    frame = condition_charts.trend_frame({"lab_results": rows})
+
+    spec = condition_charts.build_trend_chart(frame).to_dict()
+
+    line = next(layer for layer in spec["layer"] if layer["mark"]["type"] == "line")
+    detail_fields = {entry["field"] for entry in line["encoding"]["detail"]}
+    assert detail_fields == {"record", "unit"}
+
+
+def test_first_latest_applies_its_own_tie_breaker_on_a_hand_built_frame():
+    """Reached only through `trend_frame` otherwise, which already applies the identical sort.
+
+    `first_latest` is public and takes any frame with the trend columns, so its own ordering has to
+    hold independently -- otherwise AGENTS.md section 9's tie-breaker rule is pinned for one caller.
+    """
+    frame = pd.DataFrame(
+        [
+            {"date": pd.Timestamp("2026-01-01"), "value": 1.9, "record": "Creatinine",
+             "unit": "mg/dL", "flag": "High", "table": "lab_results", "row_id": 11},
+            {"date": pd.Timestamp("2026-01-01"), "value": 1.1, "record": "Creatinine",
+             "unit": "mg/dL", "flag": "Normal", "table": "lab_results", "row_id": 10},
+        ],
+        columns=condition_charts.TREND_COLUMNS,
+    )
+
+    row = condition_charts.first_latest(frame).iloc[0]
+
+    assert (row["first_value"], row["first_flag"]) == (1.1, "Normal")
+    assert (row["latest_value"], row["latest_flag"]) == (1.9, "High")
