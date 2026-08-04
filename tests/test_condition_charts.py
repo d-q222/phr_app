@@ -19,6 +19,7 @@ import condition_charts  # noqa: E402
 import db  # noqa: E402
 import services  # noqa: E402
 from condition_services import get_primary_series  # noqa: E402
+from display_format import format_display_date  # noqa: E402
 
 
 def _labs(rows):
@@ -600,7 +601,8 @@ def test_a_medication_with_no_end_date_says_so_instead_of_showing_today():
     assert by_name["Metformin"]["open_ended"] is True
     assert by_name["Metformin"]["end_label"] == "No end date recorded"
     assert by_name["Lisinopril"]["open_ended"] is False
-    assert by_name["Lisinopril"]["end_label"] == "Jun 1, 2025"
+    # Through the same formatter, so a non-English LC_TIME does not fail the test.
+    assert by_name["Lisinopril"]["end_label"] == format_display_date("2025-06-01")
 
     spec = condition_charts.build_medication_timeline(spans).to_dict()
     # Two layers distinguished by identity, not just count: `alt.layer(confirmed, confirmed)` --

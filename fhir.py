@@ -111,25 +111,29 @@ def restorable_tables() -> set[str]:
     return {"people", *FHIR_VALIDATORS}
 
 
-def unrestorable_state(db_path: Path | str | None = None) -> list[str]:
+def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: int | None = None) -> list[str]:
     """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
 
-    Two levels, because checking only the first gives false assurance:
+    Three levels, because each of the first two alone gave false assurance:
 
     * whole tables no FHIR resource maps to -- ``conditions`` today;
-    * columns of ``people`` a ``Patient`` resource cannot carry, derived as
-      ``db.TABLE_COLUMNS["people"]`` minus the faithful set minus bookkeeping.
+    * columns of ``people`` a ``Patient`` cannot carry, derived as ``db.TABLE_COLUMNS["people"]``
+      minus the faithful set minus bookkeeping -- a password-protected profile with no conditions
+      passed the table-level check and came back with ``profile_password_enabled`` reset to 0,
+      silently unlocked by an import;
+    * **profiles this particular bundle does not contain.** The clear is database-wide while a
+      bundle is usually one profile's export, so importing profile B's bundle over a two-profile
+      database deleted profile A outright -- every table, restorable or not. Being *representable*
+      in FHIR is not the same as being *in this bundle*, and only the second one saves the data.
 
-    The second level is the sharper one. A password-protected profile with no conditions passed a
-    table-level check and came back with ``profile_password_enabled`` reset to 0 -- the profile
-    silently unlocked by an import, which is the failure AGENTS.md section 4 exists to prevent --
-    along with its hint and its notes.
+    ``bundle_patient_count`` is how many ``Patient`` resources the incoming bundle carries. Passing
+    ``None`` skips that check, for callers asking only "what is at risk here".
 
-    **Names what would be lost, never how much.** This is database-global, because the clear is: it
-    sees every profile including locked ones. The result is rendered verbatim in a Streamlit error,
-    and AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
-    through -- so "a locked profile has tracked conditions" is as far as this goes. How many is a
-    fact about that profile's health, and the count buys the user nothing they need.
+    **Names what would be lost, never how much, and stays generic when any profile is protected.**
+    This is database-global by necessity and the result is rendered verbatim in a Streamlit error;
+    AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
+    through. A count is a fact about someone's health, and so is the category, so when a protected
+    profile exists the caller gets no categories at all.
     """
 
     db_path = db.DB_PATH if db_path is None else db_path
@@ -146,6 +150,16 @@ def unrestorable_state(db_path: Path | str | None = None) -> list[str]:
     for column in sorted(at_risk):
         if any(row.get(column) not in (None, "", 0) for row in people):
             losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
+
+    # `sex` is in the faithful set because the common values do round-trip, but the check has to be
+    # per value, not per column: `profile_form` takes free text, and `_gender_to_fhir` collapses
+    # anything outside its vocabulary to "unknown", so a profile recorded as "Nonbinary" comes back
+    # as "Unknown". Flagging the whole column would block every profile that has a sex at all.
+    if any(row.get("sex") and _gender_from_fhir(_gender_to_fhir(row["sex"])) != row["sex"] for row in people):
+        losses.append("profile sex values FHIR cannot represent")
+
+    if bundle_patient_count is not None and len(people) > bundle_patient_count:
+        losses.append("profiles this bundle does not contain")
     return losses
 
 
@@ -160,15 +174,21 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
         # `import_all_tables` deletes in reverse table order precisely so children go before
         # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
-        blocked = unrestorable_state(db_path)
+        patients = sum(1 for resource in resources if resource.get("resourceType") == "Patient")
+        blocked = unrestorable_state(db_path, bundle_patient_count=patients)
         if blocked:
+            # Categories are withheld entirely when any profile is password-protected: "a profile
+            # here tracks conditions" is health data about someone who locked their record, and this
+            # string is rendered verbatim by st.error (AGENTS.md section 4).
+            protected = any(row.get("profile_password_enabled") for row in db.list_records("people", db_path=db_path))
+            detail = "some existing data" if protected else ", ".join(blocked)
             # The remedies named here are the ones that actually change this outcome. "Take a backup
             # first" does not: the guard would refuse the retry identically, which reads as a
             # precondition the user can satisfy when it is not one.
             raise ValueError(
                 "Clearing existing records would permanently delete data this FHIR bundle cannot "
-                f"restore: {', '.join(blocked)}. Import without clearing, or use a JSON backup, "
-                "which does round-trip all of it."
+                f"restore: {detail}. Import without clearing, or use a JSON backup, which does "
+                "round-trip all of it."
             )
         db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
 

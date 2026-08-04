@@ -30,6 +30,10 @@ from math import isfinite
 import altair as alt
 import pandas as pd
 
+# Pure formatting, no Streamlit and no database -- so the seam this module's docstring describes
+# still holds, and a tooltip date reads the same as the same date in a record table.
+from display_format import format_display_date
+
 # Drawn from APP_CSS custom properties so charts sit in the same palette as the page around them.
 ACCENT = "#16705c"
 INK = "#17211d"
@@ -237,7 +241,7 @@ def medication_spans(rows: Sequence[dict], as_of: object) -> pd.DataFrame:
                 "end": end,
                 "status": record.get("status") or "Unknown",
                 "open_ended": open_ended,
-                "end_label": "No end date recorded" if open_ended else f"{end:%b} {end.day}, {end.year}",
+                "end_label": "No end date recorded" if open_ended else format_display_date(end.date().isoformat()),
             }
         )
     if not spans:

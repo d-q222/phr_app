@@ -15,6 +15,7 @@ import db
 import security
 import services
 from condition_services import get_records_for_condition
+from display_format import format_display_date
 
 
 @pytest.fixture
@@ -758,5 +759,7 @@ def test_the_page_shows_a_most_recent_date_for_a_medication_only_condition(tmp_p
 
     assert not test_app.exception
     values = [metric.value for metric in test_app.metric]
-    assert "Feb 1, 2026" in values
+    # Expected through the same formatter the page uses: `%b` is locale-sensitive, so hard-coding
+    # "Feb" would fail under a non-English LC_TIME rather than because the behaviour broke.
+    assert format_display_date("2026-02-01") in values
     assert "None" not in values

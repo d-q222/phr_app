@@ -2127,7 +2127,8 @@ def test_fhir_replace_import_refuses_to_unlock_a_password_protected_profile(tmp_
     with pytest.raises(ValueError) as excinfo:
         imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
 
-    assert "unlocked" in str(excinfo.value)
+    # The profile is protected, so the refusal stays generic rather than naming the categories.
+    assert "some existing data" in str(excinfo.value)
     row = db.list_records("people", db_path=database)[0]
     assert row["profile_password_enabled"] == 1
     assert row["profile_password_hint"] == "the usual one"
@@ -2241,8 +2242,11 @@ def test_the_fhir_clear_refusal_names_what_is_lost_but_never_how_much(tmp_path):
         imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
 
     message = str(excinfo.value)
-    assert "conditions" in message
     assert "3" not in message
+    # A protected profile exists, so even the category is withheld -- "a profile here tracks
+    # conditions" is health data about someone who locked their record.
+    assert "conditions" not in message
+    assert "some existing data" in message
 
 
 def test_a_lab_observation_with_no_interpretation_imports_without_a_flag(tmp_path):
@@ -2264,3 +2268,77 @@ def test_a_lab_observation_with_no_interpretation_imports_without_a_flag(tmp_pat
 
     imported = db.list_records("lab_results", db_path=target)[0]
     assert not imported["flag"]
+
+
+def test_fhir_replace_import_refuses_when_the_bundle_omits_an_existing_profile(tmp_path):
+    """Representable in FHIR is not the same as present in THIS bundle.
+
+    Reproduced before the fix: with two profiles and a bundle exported for only one of them, the
+    guard returned nothing to report, the clear deleted every row in the database, and the bundle
+    rebuilt only its own patient. The other profile -- name, medications, labs, all of it -- was
+    gone, and every table it used was one FHIR can represent, so a table-level check saw no risk.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    absent = services.create_person({"name": "Profile A"}, db_path=database)
+    services.create_item("medications", absent, {"name": "A-med", "start_date": "2025-01-01"}, db_path=database)
+    exported = services.create_person({"name": "Profile B"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=exported, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "does not contain" in str(excinfo.value)
+    assert {row["name"] for row in services.list_people(db_path=database)} == {"Profile A", "Profile B"}
+    assert len(services.list_items("medications", absent, db_path=database)) == 1
+
+
+def test_fhir_replace_import_refuses_a_profile_sex_fhir_cannot_represent(tmp_path):
+    """Per value, not per column: "Female" round-trips, "Nonbinary" does not.
+
+    `_gender_to_fhir` collapses anything outside its vocabulary to "unknown" and `profile_form`
+    takes free text, so a profile recorded as Nonbinary came back as Unknown. Flagging the whole
+    column instead would block every profile that has a sex recorded at all.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "sex": "Nonbinary"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "sex" in str(excinfo.value)
+    assert db.list_records("people", db_path=database)[0]["sex"] == "Nonbinary"
+    # A representable value is not blocked by the same check.
+    other = tmp_path / "fhir_ok.db"
+    db.init_db(other)
+    ok_id = services.create_person({"name": "Test Person", "sex": "Female"}, db_path=other)
+    ok_bundle = fhir.export_bundle("R4", person_id=ok_id, db_path=other)
+    imports_exports.import_fhir_bundle(ok_bundle, clear_existing=True, db_path=other)
+    assert db.list_records("people", db_path=other)[0]["sex"] == "Female"
+
+
+def test_the_provider_summary_reports_an_absent_lab_flag_as_absent(tmp_path):
+    """"Unknown" is a flag a source can record, so it must not stand in for no flag at all."""
+    database = tmp_path / "provider_summary.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "Hemoglobin A1c", "numeric_value": 5.5, "lab_date": "2026-01-01"},
+        db_path=database,
+    )
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "TSH", "numeric_value": 2.1, "lab_date": "2026-01-02", "flag": "Unknown"},
+        db_path=database,
+    )
+
+    summary = services.generate_provider_summary(person_id, db_path=database)
+
+    lines = {line.split(": ", 1)[1].split(" ")[0]: line for line in summary.splitlines() if line.startswith("- 2026")}
+    assert "[Not flagged]" in lines["Hemoglobin"]
+    assert "[Unknown]" in lines["TSH"]

@@ -347,7 +347,10 @@ def generate_provider_summary(
     if include_labs:
         lines += ["", "## Recent Labs"]
         labs = filter_labs(person_id, start_date, end_date, db_path=db_path)[:20]
-        lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag') or 'Unknown'}]".strip() for lab in labs] or ["None recorded."]
+        # "Unknown" is a real member of `models.LAB_FLAGS`, so falling back to it made a lab nobody
+        # flagged read, in a provider-facing document, exactly like one a source flagged Unknown.
+        # An absent flag is reported as absent.
+        lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag') or 'Not flagged'}]".strip() for lab in labs] or ["None recorded."]
     lines += ["", "## Upcoming Appointments"]
     appointments = upcoming_appointments(person_id, db_path=db_path)[:10]
     lines += [f"- {a['appointment_date']}: {a['title']} with {a.get('provider') or 'provider not recorded'}" for a in appointments] or ["None recorded."]
