@@ -727,3 +727,36 @@ def test_most_recent_record_handles_a_zoned_wearable_timestamp():
     latest = condition_ui._most_recent_record_date(records)
 
     assert latest.date().isoformat() == "2026-01-02"
+
+
+def test_the_page_shows_a_most_recent_date_for_a_medication_only_condition(tmp_path, monkeypatch):
+    """Wiring, not just the helper.
+
+    The pure-function tests above would still pass if `_render_at_a_glance` went back to reading
+    `trends["date"].max()`, which is where the visible contradiction lived: "Most recent record:
+    None" printed beside "Medications recorded: 1".
+    """
+    app_db_path = tmp_path / "at-a-glance.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    person_id = services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Vitamin D Deficiency", "source": "Primary Care"},
+        db_path=app_db_path,
+    )
+    # Mapped for this condition, and deliberately the only linked record: a medication carries no
+    # numeric value, so it never reaches the trend frame the metric used to be derived from.
+    services.create_item(
+        "medications", person_id, {"name": "Vitamin D3", "start_date": "2026-02-01"}, db_path=app_db_path
+    )
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    values = [metric.value for metric in test_app.metric]
+    assert "Feb 1, 2026" in values
+    assert "None" not in values

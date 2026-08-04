@@ -114,14 +114,20 @@ def _empty(columns: list[str]) -> pd.DataFrame:
 def _row_id(value: object) -> int:
     """A row's database id as a sortable int, 0 when it has none.
 
-    Rows built by hand in tests carry no id; they all tie at 0 and fall back to the stable sort,
-    which keeps their order deterministic without pretending they have identities they do not.
+    Only a genuine integer id counts. ``bool`` is excluded because it is an ``int`` subclass, so
+    ``True`` would become row 1; a float is rejected rather than truncated, because ``1.9`` and
+    ``1.2`` both collapsing to 1 would silently reintroduce the tie this exists to break. Rows built
+    by hand in tests carry no id, tie at 0, and fall back to the stable sort -- deterministic
+    without pretending they have identities they do not.
     """
 
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    if isinstance(value, bool) or value is None:
         return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return 0
 
 
 def _coerce_point(date_value: object, raw_value: object) -> tuple[pd.Timestamp, float] | None:
@@ -130,11 +136,16 @@ def _coerce_point(date_value: object, raw_value: object) -> tuple[pd.Timestamp, 
     Booleans are rejected before ``float`` sees them: ``float(True)`` is 1.0, which would silently
     plot a checkbox as a measurement.
 
-    Timestamps are normalised to naive UTC. ``validate_wearable`` only requires a timestamp to be
-    present, so ``2026-01-02T08:00:00Z`` is storable, while a lab date is a bare ``2026-01-01``.
-    Mixing the two in one frame gives a column of tz-aware and tz-naive values, and sorting it
-    raises ``TypeError: Cannot compare tz-naive and tz-aware timestamps`` -- which took out the
-    whole Tracked Conditions page for any condition mapping both a lab and a wearable.
+    Timestamps are reduced to their **local wall clock**, dropping any offset without shifting the
+    clock. ``validate_wearable`` only requires a timestamp to be present, so ``2026-01-02T08:00:00Z``
+    is storable, while a lab date is a bare ``2026-01-01``. Mixing the two gave a column of tz-aware
+    and tz-naive values, and sorting it raised ``TypeError: Cannot compare tz-naive and tz-aware
+    timestamps`` -- which took out the whole Tracked Conditions page for any condition mapping both a
+    lab and a wearable, which is what Diabetes does.
+
+    Converting to UTC would also have fixed the crash, and would have been wrong: ``2026-01-01`` at
+    ``00:30+14:00`` becomes ``2025-12-31`` in UTC, so the page would show a reading on a different
+    calendar day than the record states. A reading's date is the day the person recorded it.
     """
 
     if date_value in (None, "") or isinstance(raw_value, bool) or raw_value in (None, ""):
@@ -147,7 +158,7 @@ def _coerce_point(date_value: object, raw_value: object) -> tuple[pd.Timestamp, 
     if pd.isna(parsed) or not isfinite(value):
         return None
     if parsed.tzinfo is not None:
-        parsed = parsed.tz_convert("UTC").tz_localize(None)
+        parsed = parsed.tz_localize(None)
     return parsed, value
 
 
@@ -390,7 +401,9 @@ def first_latest(frame: pd.DataFrame) -> pd.DataFrame:
       and with them both flags and the sign of ``change`` -- could swap between runs.
     * A series whose rows carry more than one unit gets no ``change`` at all. Subtracting 93 kg from
       232 lb is arithmetically true of the stored numbers and clinically meaningless, and labelling
-      the result with only the latest row's unit hid that it had happened.
+      the result with only the latest row's unit hid that it had happened. A blank unit counts as
+      its own value rather than being discarded: a bare ``232`` beside ``93 kg`` is exactly as
+      incomparable as ``232 lb`` beside ``93 kg``, and dropping blanks let that pair through.
     """
 
     if frame.empty:
@@ -399,7 +412,7 @@ def first_latest(frame: pd.DataFrame) -> pd.DataFrame:
     for record, group in frame.groupby("record", sort=True):
         ordered = group.sort_values(["date", "table", "row_id"], kind="stable")
         first, latest = ordered.iloc[0], ordered.iloc[-1]
-        units = {str(unit).strip() for unit in ordered["unit"].dropna() if str(unit).strip()}
+        units = {"" if pd.isna(unit) else str(unit).strip() for unit in ordered["unit"]}
         comparable = len(units) <= 1
         summaries.append(
             {
@@ -525,8 +538,12 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
         alt.Tooltip("unit:N", title="Unit"),
         alt.Tooltip("flag:N", title="Source flag"),
     ]
+    # Grouped by record *and* unit, so a series stored in two units draws two paths rather than one
+    # continuous line. `first_latest` refuses to subtract across units for the same reason; drawing
+    # 232 lb straight down to 93 kg showed a 60% fall the table beside it explicitly declines to
+    # state, which is the worse of the two surfaces to leave unguarded.
     line = base.mark_line(color=ACCENT, strokeWidth=2, opacity=0.55).encode(
-        y=_value_axis(frame), detail="record:N"
+        y=_value_axis(frame), detail=alt.Detail(["record:N", "unit:N"])
     )
     flagged = (
         base.transform_filter(alt.datum.flag != NOT_FLAGGED)

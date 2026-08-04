@@ -192,6 +192,14 @@ def test_severity_frame_skips_entries_with_no_severity():
 # --- chart specifications --------------------------------------------------------------------------
 
 
+def _filter_flag(layer):
+    """Label a flag-strip layer by which side of the NOT_FLAGGED filter it draws."""
+    predicate = str(layer.get("transform"))
+    if "!=" in predicate:
+        return "filled"
+    return "hollow" if "==" in predicate else "unfiltered"
+
+
 def _colors(spec):
     """Every explicit colour range anywhere in a (possibly nested) Vega-Lite spec."""
     found = []
@@ -457,9 +465,52 @@ def test_a_wearable_timestamp_with_a_zone_does_not_crash_the_page():
     )
 
     assert len(frame) == 3
-    # Offsets are converted to UTC rather than dropped, so 08:00+05:00 lands at 03:00.
+    # The wall clock is kept and the offset dropped, so 08:00+05:00 stays 08:00 on its own day.
     assert frame["date"].dt.tz is None
-    assert str(frame["date"].iloc[2]) == "2026-01-03 03:00:00"
+    assert str(frame["date"].iloc[2]) == "2026-01-03 08:00:00"
+
+
+def test_a_zoned_timestamp_keeps_the_calendar_day_the_record_states():
+    """Converting to UTC would fix the crash and move the reading to the wrong day.
+
+    `2026-01-01T00:30:00+14:00` is 2025-12-31 in UTC, so a UTC normalisation showed a reading on a
+    day the record does not name. A reading's date is the day the person recorded it.
+    """
+    frame = condition_charts.trend_frame(
+        {
+            "wearable_records": [
+                {"timestamp": "2026-01-01T00:30:00+14:00", "value": 99.0, "metric_type": "Glucose", "unit": "mg/dL"},
+                {"timestamp": "2026-01-05T23:30:00-11:00", "value": 98.0, "metric_type": "Glucose", "unit": "mg/dL"},
+            ]
+        }
+    )
+
+    assert [stamp.date().isoformat() for stamp in frame["date"]] == ["2026-01-01", "2026-01-05"]
+
+
+def test_row_id_rejects_values_that_are_not_real_ids():
+    """`bool` is an `int` subclass and a float truncates -- both would forge an ordering identity."""
+    assert condition_charts._row_id(11) == 11
+    assert condition_charts._row_id("11") == 11
+    assert condition_charts._row_id(True) == 0
+    assert condition_charts._row_id(False) == 0
+    # 1.9 and 1.2 would both truncate to 1, silently recreating the tie this exists to break.
+    assert condition_charts._row_id(1.9) == 0
+    assert condition_charts._row_id(None) == 0
+    assert condition_charts._row_id("eleven") == 0
+
+
+def test_change_is_withheld_when_one_reading_has_no_unit_at_all():
+    """A bare 232 beside 93 kg is exactly as incomparable as 232 lb beside 93 kg."""
+    rows = [
+        {"timestamp": "2026-01-01T08:00:00", "value": 232.0, "metric_type": "Weight", "unit": ""},
+        {"timestamp": "2026-06-01T08:00:00", "value": 93.0, "metric_type": "Weight", "unit": "kg"},
+    ]
+
+    summary = condition_charts.first_latest(condition_charts.trend_frame({"wearable_records": rows}))
+
+    assert summary.iloc[0]["change"] is None
+    assert summary.iloc[0]["unit"] == "Mixed units"
 
 
 def test_first_and_latest_use_a_row_id_tie_breaker_not_sort_order():
@@ -520,9 +571,14 @@ def test_a_lab_with_no_stored_flag_is_an_absence_not_the_unknown_flag():
         condition_charts.NOT_FLAGGED,
         "Unknown",
     ]
-    # And the strip must draw the absence hollow rather than borrow a status hue for it.
+    # And the strip must draw the absence hollow rather than borrow a status hue for it. Assert the
+    # layers by identity: `assert spec.get("layer")` passed even when the hollow layer was deleted,
+    # which silently dropped unflagged results from a panel promising one mark per result.
     spec = condition_charts.build_flag_strip(history).to_dict()
-    assert spec.get("layer")
+    layers = {_filter_flag(layer): layer for layer in spec["layer"]}
+    assert set(layers) == {"hollow", "filled"}
+    assert layers["hollow"]["mark"]["filled"] is False
+    assert layers["filled"]["mark"]["filled"] is True
 
 
 def test_a_medication_with_no_end_date_says_so_instead_of_showing_today():
@@ -547,8 +603,13 @@ def test_a_medication_with_no_end_date_says_so_instead_of_showing_today():
     assert by_name["Lisinopril"]["end_label"] == "Jun 1, 2025"
 
     spec = condition_charts.build_medication_timeline(spans).to_dict()
-    # Two layers, so a span the record establishes at both ends cannot look like one it does not.
-    assert len(spec["layer"]) == 2
+    # Two layers distinguished by identity, not just count: `alt.layer(confirmed, confirmed)` --
+    # which draws no bar at all for an open-ended row -- satisfied a bare length check.
+    dashed = [layer for layer in spec["layer"] if layer["mark"].get("strokeDash")]
+    solid = [layer for layer in spec["layer"] if not layer["mark"].get("strokeDash")]
+    assert len(dashed) == 1 and len(solid) == 1
+    assert "open_ended" in str(dashed[0]["transform"]) and "open_ended" in str(solid[0]["transform"])
+    assert str(dashed[0]["transform"]) != str(solid[0]["transform"])
     titles = {tip.get("title") for layer in spec["layer"] for tip in layer["encoding"]["tooltip"]}
     assert "Recorded through" in titles
     fields = {tip.get("field") for layer in spec["layer"] for tip in layer["encoding"]["tooltip"]}
@@ -572,10 +633,21 @@ def test_change_is_withheld_when_a_series_mixes_units():
         {"timestamp": "2026-06-01T08:00:00", "value": 93.0, "metric_type": "Weight", "unit": "kg"},
     ]
 
+    # A second, single-unit series so the change column is not all-None: pandas then infers float64
+    # and coerces the withheld value to NaN, so `is None` would silently stop holding.
+    rows = rows + [
+        {"timestamp": "2026-01-01T08:00:00", "value": 60.0, "metric_type": "Heart rate", "unit": "bpm"},
+        {"timestamp": "2026-06-01T08:00:00", "value": 64.0, "metric_type": "Heart rate", "unit": "bpm"},
+    ]
+
     summary = condition_charts.first_latest(condition_charts.trend_frame({"wearable_records": rows}))
 
-    assert summary.iloc[0]["change"] is None
-    assert summary.iloc[0]["unit"] == "Mixed units"
+    weight = summary[summary["record"] == "Weight"].iloc[0]
+    assert pd.isna(weight["change"])
+    assert weight["unit"] == "Mixed units"
+    heart = summary[summary["record"] == "Heart rate"].iloc[0]
+    assert heart["change"] == 4.0
+    assert heart["unit"] == "bpm"
 
 
 def test_a_single_point_sparkline_still_draws_something():
@@ -585,3 +657,32 @@ def test_a_single_point_sparkline_still_draws_something():
     spec = condition_charts.build_sparklines(frame).to_dict()
 
     assert spec["spec"]["mark"]["point"]
+
+
+def test_the_sparkline_series_carries_row_ids_and_orders_by_them(tmp_path):
+    """The other half of the tie-breaker: deleting the id from `get_primary_series` was silent.
+
+    Same-date readings in a sparkline draw as a vertical segment either way, so nothing visible
+    fails -- but the frame handed to the chart was ordered by sort accident, and any future consumer
+    reading `iloc[-1]` as "latest" would inherit exactly the bug fixed in `first_latest`.
+    """
+    database = tmp_path / "sparkline.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Fictional Person"}, db_path=database)
+    for value in (5.9, 6.4):
+        services.create_item(
+            "lab_results",
+            person_id,
+            {"test_name": "Hemoglobin A1c", "numeric_value": value, "lab_date": "2026-01-01"},
+            db_path=database,
+        )
+
+    series = get_primary_series(person_id, ["Prediabetes"], db_path=database)
+
+    # `services.list_items` returns id-descending, so the raw series arrives newest-first.
+    assert [point["value"] for point in series["Prediabetes"]] == [6.4, 5.9]
+    assert all(point.get("id") for point in series["Prediabetes"])
+    frame = condition_charts.sparkline_frame(series)
+    # The frame puts them back in recorded order regardless of how they arrived.
+    assert list(frame["value"]) == [5.9, 6.4]
+    assert list(frame["row_id"]) == sorted(frame["row_id"])

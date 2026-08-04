@@ -2077,7 +2077,7 @@ def test_fhir_replace_import_refuses_to_delete_what_it_cannot_restore(tmp_path):
     indistinguishable from "the bundle had none to import". Medications and every other table came
     back, so nothing on screen suggested a loss had happened.
     """
-    database = tmp_path / "phr.db"
+    database = tmp_path / "fhir_guard.db"
     db.init_db(database)
     person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
     services.create_item(
@@ -2092,15 +2092,78 @@ def test_fhir_replace_import_refuses_to_delete_what_it_cannot_restore(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
 
-    assert "conditions (1)" in str(excinfo.value)
+    assert "conditions" in str(excinfo.value)
     # The refusal happens before anything is deleted, so both tables are untouched.
     assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]
     assert len(services.list_items("medications", person_id, db_path=database)) == 1
 
 
+def test_fhir_replace_import_refuses_to_unlock_a_password_protected_profile(tmp_path):
+    """A table-level check passed this and the profile came back UNLOCKED.
+
+    `Patient` carries name, birth date, sex, relationship and emergency contact -- and nothing for
+    `profile_password_enabled`, `profile_password_hash` or `profile_password_hint`. So a protected
+    profile with no conditions cleared the table-level guard, and clear-and-replace reset
+    `profile_password_enabled` to 0: an import silently unlocking a profile, which is the failure
+    AGENTS.md section 4 exists to prevent. Its notes were overwritten with a fixed string too.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person(
+        {"name": "Protected Person", "relationship": "Self", "notes": "Keep private."}, db_path=database
+    )
+    db.update_record(
+        "people",
+        person_id,
+        {
+            "profile_password_enabled": 1,
+            "profile_password_hash": security.hash_password("correct horse"),
+            "profile_password_hint": "the usual one",
+        },
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "unlocked" in str(excinfo.value)
+    row = db.list_records("people", db_path=database)[0]
+    assert row["profile_password_enabled"] == 1
+    assert row["profile_password_hint"] == "the usual one"
+    assert row["notes"] == "Keep private."
+    assert security.verify_password("correct horse", row["profile_password_hash"])
+
+
+def test_faithful_person_columns_match_what_a_patient_resource_actually_carries(tmp_path):
+    """Anti-drift: the declared faithful set must not out-run `_person_from_patient`.
+
+    If a column is added to `FAITHFUL_PERSON_COLUMNS` without the converter learning to restore it,
+    the guard starts permitting exactly the loss it exists to block -- silently.
+    """
+    produced = fhir._person_from_patient(
+        {
+            "id": "person-1",
+            "name": [{"text": "Test Person"}],
+            "birthDate": "1990-01-01",
+            "gender": "female",
+            "contact": [{"name": {"text": "Next Of Kin"}}],
+            "extension": [{"url": "http://example.org/profile-relationship", "valueString": "Self"}],
+        }
+    )
+
+    # Every faithful column is one the converter actually produces...
+    assert fhir.FAITHFUL_PERSON_COLUMNS <= set(produced)
+    # ...and `notes` is produced but deliberately excluded, because the value is invented.
+    assert produced["notes"] == "Imported from FHIR."
+    assert "notes" not in fhir.FAITHFUL_PERSON_COLUMNS
+    # Nothing faithful may be missing from the real people schema either.
+    assert fhir.FAITHFUL_PERSON_COLUMNS <= set(db.TABLE_COLUMNS["people"])
+
+
 def test_fhir_replace_import_still_works_when_nothing_would_be_lost(tmp_path):
-    """The guard is scoped to actual rows, so a profile with no conditions is unaffected."""
-    database = tmp_path / "phr.db"
+    """The guard is scoped to state that actually exists, so a plain profile is unaffected."""
+    database = tmp_path / "fhir_guard.db"
     db.init_db(database)
     person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
     services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
@@ -2119,7 +2182,7 @@ def test_every_table_is_either_fhir_restorable_or_guarded(tmp_path):
     `conditions` was only ever lost because `db.TABLES` happened to equal the set FHIR could emit
     until it was added, so the replace-import was lossless by coincidence rather than by check.
     """
-    database = tmp_path / "phr.db"
+    database = tmp_path / "fhir_guard.db"
     db.init_db(database)
     person_id = services.create_person({"name": "Test Person"}, db_path=database)
     unrestorable = set(db.TABLES) - fhir.restorable_tables()
@@ -2129,6 +2192,75 @@ def test_every_table_is_either_fhir_restorable_or_guarded(tmp_path):
         seed = dict(CHILD_TABLE_SEEDS[table])
         services.create_item(table, person_id, seed, db_path=database)
 
-    blocked = fhir.unrestorable_row_counts(database)
+    blocked = fhir.unrestorable_state(database)
 
-    assert set(blocked) == unrestorable
+    assert set(blocked) >= unrestorable
+
+
+def test_the_fhir_clear_guard_sees_every_profile_not_just_the_bundle_s_own(tmp_path):
+    """The clear is database-global, so the guard must be too.
+
+    A one-profile fixture cannot tell a global count from a person-scoped one. If the guard were
+    ever scoped to the bundle's Patient -- which looks like the natural response to the fact that it
+    reports on profiles the importer did not choose -- then profile B could clear-import while
+    profile A's conditions were destroyed, and every other test here would stay green.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    keeper = services.create_person({"name": "Profile A"}, db_path=database)
+    services.create_item("conditions", keeper, {"condition_name": "Asthma"}, db_path=database)
+    importer = services.create_person({"name": "Profile B"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=importer, db_path=database)
+
+    with pytest.raises(ValueError):
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert [row["condition_name"] for row in services.tracked_conditions(keeper, db_path=database)] == ["Asthma"]
+
+
+def test_the_fhir_clear_refusal_names_what_is_lost_but_never_how_much(tmp_path):
+    """A locked profile's row count is health data, and this string reaches st.error verbatim.
+
+    AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
+    through, and the guard is database-global by necessity -- it sees locked profiles too.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    locked = services.create_person({"name": "Locked Profile"}, db_path=database)
+    for name in ("Asthma", "Gout", "Hypertension"):
+        services.create_item("conditions", locked, {"condition_name": name}, db_path=database)
+    db.update_record(
+        "people",
+        locked,
+        {"profile_password_enabled": 1, "profile_password_hash": security.hash_password("secret")},
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=locked, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    message = str(excinfo.value)
+    assert "conditions" in message
+    assert "3" not in message
+
+
+def test_a_lab_observation_with_no_interpretation_imports_without_a_flag(tmp_path):
+    """A round trip must not turn "nobody flagged this" into the recorded flag "Unknown"."""
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "Hemoglobin A1c", "numeric_value": 5.5, "unit": "%", "lab_date": "2026-01-01"},
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    target = tmp_path / "fhir_target.db"
+    db.init_db(target)
+    imports_exports.import_fhir_bundle(bundle, clear_existing=False, db_path=target)
+
+    imported = db.list_records("lab_results", db_path=target)[0]
+    assert not imported["flag"]

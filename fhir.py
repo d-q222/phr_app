@@ -78,6 +78,22 @@ def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Pa
     return json.dumps(bundle, indent=2)
 
 
+# Columns of `people` that a Patient resource carries back holding the value the record actually
+# had. `notes` is deliberately absent: `_person_from_patient` writes a fixed "Imported from FHIR."
+# string rather than the stored note, so a profile's own note does not survive a clear-and-replace.
+FAITHFUL_PERSON_COLUMNS = frozenset({"name", "date_of_birth", "sex", "relationship", "emergency_contact"})
+# Regenerated on insert. Losing the previous values is bookkeeping, not data loss.
+_PERSON_BOOKKEEPING_COLUMNS = frozenset({"created_at", "updated_at"})
+# Phrasing for the columns whose loss needs more explanation than a column name gives. Anything not
+# named here falls back to the raw column, so a newly added column still surfaces rather than hiding.
+_PERSON_LOSS_DESCRIPTIONS = {
+    "profile_password_enabled": "password protection (profiles would come back unlocked)",
+    "profile_password_hash": "stored profile passwords",
+    "profile_password_hint": "profile password hints",
+    "notes": "profile notes (replaced with a fixed 'Imported from FHIR.' string)",
+}
+
+
 def restorable_tables() -> set[str]:
     """The tables a FHIR bundle can put back, derived rather than listed by hand.
 
@@ -86,24 +102,51 @@ def restorable_tables() -> set[str]:
     added to ``db.TABLES`` without a FHIR representation is caught automatically, which is how
     ``conditions`` slipped through: before it existed, ``db.TABLES`` happened to equal this set, so
     a clear-and-replace import was lossless by coincidence rather than by check.
+
+    Table granularity is necessary but **not sufficient** -- see ``unrestorable_state``. ``people``
+    is in this set and still loses columns, which is precisely the trap: restorability is a property
+    of every column, not of the table.
     """
 
     return {"people", *FHIR_VALIDATORS}
 
 
-def unrestorable_row_counts(db_path: Path | str | None = None) -> dict[str, int]:
-    """Row counts for tables a FHIR bundle cannot restore, skipping the empty ones."""
+def unrestorable_state(db_path: Path | str | None = None) -> list[str]:
+    """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
+
+    Two levels, because checking only the first gives false assurance:
+
+    * whole tables no FHIR resource maps to -- ``conditions`` today;
+    * columns of ``people`` a ``Patient`` resource cannot carry, derived as
+      ``db.TABLE_COLUMNS["people"]`` minus the faithful set minus bookkeeping.
+
+    The second level is the sharper one. A password-protected profile with no conditions passed a
+    table-level check and came back with ``profile_password_enabled`` reset to 0 -- the profile
+    silently unlocked by an import, which is the failure AGENTS.md section 4 exists to prevent --
+    along with its hint and its notes.
+
+    **Names what would be lost, never how much.** This is database-global, because the clear is: it
+    sees every profile including locked ones. The result is rendered verbatim in a Streamlit error,
+    and AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
+    through -- so "a locked profile has tracked conditions" is as far as this goes. How many is a
+    fact about that profile's health, and the count buys the user nothing they need.
+    """
 
     db_path = db.DB_PATH if db_path is None else db_path
     restorable = restorable_tables()
-    counts = {}
+    losses = []
     for table in db.TABLES:
         if table in restorable:
             continue
-        rows = db.list_records(table, db_path=db_path)
-        if rows:
-            counts[table] = len(rows)
-    return counts
+        if db.list_records(table, db_path=db_path):
+            losses.append(table)
+
+    people = db.list_records("people", db_path=db_path)
+    at_risk = set(db.TABLE_COLUMNS["people"]) - FAITHFUL_PERSON_COLUMNS - _PERSON_BOOKKEEPING_COLUMNS
+    for column in sorted(at_risk):
+        if any(row.get(column) not in (None, "", 0) for row in people):
+            losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
+    return losses
 
 
 def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
@@ -117,12 +160,15 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
         # `import_all_tables` deletes in reverse table order precisely so children go before
         # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
-        blocked = unrestorable_row_counts(db_path)
+        blocked = unrestorable_state(db_path)
         if blocked:
-            detail = ", ".join(f"{table} ({count})" for table, count in sorted(blocked.items()))
+            # The remedies named here are the ones that actually change this outcome. "Take a backup
+            # first" does not: the guard would refuse the retry identically, which reads as a
+            # precondition the user can satisfy when it is not one.
             raise ValueError(
                 "Clearing existing records would permanently delete data this FHIR bundle cannot "
-                f"restore: {detail}. Export a JSON backup first, or import without clearing."
+                f"restore: {', '.join(blocked)}. Import without clearing, or use a JSON backup, "
+                "which does round-trip all of it."
             )
         db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
 
@@ -629,7 +675,11 @@ def _lab_from_observation(resource: dict) -> dict:
         "unit": quantity.get("unit"),
         "reference_low": normalize_optional_number(low) if low is not None else None,
         "reference_high": normalize_optional_number(high) if high is not None else None,
-        "flag": (_text_from_codeable(resource.get("interpretation", [{}])[0]) if resource.get("interpretation") else None) or "Unknown",
+        # No `interpretation` means no source flag, so the field stays empty. It used to fall back
+        # to "Unknown", which is a real member of `models.LAB_FLAGS` -- a value a source can
+        # actually record -- so a round trip through FHIR silently converted "nobody flagged this"
+        # into "the source flagged this Unknown", and the charts then drew it as a recorded flag.
+        "flag": (_text_from_codeable(resource.get("interpretation", [{}])[0]) if resource.get("interpretation") else None),
         "lab_date": _date_part(resource.get("effectiveDateTime")),
         "notes": _notes_text(resource.get("note")),
     }

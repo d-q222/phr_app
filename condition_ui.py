@@ -213,7 +213,9 @@ def _most_recent_record_date(records_by_table: Mapping[str, Sequence[dict]]) -> 
             if pd.isna(parsed):
                 continue
             if parsed.tzinfo is not None:
-                parsed = parsed.tz_convert("UTC").tz_localize(None)
+                # Wall clock, not UTC -- same reasoning as `condition_charts._coerce_point`: a UTC
+                # conversion can move a reading onto a different calendar day than the record shows.
+                parsed = parsed.tz_localize(None)
             stamps.append(parsed)
     return max(stamps) if stamps else None
 
