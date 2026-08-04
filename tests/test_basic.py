@@ -3,6 +3,7 @@ import inspect
 import json
 import sqlite3
 import sys
+import threading
 import time
 import urllib.error
 from io import BytesIO, StringIO
@@ -3088,6 +3089,76 @@ def test_an_all_invalid_csv_does_not_report_a_bare_success(tmp_path):
 
     assert "No records imported" in summary
     assert "2 entr(y/ies) skipped" in summary
-    # And no zero-row table: the int shape now drops zero exactly as the per-table dict shape does.
-    assert app.import_result_counts({"imported": 0}) == {}
+    # No zero-row table, but still distinguishable from "this importer reports no counts at all".
+    assert app.import_result_counts({"imported": 0}) == {app.NO_RECORDS_IMPORTED: 0}
     assert app.import_result_counts({"imported": 3}) == {"records": 3}
+    assert app.import_result_counts(None) == {}
+
+
+def test_an_import_that_stored_nothing_does_not_read_like_a_successful_restore(tmp_path):
+    """A clear-existing import of an empty bundle wipes every table and returns all-zero counts.
+
+    Collapsing that to `{}` made it indistinguishable from the JSON restore, which reports no counts
+    by design -- so the most destructive outcome in the app rendered the same bare green
+    "Import complete." as an ordinary success.
+    """
+    empty_bundle_result = {"imported": {table: 0 for table in db.TABLES}, "skipped": []}
+    restore_result = None
+
+    empty = {
+        "title": "Import FHIR Bundle",
+        "succeeded": True,
+        "message": "",
+        "counts": app.import_result_counts(empty_bundle_result),
+        "skipped": [],
+    }
+    restore = {
+        "title": "Restore backup",
+        "succeeded": True,
+        "message": "",
+        "counts": app.import_result_counts(restore_result),
+        "skipped": [],
+    }
+
+    assert "No records were imported" in app.import_outcome_summary(empty)
+    assert app.import_outcome_summary(restore) == "Import complete."
+
+
+def test_two_threads_importing_get_a_retryable_failure_not_a_traceback(tmp_path):
+    """The nesting guard must not fire on ordinary cross-session concurrency.
+
+    Nesting is a `with` inside a `with` -- same thread by definition. Two browser tabs importing at
+    once is concurrency SQLite's busy timeout already handles, and a module-level guard turned it
+    into a bare RuntimeError that `IMPORT_FAILURES` does not catch, so Streamlit rendered a
+    traceback (printing the database path) instead of the retryable failure dialog.
+    """
+    database = tmp_path / "concurrent.db"
+    db.init_db(database)
+    started, seen = threading.Event(), {}
+
+    def hold():
+        with db.write_transaction(database) as connection:
+            db.create_person({"name": "Holder"}, connection=connection)
+            started.set()
+            time.sleep(0.4)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    started.wait(timeout=5)
+    try:
+        with db.write_transaction(database) as connection:
+            db.create_person({"name": "Other Tab"}, connection=connection)
+        seen["exc"] = None
+    except Exception as exc:  # noqa: BLE001 - the type is exactly what is under test
+        seen["exc"] = exc
+    holder.join()
+
+    exc = seen["exc"]
+    if exc is not None:
+        assert isinstance(exc, app.IMPORT_FAILURES), f"{type(exc).__name__} would render as a traceback"
+        assert str(database) not in str(exc)
+    # A genuine same-thread nest is still refused.
+    with db.write_transaction(database):
+        with pytest.raises(RuntimeError, match="already open"):
+            with db.write_transaction(database):
+                pass

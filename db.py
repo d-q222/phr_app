@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
@@ -145,10 +146,22 @@ def _write_connection(db_path: Path | str | None):
         raise
 
 
-# Databases with a `write_transaction` currently open, so nesting fails fast instead of silently
-# using a second connection. Module-level rather than thread-local: Streamlit reruns are sequential
-# per session, and a stray cross-thread nest is exactly as broken as a same-thread one.
-_OPEN_WRITE_TRANSACTIONS: set[str] = set()
+# Databases with a `write_transaction` open **on this thread**, so nesting fails fast instead of
+# silently using a second connection.
+#
+# Thread-local, not module-level. Nesting is a same-thread phenomenon by definition -- a `with`
+# inside a `with` -- while two threads writing the same database is ordinary concurrency that
+# SQLite's busy timeout already handles. A module-level set conflated the two: two browser tabs
+# importing at once raised a bare RuntimeError that `app.IMPORT_FAILURES` does not catch, so
+# Streamlit rendered a traceback (printing the database path) instead of the retryable failure
+# dialog -- reintroducing the no-feedback bug this branch exists to remove.
+_open_write_transactions = threading.local()
+
+
+def _open_transactions() -> set[str]:
+    if not hasattr(_open_write_transactions, "paths"):
+        _open_write_transactions.paths = set()
+    return _open_write_transactions.paths
 
 
 @contextmanager
@@ -176,18 +189,19 @@ def write_transaction(db_path: Path | str | None = None):
     today; failing fast is what stops the first one that tries from getting a silent half-write.
     """
     resolved = str(Path(_resolve_db_path(db_path)).resolve())
-    if resolved in _OPEN_WRITE_TRANSACTIONS:
+    open_paths = _open_transactions()
+    if resolved in open_paths:
         raise RuntimeError(
             f"write_transaction is already open for {resolved}. Nesting would use a second "
             "connection, so the inner block would not share the outer transaction. Pass the "
             "connection already yielded instead."
         )
-    _OPEN_WRITE_TRANSACTIONS.add(resolved)
+    open_paths.add(resolved)
     try:
         with _write_connection(db_path) as connection:
             yield connection
     finally:
-        _OPEN_WRITE_TRANSACTIONS.discard(resolved)
+        open_paths.discard(resolved)
 
 
 def init_db(db_path: Path | str | None = None) -> Path:

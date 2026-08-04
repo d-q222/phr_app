@@ -1435,6 +1435,9 @@ def page_emergency_snapshot(person: dict, db_path: Path | str | None = None) -> 
 
 
 IMPORT_OUTCOME_KEY = "import_export:outcome"
+# Marks "this importer reported counts and every one was zero", which must not read like the JSON
+# restore's "this importer reports no counts". Filtered out before the counts table is rendered.
+NO_RECORDS_IMPORTED = "__none__"
 # Broad on purpose. This is the boundary that turns *any* failure while parsing a user-supplied file
 # into a message, and the importers reach code that raises well outside `ValueError`: a bundle that
 # is `[]` raises AttributeError, and a backup naming a missing parent row raises sqlite3
@@ -1483,11 +1486,16 @@ def import_result_counts(result: object) -> dict[str, int]:
         return {}
     imported = result.get("imported")
     if isinstance(imported, dict):
-        return {table: count for table, count in imported.items() if count}
+        counts = {table: count for table, count in imported.items() if count}
+        # A sentinel rather than {}: an importer that reported counts and imported none of them is
+        # not the same as the JSON restore, which reports no counts at all. Collapsing both to {}
+        # made a clear-existing import of an empty bundle -- which wipes every table -- render the
+        # same bare green "Import complete." as a successful restore.
+        return counts or {NO_RECORDS_IMPORTED: 0}
     if isinstance(imported, int):
-        # Same zero filter as the dict branch. Without it an all-rejected CSV rendered a table
-        # reading "Records: 0" while the identical all-rejected FHIR bundle rendered none.
-        return {"records": imported} if imported else {}
+        # Same treatment as the dict branch: no zero-row table, but still distinguishable from an
+        # importer that reports nothing.
+        return {"records": imported} if imported else {NO_RECORDS_IMPORTED: 0}
     return {}
 
 
@@ -1518,11 +1526,14 @@ def import_outcome_summary(outcome: dict) -> str:
     bare success. The JSON restore legitimately reports no counts, so that case still reads as
     plain completion; an importer that returned counts and imported none of them does not.
     """
-    total = sum(outcome["counts"].values())
+    counts = outcome["counts"]
+    total = sum(counts.values())
     skipped = len(outcome["skipped"])
     if not total:
         if skipped:
             return f"No records imported; {skipped} entr(y/ies) skipped."
+        if NO_RECORDS_IMPORTED in counts:
+            return "No records were imported. If you cleared existing records, they were replaced by nothing."
         return "Import complete."
     text = f"Imported {total:,} record(s)."
     return f"{text} {skipped} entr(y/ies) skipped." if skipped else f"{text} Nothing skipped."
@@ -1532,8 +1543,13 @@ def render_import_outcome_body(outcome: dict) -> None:
     """The shared body of both renderings of an import result."""
     if outcome["succeeded"]:
         st.success(f"{outcome['title']}: {import_outcome_summary(outcome)}")
-        if outcome["counts"]:
-            dataframe([{"Table": format_label(table), "Records": count} for table, count in outcome["counts"].items()])
+        rows = [
+            {"Table": format_label(table), "Records": count}
+            for table, count in outcome["counts"].items()
+            if table != NO_RECORDS_IMPORTED
+        ]
+        if rows:
+            dataframe(rows)
         if outcome["skipped"]:
             with st.expander(f"{len(outcome['skipped'])} skipped entr(y/ies)"):
                 dataframe([{"Detail": str(item)} for item in outcome["skipped"]])
