@@ -2064,3 +2064,71 @@ def test_condition_display_lines_omits_missing_source_and_blank_rows():
         ]
     )
     assert lines == ["Diabetes — Endocrinologist", "Asthma"]
+
+
+# --- regressions from the 2026-08-04 independent review ---------------------------------------
+
+
+def test_fhir_replace_import_refuses_to_delete_what_it_cannot_restore(tmp_path):
+    """A FHIR bundle carries no Condition, so clear-and-replace used to destroy tracked conditions.
+
+    Reproduced before the fix: export a profile's own bundle, re-import it with clear-existing, and
+    every condition was gone -- while the result dict reported `conditions: 0`, which is
+    indistinguishable from "the bundle had none to import". Medications and every other table came
+    back, so nothing on screen suggested a loss had happened.
+    """
+    database = tmp_path / "phr.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Hypertension", "source": "Primary Care", "noted_date": "2025-01-01"},
+        db_path=database,
+    )
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "conditions (1)" in str(excinfo.value)
+    # The refusal happens before anything is deleted, so both tables are untouched.
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]
+    assert len(services.list_items("medications", person_id, db_path=database)) == 1
+
+
+def test_fhir_replace_import_still_works_when_nothing_would_be_lost(tmp_path):
+    """The guard is scoped to actual rows, so a profile with no conditions is unaffected."""
+    database = tmp_path / "phr.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    result = imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert result["imported"]["medications"] == 1
+    restored = services.list_people(db_path=database)
+    assert len(restored) == 1
+
+
+def test_every_table_is_either_fhir_restorable_or_guarded(tmp_path):
+    """Derived, not hand-listed: the next table added cannot slip through the same way.
+
+    `conditions` was only ever lost because `db.TABLES` happened to equal the set FHIR could emit
+    until it was added, so the replace-import was lossless by coincidence rather than by check.
+    """
+    database = tmp_path / "phr.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    unrestorable = set(db.TABLES) - fhir.restorable_tables()
+
+    assert unrestorable, "if this is ever empty the guard is dead code -- delete it deliberately"
+    for table in unrestorable:
+        seed = dict(CHILD_TABLE_SEEDS[table])
+        services.create_item(table, person_id, seed, db_path=database)
+
+    blocked = fhir.unrestorable_row_counts(database)
+
+    assert set(blocked) == unrestorable

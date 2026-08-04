@@ -87,7 +87,14 @@ def get_primary_series(
             cache[table] = services.list_items(table, person_id, db_path=db_path)
         wanted = normalize_condition_name(record_name)
         points = [
-            {"date": row.get(date_column), "value": row.get(value_column), "record": record_name}
+            {
+                "date": row.get(date_column),
+                "value": row.get(value_column),
+                "record": record_name,
+                # Carried so `sparkline_frame` can tie-break two readings sharing a date, the same
+                # way `trend_frame` does. Without it the sparkline's point order is a sort accident.
+                "id": row.get("id"),
+            }
             for row in cache[table]
             if normalize_condition_name(row.get(_RECORD_NAME_COLUMNS[table])) == wanted
         ]

@@ -61,8 +61,14 @@ FLAG_SHAPES = {
 FLAG_ORDER = list(FLAG_COLORS)
 NOT_FLAGGED = "Not flagged"
 
-TREND_COLUMNS = ["date", "value", "record", "unit", "flag", "table"]
-MEDICATION_COLUMNS = ["name", "start", "end", "status", "open_ended"]
+# `row_id` is the database row's own id, carried purely as an ordering tie-breaker. Two readings can
+# share a date, and `services.list_items` returns rows id-*descending*, so sorting on date alone let
+# the newer row land first and inverted "first" and "most recent" -- with the flag and the sign of
+# `change` inverted along with them. AGENTS.md section 9 requires an explicit tie-breaker; this is it.
+TREND_COLUMNS = ["date", "value", "record", "unit", "flag", "table", "row_id"]
+# `end_label` is what the tooltip shows, so a row with no recorded end date says so in words instead
+# of displaying the clamped `end` as though the record contained that date.
+MEDICATION_COLUMNS = ["name", "start", "end", "status", "open_ended", "end_label"]
 FLAG_HISTORY_COLUMNS = ["record", "date", "flag"]
 MONTHLY_COUNT_COLUMNS = ["month", "record_type", "count"]
 RANGE_COLUMNS = ["period", "minimum", "maximum", "average"]
@@ -79,7 +85,7 @@ FIRST_LATEST_COLUMNS = [
     "change",
     "results",
 ]
-SPARKLINE_COLUMNS = ["condition", "record", "date", "value"]
+SPARKLINE_COLUMNS = ["condition", "record", "date", "value", "row_id"]
 
 _NUMERIC_FIELDS = {
     "wearable_records": ("timestamp", "value", "metric_type", "unit", None),
@@ -91,7 +97,7 @@ _TABLE_LABELS = {
     "wearable_records": "Wearable records",
     "health_entries": "Health entries",
 }
-_DATE_FIELDS = {
+DATE_FIELDS = {
     "lab_results": "lab_date",
     "medications": "start_date",
     "wearable_records": "timestamp",
@@ -105,11 +111,30 @@ def _empty(columns: list[str]) -> pd.DataFrame:
     return pd.DataFrame(columns=columns)
 
 
+def _row_id(value: object) -> int:
+    """A row's database id as a sortable int, 0 when it has none.
+
+    Rows built by hand in tests carry no id; they all tie at 0 and fall back to the stable sort,
+    which keeps their order deterministic without pretending they have identities they do not.
+    """
+
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
 def _coerce_point(date_value: object, raw_value: object) -> tuple[pd.Timestamp, float] | None:
     """Parse one dated numeric reading, returning None for anything unusable.
 
     Booleans are rejected before ``float`` sees them: ``float(True)`` is 1.0, which would silently
     plot a checkbox as a measurement.
+
+    Timestamps are normalised to naive UTC. ``validate_wearable`` only requires a timestamp to be
+    present, so ``2026-01-02T08:00:00Z`` is storable, while a lab date is a bare ``2026-01-01``.
+    Mixing the two in one frame gives a column of tz-aware and tz-naive values, and sorting it
+    raises ``TypeError: Cannot compare tz-naive and tz-aware timestamps`` -- which took out the
+    whole Tracked Conditions page for any condition mapping both a lab and a wearable.
     """
 
     if date_value in (None, "") or isinstance(raw_value, bool) or raw_value in (None, ""):
@@ -121,6 +146,8 @@ def _coerce_point(date_value: object, raw_value: object) -> tuple[pd.Timestamp, 
         return None
     if pd.isna(parsed) or not isfinite(value):
         return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.tz_convert("UTC").tz_localize(None)
     return parsed, value
 
 
@@ -152,18 +179,32 @@ def trend_frame(records_by_table: Mapping[str, Sequence[dict]]) -> pd.DataFrame:
                     "unit": record.get(unit_column) or "",
                     "flag": str(flag) if flag else NOT_FLAGGED,
                     "table": table,
+                    "row_id": _row_id(record.get("id")),
                 }
             )
     if not rows:
         return _empty(TREND_COLUMNS)
-    return pd.DataFrame(rows, columns=TREND_COLUMNS).sort_values("date").reset_index(drop=True)
+    # `table` before `row_id` because ids are only unique within a table, and one series name can
+    # draw from two of them. Stable sort so rows that tie on all three keep their input order.
+    return (
+        pd.DataFrame(rows, columns=TREND_COLUMNS)
+        .sort_values(["date", "table", "row_id"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def medication_spans(rows: Sequence[dict], as_of: object) -> pd.DataFrame:
     """One dated span per medication row, for the timeline drawn beneath a trend.
 
     A row with no end date is clamped to ``as_of`` and marked ``open_ended`` so the chart can show
-    it running to the edge rather than inventing a stop date it does not have.
+    it running to the edge rather than inventing a stop date it does not have. ``end_label`` carries
+    that distinction into the tooltip: the clamped date is a drawing coordinate, not a fact about
+    the record, and showing it under "Recorded through" stated a date the record does not contain.
+
+    ``validate_medication`` accepts a blank end date at any status, so this fires for a medication
+    recorded as Stopped or Completed as readily as for an active one. The status stays in the
+    tooltip beside the label, which is what lets "Stopped" and "no end date recorded" be read
+    together rather than the bar being taken for a confirmed span running to today.
     """
 
     spans = []
@@ -185,31 +226,49 @@ def medication_spans(rows: Sequence[dict], as_of: object) -> pd.DataFrame:
                 "end": end,
                 "status": record.get("status") or "Unknown",
                 "open_ended": open_ended,
+                "end_label": "No end date recorded" if open_ended else f"{end:%b} {end.day}, {end.year}",
             }
         )
     if not spans:
         return _empty(MEDICATION_COLUMNS)
-    return pd.DataFrame(spans, columns=MEDICATION_COLUMNS).sort_values("start").reset_index(drop=True)
+    return (
+        pd.DataFrame(spans, columns=MEDICATION_COLUMNS)
+        .sort_values(["start", "name"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def flag_history(rows: Sequence[dict]) -> pd.DataFrame:
-    """Every source-flagged lab result as one dated mark per test, for the flag strip."""
+    """Every lab result as one dated mark per test, carrying the flag the source recorded.
+
+    A row whose stored flag is NULL or blank becomes ``NOT_FLAGGED``, the same absence
+    ``trend_frame`` records. It previously became ``"Unknown"`` -- which is a real member of
+    ``models.LAB_FLAGS``, i.e. a flag a source can actually record -- so a lab nobody flagged was
+    drawn identically to one a source explicitly flagged Unknown, under a caption promising "the
+    flag the source recorded at the time". Absence is not a flag value.
+    """
 
     history = []
     for record in rows:
         date_value = pd.to_datetime(record.get("lab_date"), errors="coerce")
         if pd.isna(date_value):
             continue
+        raw_flag = record.get("flag")
+        flag = str(raw_flag).strip() if raw_flag is not None else ""
         history.append(
             {
                 "record": record.get("test_name"),
                 "date": date_value,
-                "flag": str(record.get("flag") or "Unknown"),
+                "flag": flag or NOT_FLAGGED,
             }
         )
     if not history:
         return _empty(FLAG_HISTORY_COLUMNS)
-    return pd.DataFrame(history, columns=FLAG_HISTORY_COLUMNS).sort_values("date").reset_index(drop=True)
+    return (
+        pd.DataFrame(history, columns=FLAG_HISTORY_COLUMNS)
+        .sort_values(["date", "record"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def monthly_counts(records_by_table: Mapping[str, Sequence[dict]]) -> pd.DataFrame:
@@ -221,7 +280,7 @@ def monthly_counts(records_by_table: Mapping[str, Sequence[dict]]) -> pd.DataFra
 
     counts: dict[tuple[pd.Timestamp, str], int] = {}
     for table, records in records_by_table.items():
-        date_column = _DATE_FIELDS.get(table)
+        date_column = DATE_FIELDS.get(table)
         if date_column is None:
             continue
         label = _TABLE_LABELS.get(table, table)
@@ -323,25 +382,36 @@ def first_latest(frame: pd.DataFrame) -> pd.DataFrame:
 
     ``change`` is subtraction over two stored numbers, which is why it is safe to show. It is not
     labelled better or worse anywhere, because the app has no basis for either word.
+
+    Two guards on that subtraction:
+
+    * Ordering uses the same ``(date, table, row_id)`` tie-breaker as ``trend_frame``. Sorting on
+      date alone let two readings sharing a date resolve by sort accident, so first and latest --
+      and with them both flags and the sign of ``change`` -- could swap between runs.
+    * A series whose rows carry more than one unit gets no ``change`` at all. Subtracting 93 kg from
+      232 lb is arithmetically true of the stored numbers and clinically meaningless, and labelling
+      the result with only the latest row's unit hid that it had happened.
     """
 
     if frame.empty:
         return _empty(FIRST_LATEST_COLUMNS)
     summaries = []
     for record, group in frame.groupby("record", sort=True):
-        ordered = group.sort_values("date")
+        ordered = group.sort_values(["date", "table", "row_id"], kind="stable")
         first, latest = ordered.iloc[0], ordered.iloc[-1]
+        units = {str(unit).strip() for unit in ordered["unit"].dropna() if str(unit).strip()}
+        comparable = len(units) <= 1
         summaries.append(
             {
                 "record": record,
-                "unit": latest["unit"],
+                "unit": latest["unit"] if comparable else "Mixed units",
                 "first_date": first["date"],
                 "first_value": first["value"],
                 "first_flag": first["flag"],
                 "latest_date": latest["date"],
                 "latest_value": latest["value"],
                 "latest_flag": latest["flag"],
-                "change": round(float(latest["value"]) - float(first["value"]), 2),
+                "change": round(float(latest["value"]) - float(first["value"]), 2) if comparable else None,
                 "results": int(len(ordered)),
             }
         )
@@ -363,10 +433,22 @@ def sparkline_frame(series_by_condition: Mapping[str, Sequence[dict]]) -> pd.Dat
             if point is None:
                 continue
             parsed, value = point
-            rows.append({"condition": condition, "record": record.get("record"), "date": parsed, "value": value})
+            rows.append(
+                {
+                    "condition": condition,
+                    "record": record.get("record"),
+                    "date": parsed,
+                    "value": value,
+                    "row_id": _row_id(record.get("id")),
+                }
+            )
     if not rows:
         return _empty(SPARKLINE_COLUMNS)
-    return pd.DataFrame(rows, columns=SPARKLINE_COLUMNS).sort_values(["condition", "date"]).reset_index(drop=True)
+    return (
+        pd.DataFrame(rows, columns=SPARKLINE_COLUMNS)
+        .sort_values(["condition", "date", "row_id"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 # --- chart specifications ------------------------------------------------------------------------
@@ -379,12 +461,17 @@ def present_flags(frame: pd.DataFrame) -> list[str]:
     beside them under most charts, which reads as missing data rather than as an unused vocabulary.
     Restricting the *domain* while keeping each flag's own colour means a flag never changes hue
     depending on which others happen to be on screen -- colour follows the flag, not its position.
+
+    Returns an empty list when nothing is flagged, and callers then omit the flag scales entirely.
+    Falling back to the whole vocabulary was the exact failure the paragraph above describes: a
+    profile whose only mapped series is a wearable -- which has no flag column at all -- got a
+    six-entry legend advertising Critical and Abnormal beside a plot with no flagged marks.
     """
 
     if frame.empty or "flag" not in frame:
-        return list(FLAG_ORDER)
+        return []
     seen = set(frame["flag"].dropna())
-    return [flag for flag in FLAG_ORDER if flag in seen] or list(FLAG_ORDER)
+    return [flag for flag in FLAG_ORDER if flag in seen]
 
 
 def _flag_color(domain: Sequence[str]) -> alt.Color:
@@ -429,6 +516,8 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
 
     flags = present_flags(frame[frame["flag"] != NOT_FLAGGED] if not frame.empty else frame)
     base = alt.Chart(frame).encode(x=alt.X("date:T", title=None))
+    # No flagged rows means no flag scales at all, so Vega emits no legend rather than one listing
+    # a vocabulary -- Critical included -- that nothing on the plot uses.
     tooltip = [
         alt.Tooltip("date:T", title="Date"),
         alt.Tooltip("record:N", title="Record"),
@@ -449,7 +538,8 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
         .mark_point(filled=False, size=42, stroke=MUTED, strokeWidth=1.2, opacity=0.7)
         .encode(y=_value_axis(frame), tooltip=tooltip)
     )
-    return alt.layer(line, unflagged, flagged).properties(height=height)
+    layers = [line, unflagged, flagged] if flags else [line, unflagged]
+    return alt.layer(*layers).properties(height=height)
 
 
 def build_medication_timeline(spans: pd.DataFrame, height: int = 110) -> alt.Chart:
@@ -461,22 +551,35 @@ def build_medication_timeline(spans: pd.DataFrame, height: int = 110) -> alt.Cha
     only which medication a bar belongs to.
     """
 
-    return (
-        alt.Chart(spans)
-        .mark_bar(height=13, cornerRadius=4, color=ACCENT, opacity=0.75)
-        .encode(
-            x=alt.X("start:T", title=None),
-            x2="end:T",
-            y=alt.Y("name:N", title=None, sort="-x"),
-            tooltip=[
-                alt.Tooltip("name:N", title="Medication"),
-                alt.Tooltip("start:T", title="Started"),
-                alt.Tooltip("end:T", title="Recorded through"),
-                alt.Tooltip("status:N", title="Status"),
-            ],
-        )
-        .properties(height=height)
+    tooltip = [
+        alt.Tooltip("name:N", title="Medication"),
+        alt.Tooltip("start:T", title="Started"),
+        alt.Tooltip("end_label:N", title="Recorded through"),
+        alt.Tooltip("status:N", title="Status"),
+    ]
+    base = alt.Chart(spans).encode(
+        x=alt.X("start:T", title=None),
+        x2="end:T",
+        y=alt.Y("name:N", title=None, sort="-x"),
+        tooltip=tooltip,
     )
+    # Two marks rather than one, for the same reason the trend chart draws unflagged points hollow:
+    # a bar whose end date the record does not contain must not look like one whose it does. The
+    # solid bar is a span the record establishes at both ends; the faded, dashed bar runs to the
+    # chart edge only because there is nowhere else to stop it.
+    confirmed = base.transform_filter(~alt.datum.open_ended).mark_bar(
+        height=13, cornerRadius=4, color=ACCENT, opacity=0.75
+    )
+    open_ended = base.transform_filter(alt.datum.open_ended).mark_bar(
+        height=13,
+        cornerRadius=4,
+        color=ACCENT,
+        opacity=0.28,
+        stroke=ACCENT,
+        strokeWidth=1,
+        strokeDash=[4, 3],
+    )
+    return alt.layer(confirmed, open_ended).properties(height=height)
 
 
 def build_trend_with_medications(frame: pd.DataFrame, spans: pd.DataFrame) -> alt.Chart:
@@ -501,24 +604,33 @@ def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
 
     Reads at a glance in a way a line chart cannot: a run of amber turning teal is visible across
     several tests at once, without anyone having to compare numbers to a range in their head.
+
+    Layered filled-and-hollow exactly as ``build_trend_chart`` is, and for the same reason: a lab
+    row with no stored flag reaches here as ``NOT_FLAGGED`` and must render as an absence, not
+    borrow a hue from the status vocabulary.
     """
 
-    return (
-        alt.Chart(history)
-        .mark_point(filled=True, size=110, stroke="white", strokeWidth=1)
-        .encode(
-            x=alt.X("date:T", title=None),
-            y=alt.Y("record:N", title=None),
-            color=_flag_color(present_flags(history)),
-            shape=_flag_shape(present_flags(history)),
-            tooltip=[
-                alt.Tooltip("date:T", title="Date"),
-                alt.Tooltip("record:N", title="Test"),
-                alt.Tooltip("flag:N", title="Source flag"),
-            ],
-        )
-        .properties(height=height)
+    flags = present_flags(history[history["flag"] != NOT_FLAGGED] if not history.empty else history)
+    tooltip = [
+        alt.Tooltip("date:T", title="Date"),
+        alt.Tooltip("record:N", title="Test"),
+        alt.Tooltip("flag:N", title="Source flag"),
+    ]
+    base = alt.Chart(history).encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y("record:N", title=None),
+        tooltip=tooltip,
     )
+    flagged = (
+        base.transform_filter(alt.datum.flag != NOT_FLAGGED)
+        .mark_point(filled=True, size=110, stroke="white", strokeWidth=1)
+        .encode(color=_flag_color(flags), shape=_flag_shape(flags))
+    )
+    unflagged = base.transform_filter(alt.datum.flag == NOT_FLAGGED).mark_point(
+        filled=False, size=60, stroke=MUTED, strokeWidth=1.2, opacity=0.7
+    )
+    layers = [unflagged, flagged] if flags else [unflagged]
+    return alt.layer(*layers).properties(height=height)
 
 
 def build_density_chart(counts: pd.DataFrame, height: int = 200) -> alt.Chart:
@@ -608,7 +720,10 @@ def build_sparklines(frame: pd.DataFrame, columns: int = 3) -> alt.Chart:
 
     return (
         alt.Chart(frame)
-        .mark_line(color=ACCENT, strokeWidth=2)
+        # Point overlay because a Vega-Lite line mark with a single datum draws no path at all: a
+        # condition with exactly one recorded reading rendered an empty panel under a caption
+        # promising a measurement. `build_trend_chart` layers explicit points for the same reason.
+        .mark_line(color=ACCENT, strokeWidth=2, point=alt.OverlayMarkDef(color=ACCENT, size=22))
         .encode(
             x=alt.X("date:T", title=None, axis=alt.Axis(labels=False, ticks=False)),
             y=alt.Y("value:Q", title=None, scale=alt.Scale(zero=False)),

@@ -389,7 +389,9 @@ def test_sparklines_give_each_condition_its_own_y_scale():
 def test_remaining_builders_produce_a_renderable_spec(builder):
     spec = builder().to_dict()
 
-    assert spec["mark"] or spec.get("layer")
+    # `.get` on both: the flag strip is layered (filled marks for stored flags, hollow for absence),
+    # and subscripting "mark" raised KeyError before the `or` could reach the layer branch.
+    assert spec.get("mark") or spec.get("layer")
 
 
 def test_range_band_chart_layers_a_band_under_a_mean_line():
@@ -431,3 +433,155 @@ def test_get_primary_series_omits_a_condition_with_no_matching_records(tmp_path)
     series = get_primary_series(person_id, ["Prediabetes", "Not A Mapped Condition"], db_path=database)
 
     assert series == {}
+
+
+# --- regressions from the 2026-08-04 independent review ---------------------------------------
+
+
+def test_a_wearable_timestamp_with_a_zone_does_not_crash_the_page():
+    """`validate_wearable` only requires a timestamp to be present, so a `Z` suffix is storable.
+
+    Mixed with a bare lab date it produced a column of tz-aware and tz-naive values, and sorting it
+    raised `TypeError: Cannot compare tz-naive and tz-aware timestamps` -- taking out the whole
+    Tracked Conditions page for exactly the conditions that map both a lab and a wearable, which is
+    the mapping Diabetes uses.
+    """
+    frame = condition_charts.trend_frame(
+        {
+            "lab_results": _labs([("2026-01-01", 5.5, "Hemoglobin A1c", "Normal")]),
+            "wearable_records": [
+                {"timestamp": "2026-01-02T08:00:00Z", "value": 100.0, "metric_type": "Glucose", "unit": "mg/dL"},
+                {"timestamp": "2026-01-03T08:00:00+05:00", "value": 110.0, "metric_type": "Glucose", "unit": "mg/dL"},
+            ],
+        }
+    )
+
+    assert len(frame) == 3
+    # Offsets are converted to UTC rather than dropped, so 08:00+05:00 lands at 03:00.
+    assert frame["date"].dt.tz is None
+    assert str(frame["date"].iloc[2]) == "2026-01-03 03:00:00"
+
+
+def test_first_and_latest_use_a_row_id_tie_breaker_not_sort_order():
+    """Two readings sharing a date must resolve by row id, not by however the rows arrived.
+
+    `services.list_items` returns rows id-*descending*, so date-only sorting showed the newer row as
+    "First" and the older as "Latest", inverting both flags and the sign of `change`. AGENTS.md
+    section 9 requires an explicit tie-breaker for any "latest" calculation.
+    """
+    newest_first = [
+        {"lab_date": "2026-01-01", "numeric_value": 1.9, "test_name": "Creatinine", "unit": "mg/dL", "flag": "High", "id": 11},
+        {"lab_date": "2026-01-01", "numeric_value": 1.1, "test_name": "Creatinine", "unit": "mg/dL", "flag": "Normal", "id": 10},
+    ]
+
+    summary = condition_charts.first_latest(condition_charts.trend_frame({"lab_results": newest_first}))
+
+    row = summary.iloc[0]
+    assert (row["first_value"], row["first_flag"]) == (1.1, "Normal")
+    assert (row["latest_value"], row["latest_flag"]) == (1.9, "High")
+    assert row["change"] == 0.8
+    # Reversing the input must not change any of it.
+    reversed_summary = condition_charts.first_latest(
+        condition_charts.trend_frame({"lab_results": list(reversed(newest_first))})
+    )
+    assert reversed_summary.iloc[0]["latest_value"] == 1.9
+    assert reversed_summary.iloc[0]["change"] == 0.8
+
+
+def test_many_same_date_readings_stay_stable_across_runs():
+    """Guards the sort itself: pandas' default quicksort scrambled ties even without the id bug."""
+    rows = [
+        {"lab_date": "2026-01-01", "numeric_value": float(n), "test_name": "TSH", "unit": "mIU/L", "flag": "Normal", "id": n}
+        for n in range(20, 0, -1)
+    ]
+
+    summary = condition_charts.first_latest(condition_charts.trend_frame({"lab_results": rows}))
+
+    assert summary.iloc[0]["first_value"] == 1.0
+    assert summary.iloc[0]["latest_value"] == 20.0
+
+
+def test_a_lab_with_no_stored_flag_is_an_absence_not_the_unknown_flag():
+    """"Unknown" is a real member of `models.LAB_FLAGS`, i.e. a flag a source can actually record.
+
+    Mapping a NULL flag onto it made a lab nobody flagged indistinguishable from one a source
+    explicitly flagged Unknown, under a caption promising "the flag the source recorded".
+    """
+    history = condition_charts.flag_history(
+        [
+            {"lab_date": "2026-01-01", "test_name": "A1c", "flag": None},
+            {"lab_date": "2026-02-01", "test_name": "A1c", "flag": ""},
+            {"lab_date": "2026-03-01", "test_name": "A1c", "flag": "Unknown"},
+        ]
+    )
+
+    assert list(history["flag"]) == [
+        condition_charts.NOT_FLAGGED,
+        condition_charts.NOT_FLAGGED,
+        "Unknown",
+    ]
+    # And the strip must draw the absence hollow rather than borrow a status hue for it.
+    spec = condition_charts.build_flag_strip(history).to_dict()
+    assert spec.get("layer")
+
+
+def test_a_medication_with_no_end_date_says_so_instead_of_showing_today():
+    """The clamped end is a drawing coordinate, not a fact about the record.
+
+    `validate_medication` accepts a blank end date at any status, so this fires for a medication
+    recorded as Stopped just as readily as an active one -- and the tooltip previously presented
+    today's date under "Recorded through" for both.
+    """
+    spans = condition_charts.medication_spans(
+        [
+            {"name": "Metformin", "start_date": "2025-01-01", "end_date": "", "status": "Stopped"},
+            {"name": "Lisinopril", "start_date": "2025-01-01", "end_date": "2025-06-01", "status": "Completed"},
+        ],
+        as_of="2026-08-04",
+    )
+
+    by_name = {row["name"]: row for _, row in spans.iterrows()}
+    assert by_name["Metformin"]["open_ended"] is True
+    assert by_name["Metformin"]["end_label"] == "No end date recorded"
+    assert by_name["Lisinopril"]["open_ended"] is False
+    assert by_name["Lisinopril"]["end_label"] == "Jun 1, 2025"
+
+    spec = condition_charts.build_medication_timeline(spans).to_dict()
+    # Two layers, so a span the record establishes at both ends cannot look like one it does not.
+    assert len(spec["layer"]) == 2
+    titles = {tip.get("title") for layer in spec["layer"] for tip in layer["encoding"]["tooltip"]}
+    assert "Recorded through" in titles
+    fields = {tip.get("field") for layer in spec["layer"] for tip in layer["encoding"]["tooltip"]}
+    assert "end_label" in fields and "end" not in fields
+
+
+def test_an_all_unflagged_chart_emits_no_flag_legend_at_all():
+    """A wearable-only series has no flag column, so advertising Critical beside it is noise."""
+    frame = condition_charts.trend_frame({"wearable_records": SAMPLE_WEARABLES})
+
+    assert condition_charts.present_flags(frame[frame["flag"] != condition_charts.NOT_FLAGGED]) == []
+    spec = condition_charts.build_trend_chart(frame).to_dict()
+    encodings = [layer.get("encoding", {}) for layer in spec["layer"]]
+    assert not any("color" in encoding or "shape" in encoding for encoding in encodings)
+
+
+def test_change_is_withheld_when_a_series_mixes_units():
+    """Subtracting 93 kg from 232 lb is true of the stored numbers and clinically meaningless."""
+    rows = [
+        {"timestamp": "2026-01-01T08:00:00", "value": 232.0, "metric_type": "Weight", "unit": "lb"},
+        {"timestamp": "2026-06-01T08:00:00", "value": 93.0, "metric_type": "Weight", "unit": "kg"},
+    ]
+
+    summary = condition_charts.first_latest(condition_charts.trend_frame({"wearable_records": rows}))
+
+    assert summary.iloc[0]["change"] is None
+    assert summary.iloc[0]["unit"] == "Mixed units"
+
+
+def test_a_single_point_sparkline_still_draws_something():
+    """A Vega-Lite line mark with one datum draws no path, so the panel came out empty."""
+    frame = condition_charts.sparkline_frame({"Prediabetes": [{"date": "2026-01-01", "value": 5.9, "record": "A1c"}]})
+
+    spec = condition_charts.build_sparklines(frame).to_dict()
+
+    assert spec["spec"]["mark"]["point"]

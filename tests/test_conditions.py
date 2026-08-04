@@ -689,3 +689,41 @@ def test_summaries_report_no_conditions_without_implying_absence_of_illness(db_p
     for document in (summary, snapshot):
         section = document.split("## Tracked Conditions")[1].splitlines()[1]
         assert section == "None recorded."
+
+
+# --- regressions from the 2026-08-04 independent review ---------------------------------------
+
+
+def test_most_recent_record_counts_every_linked_record_not_only_numeric_ones():
+    """"Most recent record: None" appeared beside "Medications recorded: 1" on the same metric row.
+
+    The date came from the trend frame, which covers only lab and wearable rows carrying a finite
+    number. A condition linked solely to a medication -- or to a qualitative lab stored as text with
+    a NULL `numeric_value` -- therefore contradicted the counts printed next to it.
+    """
+    records = {
+        "medications": [{"name": "Vitamin D3", "start_date": "2026-02-01"}],
+        "lab_results": [{"test_name": "Vitamin D", "lab_date": "2026-03-05", "result_value": "Insufficient"}],
+    }
+
+    latest = condition_ui._most_recent_record_date(records)
+
+    assert latest is not None
+    assert latest.date().isoformat() == "2026-03-05"
+
+
+def test_most_recent_record_is_none_only_when_nothing_is_dated():
+    assert condition_ui._most_recent_record_date({}) is None
+    assert condition_ui._most_recent_record_date({"medications": [{"name": "No date"}]}) is None
+
+
+def test_most_recent_record_handles_a_zoned_wearable_timestamp():
+    """Same tz-normalisation the trend frame needs; `max()` over mixed awareness would raise."""
+    records = {
+        "wearable_records": [{"metric_type": "Glucose", "timestamp": "2026-01-02T08:00:00Z"}],
+        "lab_results": [{"test_name": "Hemoglobin A1c", "lab_date": "2026-01-01"}],
+    }
+
+    latest = condition_ui._most_recent_record_date(records)
+
+    assert latest.date().isoformat() == "2026-01-02"

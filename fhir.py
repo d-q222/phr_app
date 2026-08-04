@@ -78,11 +78,52 @@ def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Pa
     return json.dumps(bundle, indent=2)
 
 
+def restorable_tables() -> set[str]:
+    """The tables a FHIR bundle can put back, derived rather than listed by hand.
+
+    ``FHIR_VALIDATORS`` is keyed by exactly the tables ``_local_record_from_resource`` can produce,
+    and ``people`` comes back from ``Patient``. Deriving the set from that mapping means a table
+    added to ``db.TABLES`` without a FHIR representation is caught automatically, which is how
+    ``conditions`` slipped through: before it existed, ``db.TABLES`` happened to equal this set, so
+    a clear-and-replace import was lossless by coincidence rather than by check.
+    """
+
+    return {"people", *FHIR_VALIDATORS}
+
+
+def unrestorable_row_counts(db_path: Path | str | None = None) -> dict[str, int]:
+    """Row counts for tables a FHIR bundle cannot restore, skipping the empty ones."""
+
+    db_path = db.DB_PATH if db_path is None else db_path
+    restorable = restorable_tables()
+    counts = {}
+    for table in db.TABLES:
+        if table in restorable:
+            continue
+        rows = db.list_records(table, db_path=db_path)
+        if rows:
+            counts[table] = len(rows)
+    return counts
+
+
 def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
     db_path = db.DB_PATH if db_path is None else db_path
     payload = json.loads(payload_text)
     resources = _resources_from_payload(payload)
     if clear_existing:
+        # Refuse rather than destroy. A FHIR bundle carries no Condition on export, so clearing
+        # every table and replaying the bundle deleted a profile's tracked conditions with nothing
+        # able to bring them back -- and the result dict reported `conditions: 0`, which is
+        # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
+        # `import_all_tables` deletes in reverse table order precisely so children go before
+        # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
+        blocked = unrestorable_row_counts(db_path)
+        if blocked:
+            detail = ", ".join(f"{table} ({count})" for table, count in sorted(blocked.items()))
+            raise ValueError(
+                "Clearing existing records would permanently delete data this FHIR bundle cannot "
+                f"restore: {detail}. Export a JSON backup first, or import without clearing."
+            )
         db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
 
     imported = {table: 0 for table in db.TABLES}

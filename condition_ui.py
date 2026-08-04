@@ -194,12 +194,36 @@ def render_condition_preview(
 # imports no Streamlit, so the charts stay assertable without driving a browser.
 
 
+def _most_recent_record_date(records_by_table: Mapping[str, Sequence[dict]]) -> pd.Timestamp | None:
+    """The latest date across every linked record, not only the dated numeric ones.
+
+    Derived from `trends` before, which covers only lab and wearable rows carrying a finite number.
+    A condition linked solely to a medication -- or to a qualitative lab stored as text with a NULL
+    `numeric_value` -- therefore reported "Most recent record: None" on the same metric row that
+    reported those records existing. Counts and this date now read the same set.
+    """
+
+    stamps = []
+    for table, rows in records_by_table.items():
+        date_column = condition_charts.DATE_FIELDS.get(table)
+        if date_column is None:
+            continue
+        for row in rows:
+            parsed = pd.to_datetime(row.get(date_column), errors="coerce")
+            if pd.isna(parsed):
+                continue
+            if parsed.tzinfo is not None:
+                parsed = parsed.tz_convert("UTC").tz_localize(None)
+            stamps.append(parsed)
+    return max(stamps) if stamps else None
+
+
 def _render_at_a_glance(records_by_table: Mapping[str, Sequence[dict]], trends: pd.DataFrame) -> None:
     """Four counts. No deltas are coloured, because a rise is not inherently good or bad."""
 
     labs = records_by_table.get("lab_results", [])
     flagged = sum(1 for row in labs if str(row.get("flag") or "") in SOURCE_FLAGGED)
-    latest = trends["date"].max() if not trends.empty else None
+    latest = _most_recent_record_date(records_by_table)
     columns = st.columns(4)
     columns[0].metric("Linked records", sum(len(rows) for rows in records_by_table.values()))
     columns[1].metric("Source-flagged results", flagged)
