@@ -91,11 +91,41 @@ def test_imported_lab_flags_match_their_own_reference_ranges(imported):
     mismatches = []
     for row in services.list_items("lab_results", person_id, db_path=database):
         value, low, high = row["numeric_value"], row["reference_low"], row["reference_high"]
-        expected = build_demo_bundle._flag_for(value, low, high)
-        if row["flag"] != expected:
-            mismatches.append(f"{row['test_name']} {value} (range {low}-{high}) flagged {row['flag']}, expected {expected}")
+        flag = row["flag"]
+        # Stated here rather than obtained from `build_demo_bundle._flag_for`. Calling the same
+        # private function that wrote the flag moves both sides of the comparison together: flipping
+        # `value > high` to `>=` in the generator and regenerating shipped Creatinine 1.3 against a
+        # range of 0.7-1.3 stamped "High", and the whole suite stayed green.
+        if high is not None and value > high:
+            expected = "High"
+        elif low is not None and value < low:
+            expected = "Low"
+        else:
+            expected = "Normal"
+        if flag != expected:
+            mismatches.append(f"{row['test_name']} {value} (range {low}-{high}) flagged {flag}, expected {expected}")
 
     assert mismatches == [], f"lab flags contradict their own reference ranges: {mismatches}"
+
+
+@pytest.mark.parametrize(
+    "value, low, high, expected",
+    [
+        (8.4, 0.4, 4.0, "High"),
+        (0.7, 0.8, 1.8, "Low"),
+        (1.3, 0.7, 1.3, "Normal"),  # exactly on the upper limit is inside the range, not above it
+        (0.7, 0.7, 1.3, "Normal"),  # and exactly on the lower limit likewise
+        (22.0, None, 30.0, "Normal"),
+        (35.0, None, 30.0, "High"),
+    ],
+)
+def test_the_flag_rule_itself_is_stated_not_inferred(value, low, high, expected):
+    """Pins `_flag_for`'s semantics against literals, so the generator cannot redefine them quietly.
+
+    Both boundary cases are here deliberately: a value sitting exactly on a limit of its own stated
+    range is Normal, and an off-by-one there is precisely the mutation that survived before.
+    """
+    assert build_demo_bundle._flag_for(value, low, high) == expected
 
 
 def test_every_flag_value_is_actually_used(imported):

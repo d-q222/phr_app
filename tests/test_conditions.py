@@ -911,3 +911,116 @@ def test_most_recent_record_keeps_the_calendar_day_across_a_day_crossing_offset(
     )
 
     assert latest.date().isoformat() == "2026-01-01"
+def _bundle(*conditions):
+    return json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                *(
+                    {
+                        "resource": {
+                            "resourceType": "Condition",
+                            "id": f"c{index}",
+                            "subject": {"reference": "Patient/p1"},
+                            "code": {"text": name},
+                            **({"verificationStatus": {"coding": [{"code": status}]}} if status else {}),
+                        }
+                    }
+                    for index, (name, status) in enumerate(conditions)
+                ),
+            ],
+        }
+    )
+
+
+def test_a_refuted_condition_is_not_imported_as_a_tracked_condition(db_path):
+    """`refuted` means a clinician considered it and ruled it out.
+
+    Dropping `verificationStatus` is right for active-versus-resolved -- the schema has no column for
+    it and inventing one would overclaim. It inverts for a negation: importing "Cancer / refuted" as
+    a tracked condition asserts a diagnosis the source explicitly excluded, and the row then appeared
+    in the Emergency Snapshot.
+    """
+    import imports_exports
+
+    result = imports_exports.import_fhir_bundle(
+        _bundle(("Cancer", "refuted"), ("Typo Condition", "entered-in-error"), ("Asthma", "confirmed")),
+        db_path=db_path,
+    )
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Asthma"]
+    # Visible, not silent: the user can see what did not come in and why.
+    reasons = {entry["reason"] for entry in result["skipped"]}
+    assert any("refuted" in reason for reason in reasons)
+    assert any("entered-in-error" in reason for reason in reasons)
+    assert result["imported"]["conditions"] == 1
+
+
+def test_a_refuted_condition_never_reaches_the_emergency_snapshot(db_path):
+    """The document an emergency responder reads is the reason this matters most."""
+    import imports_exports
+
+    imports_exports.import_fhir_bundle(_bundle(("Cancer", "refuted")), db_path=db_path)
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+
+    snapshot = services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+    assert "Cancer" not in snapshot
+
+
+def test_a_condition_with_no_verification_status_still_imports(db_path):
+    """Real bundles routinely omit it, including this repository's own demo bundle."""
+    import imports_exports
+
+    imports_exports.import_fhir_bundle(_bundle(("Hypothyroidism", None)), db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Hypothyroidism"]
+
+
+def test_a_condition_coded_only_by_number_is_skipped_not_named_after_its_code(db_path):
+    """`_text_from_codeable` falls back to `coding[].code`, which is right for a lab and wrong here.
+
+    Machine-generated EHR exports routinely code a Condition as SNOMED `44054006` with no text and
+    no display. The shared helper turned that into a tracked condition literally named "44054006",
+    shown in the condition list and the Emergency Snapshot and matching no mapping -- the same
+    failure the converter's "no fallback name" rule exists to prevent, arriving by another door.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006"}]},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c2",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Diabetes"}]},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    # The one carrying a human-readable display still imports; only the bare code is refused.
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Diabetes"]
+    assert [entry["id"] for entry in result["skipped"]] == ["c1"]
+    assert "44054006" not in services.generate_emergency_snapshot(person_id, db_path=db_path)

@@ -295,6 +295,10 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         resource_type = resource.get("resourceType")
         if resource_type == "Patient":
             continue
+        refusal = _refused_reason(resource)
+        if refusal:
+            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": refusal})
+            continue
         person_id = _resolve_patient_id(resource, patient_map, fallback_person_id)
         if person_id is None:
             skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "No matching Patient resource."})
@@ -729,6 +733,56 @@ def _local_record_from_resource(resource: dict) -> tuple[str | None, dict]:
     return None, {}
 
 
+# FHIR verification statuses that say the condition is **not** real, as opposed to not yet
+# established. `refuted` means a clinician considered it and ruled it out; `entered-in-error` means
+# the source retracted the record. Both are negations, and importing a negation as a tracked
+# condition inverts it.
+NEGATED_CONDITION_STATUSES = frozenset({"refuted", "entered-in-error"})
+
+
+def _refused_reason(resource: dict) -> str | None:
+    """Why this resource must not be imported at all, or None if it may proceed.
+
+    Distinct from validation, which asks whether a record is well formed. This asks whether the
+    source is asserting the thing exists.
+
+    The Condition converter drops `clinicalStatus` and `verificationStatus` because the schema has no
+    column for them, and for `active` versus `resolved` that is right -- dropping a field you cannot
+    represent is not an overclaim. It inverts for `refuted` and `entered-in-error`: those are not
+    statuses of a real condition, they are the source stating the condition is not real. A Condition
+    coded `refuted` for "Cancer" was imported as a tracked condition and then listed in the
+    **Emergency Snapshot** -- the app asserting a diagnosis the source explicitly ruled out.
+
+    Skipping is reported in the visible `skipped` list, so an omission is something the user can see
+    rather than a silent difference between the bundle and what landed.
+    """
+
+    if resource.get("resourceType") != "Condition":
+        return None
+    for coding in resource.get("verificationStatus", {}).get("coding", []):
+        code = str(coding.get("code") or "").strip().lower()
+        if code in NEGATED_CONDITION_STATUSES:
+            return f"Condition verificationStatus is '{code}'; the source states this condition is not established."
+    return None
+
+
+def _human_condition_name(value: dict | None) -> str | None:
+    """A condition name a person would recognise, or None -- never a bare code.
+
+    `text` and `coding[].display` are written for humans. `coding[].code` is an identifier, and a
+    row named "44054006" asserts an illness nobody can read.
+    """
+
+    if not value:
+        return None
+    if value.get("text"):
+        return value["text"]
+    for coding in value.get("coding", []):
+        if coding.get("display"):
+            return coding["display"]
+    return None
+
+
 def _condition_from_resource(resource: dict) -> dict:
     """Map a FHIR Condition onto the local `conditions` columns.
 
@@ -759,7 +813,14 @@ def _condition_from_resource(resource: dict) -> dict:
             source = display
             break
     return {
-        "condition_name": _text_from_codeable(resource.get("code")),
+        # Deliberately NOT `_text_from_codeable`, which falls back to `coding[].code`. That fallback
+        # is right for a lab test but wrong here: a machine-generated EHR export routinely codes a
+        # Condition as SNOMED `44054006` with no text and no display, and the shared helper turned
+        # that into a tracked condition literally named "44054006" -- shown in the condition list and
+        # in the Emergency Snapshot, and matching no entry in CONDITION_RECORD_MAPPINGS. That is the
+        # same failure the "no fallback name" rule below exists to prevent, arriving by another door.
+        # A blank name lets `validate_condition` reject it into the visible skip list instead.
+        "condition_name": _human_condition_name(resource.get("code")),
         "source": source,
         "noted_date": _date_part(resource.get("recordedDate") or resource.get("onsetDateTime")),
         "notes": _notes_text(resource.get("note")),
