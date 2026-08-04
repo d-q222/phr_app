@@ -2375,3 +2375,44 @@ def test_the_provider_summary_reports_an_absent_lab_flag_as_absent(tmp_path):
     lines = {line.split(": ", 1)[1].split(" ")[0]: line for line in summary.splitlines() if line.startswith("- 2026")}
     assert "[Not flagged]" in lines["Hemoglobin"]
     assert "[Unknown]" in lines["TSH"]
+
+
+def test_fhir_replace_import_refuses_a_bundle_about_a_different_person(tmp_path):
+    """Matching Patient COUNTS is not the same as containing the same profiles.
+
+    One existing profile and one unrelated incoming Patient made the counts equal, so a count-based
+    check passed, the clear ran, and the existing profile was replaced by a stranger's record.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    mine = services.create_person({"name": "My Profile"}, db_path=database)
+    services.create_item("medications", mine, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+
+    elsewhere = tmp_path / "fhir_elsewhere.db"
+    db.init_db(elsewhere)
+    for _ in range(4):  # push ids past mine, so identity and not ordering is what decides
+        services.create_person({"name": "Filler"}, db_path=elsewhere)
+    stranger = services.create_person({"name": "Someone Else"}, db_path=elsewhere)
+    foreign_bundle = fhir.export_bundle("R4", person_id=stranger, db_path=elsewhere)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(foreign_bundle, clear_existing=True, db_path=database)
+
+    assert "does not contain" in str(excinfo.value)
+    assert [row["name"] for row in services.list_people(db_path=database)] == ["My Profile"]
+    assert len(services.list_items("medications", mine, db_path=database)) == 1
+
+
+def test_a_bundle_of_this_database_s_own_profiles_still_replaces_cleanly(tmp_path):
+    """The identity check must not block the legitimate full-database restore."""
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    first = services.create_person({"name": "Profile One"}, db_path=database)
+    services.create_item("medications", first, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    services.create_person({"name": "Profile Two"}, db_path=database)
+    whole_database = fhir.export_bundle("R4", db_path=database)
+
+    result = imports_exports.import_fhir_bundle(whole_database, clear_existing=True, db_path=database)
+
+    assert result["imported"]["people"] == 2
+    assert sorted(row["name"] for row in services.list_people(db_path=database)) == ["Profile One", "Profile Two"]

@@ -142,7 +142,26 @@ def _lossy_person_columns(people: Sequence[dict]) -> set[str]:
     return lossy
 
 
-def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: int | None = None) -> list[str]:
+def bundle_person_ids(resources: Sequence[dict]) -> set[str]:
+    """The local person ids a bundle's Patient resources claim to be.
+
+    ``_patient_resource`` stamps each Patient with ``identifier`` ``urn:phr:ids:person`` carrying the
+    row's own id, so a bundle exported from this database names exactly which profiles it can put
+    back. A bundle from elsewhere carries none of them, which is the correct answer: it cannot
+    restore local profiles either.
+    """
+
+    found = set()
+    for resource in resources:
+        if resource.get("resourceType") != "Patient":
+            continue
+        for identifier in resource.get("identifier", []):
+            if identifier.get("system") == "urn:phr:ids:person" and identifier.get("value"):
+                found.add(str(identifier["value"]))
+    return found
+
+
+def unrestorable_state(db_path: Path | str | None = None, bundle_people: set[str] | None = None) -> list[str]:
     """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
 
     Three levels, because each of the first two alone gave false assurance:
@@ -157,8 +176,9 @@ def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: 
       database deleted profile A outright -- every table, restorable or not. Being *representable*
       in FHIR is not the same as being *in this bundle*, and only the second one saves the data.
 
-    ``bundle_patient_count`` is how many ``Patient`` resources the incoming bundle carries. Passing
-    ``None`` skips that check, for callers asking only "what is at risk here".
+    ``bundle_people`` is the set of local person ids the incoming bundle's Patients claim (see
+    ``bundle_person_ids``). Passing ``None`` skips that check, for callers asking only "what is at
+    risk here" without a specific payload in hand.
 
     **Names what would be lost, never how much, and stays generic when any profile is protected.**
     This is database-global by necessity and the result is rendered verbatim in a Streamlit error;
@@ -180,7 +200,9 @@ def unrestorable_state(db_path: Path | str | None = None, bundle_patient_count: 
     for column in sorted(_lossy_person_columns(people)):
         losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
 
-    if bundle_patient_count is not None and len(people) > bundle_patient_count:
+    # Identity, not arithmetic. Counting Patients let one existing profile be replaced by one
+    # unrelated incoming Patient: the counts matched, the guard passed, and the profile was gone.
+    if bundle_people is not None and any(str(row["id"]) not in bundle_people for row in people):
         losses.append("profiles this bundle does not contain")
     return losses
 
@@ -196,8 +218,7 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
         # `import_all_tables` deletes in reverse table order precisely so children go before
         # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
-        patients = sum(1 for resource in resources if resource.get("resourceType") == "Patient")
-        blocked = unrestorable_state(db_path, bundle_patient_count=patients)
+        blocked = unrestorable_state(db_path, bundle_people=bundle_person_ids(resources))
         if blocked:
             # Categories are withheld entirely when any profile is password-protected: "a profile
             # here tracks conditions" is health data about someone who locked their record, and this
