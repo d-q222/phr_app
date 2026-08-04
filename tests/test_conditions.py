@@ -1024,3 +1024,94 @@ def test_a_condition_coded_only_by_number_is_skipped_not_named_after_its_code(db
     assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Diabetes"]
     assert [entry["id"] for entry in result["skipped"]] == ["c1"]
     assert "44054006" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
+def test_a_refused_condition_reports_the_refusal_not_the_missing_patient(db_path):
+    """Precedence when a resource fails two ways at once.
+
+    The verification-status refusal is intrinsic and terminal -- repairing the subject reference
+    would not make the condition importable -- so it is the more useful reason to show.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {"resource": {"resourceType": "Patient", "id": "p2", "name": [{"text": "Second Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/ghost"},
+                        "code": {"text": "Cancer"},
+                        "verificationStatus": {"coding": [{"code": "refuted"}]},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    reason = next(entry["reason"] for entry in result["skipped"] if entry["id"] == "c1")
+    assert "refuted" in reason
+    assert "No matching Patient" not in reason
+
+
+def test_uncertain_conditions_are_refused_along_with_the_negated_ones(db_path):
+    """`provisional` and `differential` withhold the claim; storing them unqualified asserts it.
+
+    There is no status column to carry "the source has not confirmed this", and the tracked list
+    feeds the Emergency Snapshot, so an unqualified row states more than the bundle does.
+    """
+    import imports_exports
+
+    result = imports_exports.import_fhir_bundle(
+        _bundle(
+            ("Provisional Thing", "provisional"),
+            ("Differential Thing", "differential"),
+            ("Unconfirmed Thing", "unconfirmed"),
+            ("Asthma", "confirmed"),
+        ),
+        db_path=db_path,
+    )
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Asthma"]
+    assert len(result["skipped"]) == 3
+
+
+def test_no_imported_record_is_ever_named_after_a_bare_terminology_code(db_path):
+    """Allergen, medication and health-entry titles reach the provider summary and the snapshot."""
+    import imports_exports
+
+    coded = {"coding": [{"system": "http://snomed.info/sct", "code": "227493005"}]}
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {"resource": {"resourceType": "AllergyIntolerance", "id": "a1", "patient": {"reference": "Patient/p1"}, "code": coded}},
+                {
+                    "resource": {
+                        "resourceType": "MedicationStatement",
+                        "id": "m1",
+                        "subject": {"reference": "Patient/p1"},
+                        "medicationCodeableConcept": coded,
+                        "status": "active",
+                    }
+                },
+            ],
+        }
+    )
+
+    imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["allergen"] for row in services.list_items("allergies", person_id, db_path=db_path)] == ["Unknown allergen"]
+    assert [row["name"] for row in services.list_items("medications", person_id, db_path=db_path)] == ["Unknown medication"]
+    assert "227493005" not in services.generate_emergency_snapshot(person_id, db_path=db_path)

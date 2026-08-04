@@ -96,10 +96,12 @@ def test_imported_lab_flags_match_their_own_reference_ranges(imported):
         # private function that wrote the flag moves both sides of the comparison together: flipping
         # `value > high` to `>=` in the generator and regenerating shipped Creatinine 1.3 against a
         # range of 0.7-1.3 stamped "High", and the whole suite stayed green.
-        if high is not None and value > high:
-            expected = "High"
-        elif low is not None and value < low:
+        # Low first, matching `_flag_for`. Order only matters for an inverted range (low > high),
+        # where both comparisons are true -- checking high first would disagree there.
+        if low is not None and value < low:
             expected = "Low"
+        elif high is not None and value > high:
+            expected = "High"
         else:
             expected = "Normal"
         if flag != expected:
@@ -117,6 +119,10 @@ def test_imported_lab_flags_match_their_own_reference_ranges(imported):
         (0.7, 0.7, 1.3, "Normal"),  # and exactly on the lower limit likewise
         (22.0, None, 30.0, "Normal"),
         (35.0, None, 30.0, "High"),
+        (35.0, 30.0, None, "Normal"),  # no upper bound: nothing is above it
+        (22.0, 30.0, None, "Low"),
+        (999.0, None, None, "Normal"),  # no range at all is not an abnormality
+        (5.0, 10.0, 1.0, "Low"),  # inverted range: low is checked first, so this is the real answer
     ],
 )
 def test_the_flag_rule_itself_is_stated_not_inferred(value, low, high, expected):

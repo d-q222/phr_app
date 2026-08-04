@@ -733,11 +733,24 @@ def _local_record_from_resource(resource: dict) -> tuple[str | None, dict]:
     return None, {}
 
 
-# FHIR verification statuses that say the condition is **not** real, as opposed to not yet
-# established. `refuted` means a clinician considered it and ruled it out; `entered-in-error` means
-# the source retracted the record. Both are negations, and importing a negation as a tracked
-# condition inverts it.
-NEGATED_CONDITION_STATUSES = frozenset({"refuted", "entered-in-error"})
+# FHIR verification statuses this app cannot honestly represent as a tracked condition.
+#
+# Two groups, refused for related reasons. `refuted` (a clinician considered it and ruled it out)
+# and `entered-in-error` (the source retracted the record) are **negations**: importing one inverts
+# the source's meaning into an assertion of illness. `unconfirmed`, `provisional` and `differential`
+# are **not yet established**: the source is explicitly withholding the claim, and with no status
+# column to carry that qualification, storing them in a list titled "Tracked Conditions" -- which
+# feeds the Emergency Snapshot -- states more than the bundle does.
+#
+# `confirmed`, and an absent status, are accepted. Absent is the common case: real bundles routinely
+# omit it, this repository's own demo bundle included.
+UNIMPORTABLE_CONDITION_STATUSES = {
+    "refuted": "the source states this condition was ruled out",
+    "entered-in-error": "the source has retracted this record",
+    "unconfirmed": "the source has not confirmed this condition",
+    "provisional": "the source records this condition as provisional only",
+    "differential": "the source lists this condition as a differential, not a finding",
+}
 
 
 def _refused_reason(resource: dict) -> str | None:
@@ -761,16 +774,20 @@ def _refused_reason(resource: dict) -> str | None:
         return None
     for coding in resource.get("verificationStatus", {}).get("coding", []):
         code = str(coding.get("code") or "").strip().lower()
-        if code in NEGATED_CONDITION_STATUSES:
-            return f"Condition verificationStatus is '{code}'; the source states this condition is not established."
+        if code in UNIMPORTABLE_CONDITION_STATUSES:
+            return f"Condition verificationStatus is '{code}': {UNIMPORTABLE_CONDITION_STATUSES[code]}."
     return None
 
 
-def _human_condition_name(value: dict | None) -> str | None:
-    """A condition name a person would recognise, or None -- never a bare code.
+def _human_label(value: dict | None) -> str | None:
+    """A label a person would recognise, or None -- never a bare terminology code.
 
-    `text` and `coding[].display` are written for humans. `coding[].code` is an identifier, and a
-    row named "44054006" asserts an illness nobody can read.
+    `text` and `coding[].display` are written for humans; `coding[].code` is an identifier.
+    `_text_from_codeable` falls back to the code, which is right for routing decisions and wrong
+    everywhere a value becomes a medical string a person reads: a tracked condition named
+    "44054006", an allergen named "227493005", a medication named "1049502". All three reach the
+    provider summary or the Emergency Snapshot. Returning None lets each caller fall back to its own
+    honest placeholder, or lets validation reject the row into the visible skip list.
     """
 
     if not value:
@@ -820,7 +837,7 @@ def _condition_from_resource(resource: dict) -> dict:
         # in the Emergency Snapshot, and matching no entry in CONDITION_RECORD_MAPPINGS. That is the
         # same failure the "no fallback name" rule below exists to prevent, arriving by another door.
         # A blank name lets `validate_condition` reject it into the visible skip list instead.
-        "condition_name": _human_condition_name(resource.get("code")),
+        "condition_name": _human_label(resource.get("code")),
         "source": source,
         "noted_date": _date_part(resource.get("recordedDate") or resource.get("onsetDateTime")),
         "notes": _notes_text(resource.get("note")),
@@ -832,7 +849,7 @@ def _allergy_from_resource(resource: dict) -> dict:
     manifestation = reaction.get("manifestation", [{}])[0] if reaction.get("manifestation") else {}
     reaction_text = reaction.get("description") or _text_from_codeable_reference(manifestation)
     return {
-        "allergen": _text_from_codeable(resource.get("code")) or "Unknown allergen",
+        "allergen": _human_label(resource.get("code")) or "Unknown allergen",
         "reaction": reaction_text,
         "severity": (reaction.get("severity") or "").title() or None,
         "notes": _notes_text(resource.get("note")),
@@ -844,14 +861,14 @@ def _medication_from_resource(resource: dict) -> dict:
     medication = resource.get("medicationCodeableConcept") or resource.get("medication", {}).get("concept")
     reason = None
     if resource.get("reasonCode"):
-        reason = _text_from_codeable(resource["reasonCode"][0])
+        reason = _human_label(resource["reasonCode"][0])
     elif resource.get("reason"):
         reason = _text_from_codeable_reference(resource["reason"][0])
     dosage = resource.get("dosage", [{}])[0].get("text") if resource.get("dosage") else None
     dose = _extension_value(resource, DOSE_EXTENSION_URL) or dosage
     frequency = _extension_value(resource, FREQUENCY_EXTENSION_URL)
     return {
-        "name": _text_from_codeable(medication) or "Unknown medication",
+        "name": _human_label(medication) or "Unknown medication",
         "dose": dose,
         "frequency": frequency,
         "start_date": effective.get("start"),
@@ -914,7 +931,7 @@ def _health_entry_from_observation(resource: dict) -> dict:
     body_system = next((item for item in categories if item and item != "Survey"), None)
     return {
         "entry_date": _date_part(resource.get("effectiveDateTime")),
-        "title": _text_from_codeable(resource.get("code")) or "FHIR observation",
+        "title": _human_label(resource.get("code")) or "FHIR observation",
         "body_system": body_system,
         "body_part": _text_from_codeable(resource.get("bodySite")),
         "severity": severity,
