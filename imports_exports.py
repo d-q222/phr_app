@@ -44,28 +44,31 @@ def import_labs_csv(file_obj, person_id: int, db_path: Path | str | None = None)
     frame = pd.read_csv(file_obj)
     imported = 0
     skipped = []
-    for index, row in frame.fillna("").iterrows():
-        data = {
-            "test_name": row.get("test_name", ""),
-            "result_value": row.get("result_value", ""),
-            "numeric_value": row.get("numeric_value", ""),
-            "unit": row.get("unit", ""),
-            "reference_low": row.get("reference_low", ""),
-            "reference_high": row.get("reference_high", ""),
-            # Absent, not "Unknown" -- that is a flag a source can actually record.
-            "flag": row.get("flag") or "",
-            "lab_date": row.get("lab_date", ""),
-            "notes": row.get("notes", ""),
-        }
-        errors = validate_lab(data)
-        if errors:
-            skipped.append({"row": int(index) + 2, "errors": errors})
-            continue
-        data["numeric_value"] = normalize_optional_number(data["numeric_value"])
-        data["reference_low"] = normalize_optional_number(data["reference_low"])
-        data["reference_high"] = normalize_optional_number(data["reference_high"])
-        services.create_item("lab_results", person_id, data, db_path=db_path)
-        imported += 1
+    with db.write_transaction(db_path) as connection:
+        for index, row in frame.fillna("").iterrows():
+            data = {
+                "test_name": row.get("test_name", ""),
+                "result_value": row.get("result_value", ""),
+                "numeric_value": row.get("numeric_value", ""),
+                "unit": row.get("unit", ""),
+                "reference_low": row.get("reference_low", ""),
+                "reference_high": row.get("reference_high", ""),
+                # Absent, not "Unknown" -- that is a flag a source can actually record.
+                "flag": row.get("flag") or "",
+                "lab_date": row.get("lab_date", ""),
+                "notes": row.get("notes", ""),
+            }
+            errors = validate_lab(data)
+            if errors:
+                skipped.append({"row": int(index) + 2, "errors": errors})
+                continue
+            data["numeric_value"] = normalize_optional_number(data["numeric_value"])
+            data["reference_low"] = normalize_optional_number(data["reference_low"])
+            data["reference_high"] = normalize_optional_number(data["reference_high"])
+            services.create_item(
+                "lab_results", person_id, data, db_path=db_path, connection=connection
+            )
+            imported += 1
     return {"imported": imported, "skipped": skipped}
 
 
@@ -74,21 +77,24 @@ def import_wearables_csv(file_obj, person_id: int, db_path: Path | str | None = 
     frame = pd.read_csv(file_obj)
     imported = 0
     skipped = []
-    for index, row in frame.fillna("").iterrows():
-        data = {
-            "metric_type": row.get("metric_type", ""),
-            "value": row.get("value", ""),
-            "unit": row.get("unit", ""),
-            "timestamp": row.get("timestamp", ""),
-            "source": row.get("source", ""),
-        }
-        errors = validate_wearable(data)
-        if errors:
-            skipped.append({"row": int(index) + 2, "errors": errors})
-            continue
-        data["value"] = float(data["value"])
-        services.create_item("wearable_records", person_id, data, db_path=db_path)
-        imported += 1
+    with db.write_transaction(db_path) as connection:
+        for index, row in frame.fillna("").iterrows():
+            data = {
+                "metric_type": row.get("metric_type", ""),
+                "value": row.get("value", ""),
+                "unit": row.get("unit", ""),
+                "timestamp": row.get("timestamp", ""),
+                "source": row.get("source", ""),
+            }
+            errors = validate_wearable(data)
+            if errors:
+                skipped.append({"row": int(index) + 2, "errors": errors})
+                continue
+            data["value"] = float(data["value"])
+            services.create_item(
+                "wearable_records", person_id, data, db_path=db_path, connection=connection
+            )
+            imported += 1
     return {"imported": imported, "skipped": skipped}
 
 
@@ -151,6 +157,7 @@ def import_json_backup(payload_text: str, clear_existing: bool = False, db_path:
     if not isinstance(tables, dict):
         raise ValueError("Backup JSON 'tables' must be an object.")
     tables = _validate_backup_tables(tables)
+    # Already atomic: import_all_tables owns one transaction for the restore and optional clear.
     db.import_all_tables(tables, clear_existing=clear_existing, db_path=db_path)
 
 

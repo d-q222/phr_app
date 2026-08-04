@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -1433,25 +1434,211 @@ def page_emergency_snapshot(person: dict, db_path: Path | str | None = None) -> 
     st.markdown(markdown)
 
 
+IMPORT_OUTCOME_KEY = "import_export:outcome"
+# Marks "this importer reported counts and every one was zero", which must not read like the JSON
+# restore's "this importer reports no counts". Filtered out before the counts table is rendered.
+NO_RECORDS_IMPORTED = "__none__"
+# Broad on purpose. This is the boundary that turns *any* failure while parsing a user-supplied file
+# into a message, and the importers reach code that raises well outside `ValueError`: a bundle that
+# is `[]` raises AttributeError, and a backup naming a missing parent row raises sqlite3
+# IntegrityError. Letting either escape replaces the failure dialog with a raw traceback, which is
+# the same "no feedback" bug this page was fixed for. `json.JSONDecodeError` subclasses ValueError.
+IMPORT_FAILURES = (ValueError, TypeError, AttributeError, LookupError, sqlite3.Error, db.DatabaseBusyError)
+
+
+def import_scope(db_path: Path | str, person_id: int | None = None) -> str:
+    """Scope token for import widget state: which database, and which profile it was chosen under.
+
+    Both parts matter. Without `person_id`, a CSV queued while one profile is selected stays queued
+    after switching, and importing then writes those rows into a *different* profile than the one
+    the file was picked for. Without the path, a file queued against the real database survives a
+    switch into demo mode. Mirrors `record_page_scope`, which scopes CRUD widget state the same way.
+    """
+    return f"{Path(db_path).resolve()}:{person_id}"
+
+
+def import_uploader_key(scope: str, name: str) -> str:
+    """File-uploader key carrying a reset counter, so a finished import can empty the widget.
+
+    Streamlit keeps an uploaded file in its uploader until the user removes it or the widget is
+    remounted under a different key. A plain `st.rerun()` therefore leaves the file sitting there
+    with the Import button still live -- and clicking it again imports the same file a second time,
+    which is a duplicate profile. Bumping the counter remounts the widget empty. Same trick
+    `generic_record_page` uses to clear its edit selector after a save.
+    """
+    return f"import_upload:{scope}:{name}:{st.session_state.get(f'import_reset:{scope}:{name}', 0)}"
+
+
+def clear_import_uploader(scope: str, name: str) -> None:
+    """Empty one uploader by remounting it. Called only after an import that actually succeeded."""
+    key = f"import_reset:{scope}:{name}"
+    st.session_state[key] = st.session_state.get(key, 0) + 1
+
+
+def import_result_counts(result: object) -> dict[str, int]:
+    """Normalize the three importer return shapes into one table-of-counts for display.
+
+    FHIR returns per-table counts, the CSV importers return a single integer, and the JSON restore
+    returns nothing at all. Zero-count tables are dropped so a bundle covering four tables does not
+    render nine rows, five of them zero.
+    """
+    if not isinstance(result, dict):
+        return {}
+    imported = result.get("imported")
+    if isinstance(imported, dict):
+        counts = {table: count for table, count in imported.items() if count}
+        # A sentinel rather than {}: an importer that reported counts and imported none of them is
+        # not the same as the JSON restore, which reports no counts at all. Collapsing both to {}
+        # made a clear-existing import of an empty bundle -- which wipes every table -- render the
+        # same bare green "Import complete." as a successful restore.
+        return counts or {NO_RECORDS_IMPORTED: 0}
+    if isinstance(imported, int):
+        # Same treatment as the dict branch: no zero-row table, but still distinguishable from an
+        # importer that reports nothing.
+        return {"records": imported} if imported else {NO_RECORDS_IMPORTED: 0}
+    return {}
+
+
+def stash_import_outcome(title: str, succeeded: bool, message: str, result: object = None) -> None:
+    """Park an import result where the *next* run can render it.
+
+    Anything written immediately before `st.rerun()` is discarded before the browser sees it, which
+    is why a successful import used to show nothing at all and invited a second click.
+    """
+    st.session_state[IMPORT_OUTCOME_KEY] = {
+        "title": title,
+        "succeeded": succeeded,
+        "message": message,
+        "counts": import_result_counts(result),
+        "skipped": list(result.get("skipped", [])) if isinstance(result, dict) else [],
+        # Which database this describes. An outcome that somehow outlives its run must not surface
+        # against a different one -- reporting a real-database import while the app sits in demo
+        # mode would attribute records to the wrong place.
+        "db_path": str(Path(active_db_path()).resolve()),
+    }
+
+
+def import_outcome_summary(outcome: dict) -> str:
+    """One sentence saying what actually landed -- including when that is nothing.
+
+    "Import complete." was returned whenever the total was zero, which dropped the skip count in
+    exactly the case the user most needs it: a CSV where every row failed validation reported a
+    bare success. The JSON restore legitimately reports no counts, so that case still reads as
+    plain completion; an importer that returned counts and imported none of them does not.
+    """
+    counts = outcome["counts"]
+    total = sum(counts.values())
+    skipped = len(outcome["skipped"])
+    if not total:
+        if skipped:
+            return f"No records imported; {skipped} entr(y/ies) skipped."
+        if NO_RECORDS_IMPORTED in counts:
+            return "No records were imported. If you cleared existing records, they were replaced by nothing."
+        return "Import complete."
+    text = f"Imported {total:,} record(s)."
+    return f"{text} {skipped} entr(y/ies) skipped." if skipped else f"{text} Nothing skipped."
+
+
+def render_import_outcome_body(outcome: dict) -> None:
+    """The shared body of both renderings of an import result."""
+    if outcome["succeeded"]:
+        st.success(f"{outcome['title']}: {import_outcome_summary(outcome)}")
+        rows = [
+            {"Table": format_label(table), "Records": count}
+            for table, count in outcome["counts"].items()
+            if table != NO_RECORDS_IMPORTED
+        ]
+        if rows:
+            dataframe(rows)
+        if outcome["skipped"]:
+            with st.expander(f"{len(outcome['skipped'])} skipped entr(y/ies)"):
+                dataframe([{"Detail": str(item)} for item in outcome["skipped"]])
+    else:
+        st.error(f"{outcome['title']}: {outcome['message']}")
+
+
+@st.dialog("Import result")
+def import_outcome_dialog(outcome: dict) -> None:
+    render_import_outcome_body(outcome)
+
+
+def render_import_outcome() -> None:
+    """Show the result of the last import exactly once.
+
+    Read-and-clear rather than clear-on-dismiss: an outcome left in session state reopens the dialog
+    on the next rerun, including when it is dismissed with the X instead of the button, which traps
+    the user in a modal that keeps coming back.
+
+    Deliberately rendered twice -- as the dialog and as an inline panel below it. The dialog forces
+    acknowledgement; the panel guarantees the information is on screen even if the dialog lifecycle
+    misbehaves, whose failure mode would be no feedback at all, which is the bug being fixed.
+
+    (An earlier version of this docstring justified the pair by claiming AppTest cannot see dialogs.
+    On the pinned Streamlit it can -- it walks the dialog body too, which is why the assertions in
+    `tests/test_basic.py` see each message twice. The redundancy is still wanted; the reason given
+    for it was wrong.)
+    """
+    outcome = st.session_state.pop(IMPORT_OUTCOME_KEY, None)
+    if not outcome:
+        return
+    if outcome.get("db_path") and outcome["db_path"] != str(Path(active_db_path()).resolve()):
+        return
+    import_outcome_dialog(outcome)
+    render_import_outcome_body(outcome)
+
+
+def perform_import(scope: str, name: str, title: str, importer: Callable[[], object], failure_note: str) -> None:
+    """Run one import behind a spinner, record the outcome, and rerun to render it.
+
+    `failure_note` differs per caller because the honest sentence differs: a failed FHIR import or
+    backup restore now leaves no data at all, while a failed CSV import leaves the profile it was
+    adding to exactly as it was. Both sentences are only true because imports are atomic -- before
+    that, either could have left records behind.
+    """
+    try:
+        with st.spinner(f"{title}…"):
+            result = importer()
+    except IMPORT_FAILURES as exc:
+        stash_import_outcome(title, False, f"{exc} {failure_note}")
+    else:
+        stash_import_outcome(title, True, "", result)
+        clear_import_uploader(scope, name)
+    st.rerun()
+
+
 def page_import_export(person: dict | None, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     db_path = db.DB_PATH if db_path is None else db_path
     page_header("Import/Export")
+    # The outcome is rendered by `main` before the page dispatch, so it appears wherever the import
+    # leaves the user -- including the lock gate, which this page cannot reach.
     if demo_mode:
         st.caption("Imports and restores in demo mode modify only the session demo database.")
     if person:
         st.subheader("CSV Imports")
-        labs_file = st.file_uploader("Import labs CSV", type=["csv"])
+        # "No rows were added" rather than the old "some rows may already be imported": the CSV
+        # importers now run in one transaction, so a failure adds nothing to the existing profile.
+        csv_failure_note = "No rows were added, so the file is still queued and you can retry."
+        # Scoped to the selected profile: these rows land on whoever is selected when Import is
+        # clicked, so a file queued under one profile must not survive a switch to another.
+        csv_scope = import_scope(db_path, int(person["id"]))
+        labs_file = st.file_uploader("Import labs CSV", type=["csv"], key=import_uploader_key(csv_scope, "labs_csv"))
         if labs_file and st.button(action_button_label("Import labs")):
-            try:
-                st.write(imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path))
-            except db.DatabaseBusyError as exc:
-                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
-        wearable_file = st.file_uploader("Import wearables CSV", type=["csv"])
+            perform_import(
+                csv_scope,
+                "labs_csv",
+                "Import labs CSV",
+                lambda: imports_exports.import_labs_csv(labs_file, int(person["id"]), db_path=db_path),
+                csv_failure_note,
+            )
+        wearable_file = st.file_uploader("Import wearables CSV", type=["csv"], key=import_uploader_key(csv_scope, "wearables_csv"))
         if wearable_file and st.button(action_button_label("Import wearables")):
-            try:
-                st.write(imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path))
-            except db.DatabaseBusyError as exc:
-                st.error(f"{exc} Some rows may already be imported; review the table before retrying.")
+            perform_import(
+                csv_scope,
+                "wearables_csv",
+                "Import wearables CSV",
+                lambda: imports_exports.import_wearables_csv(wearable_file, int(person["id"]), db_path=db_path),
+                csv_failure_note,
+            )
         st.download_button(action_button_label("Download sample labs CSV"), imports_exports.sample_labs_csv(), "sample_labs.csv", "text/csv")
         st.download_button(action_button_label("Download sample wearables CSV"), imports_exports.sample_wearables_csv(), "sample_wearables.csv", "text/csv")
 
@@ -1477,21 +1664,23 @@ def page_import_export(person: dict | None, db_path: Path | str | None = None, d
             file_name=f"phr_fhir_{fhir_version.lower()}_bundle.json",
             mime=fhir.FHIR_MIME_TYPE,
         )
-    fhir_file = st.file_uploader("Import FHIR Bundle", type=["json"], key="fhir_bundle_upload")
+    # Database-scoped only: these create or replace profiles rather than writing into the selected
+    # one, but a file queued against the real database must not survive a switch into demo mode.
+    file_scope = import_scope(db_path)
+    fhir_file = st.file_uploader("Import FHIR Bundle", type=["json"], key=import_uploader_key(file_scope, "fhir_bundle"))
     clear_existing_fhir = st.checkbox("Clear existing records before FHIR import", key="fhir_clear_existing")
     confirm_clear_fhir = st.checkbox("Confirm FHIR clear import", key="confirm_fhir_clear") if clear_existing_fhir else True
     if fhir_file and st.button(action_button_label("Import FHIR Bundle")):
         if not confirm_clear_fhir:
             st.error("Confirm FHIR clear import before continuing.")
         else:
-            try:
-                result = imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path)
-            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
-                st.error(f"FHIR import failed: {exc}")
-            else:
-                st.write(result)
-                st.success("FHIR import completed.")
-                st.rerun()
+            perform_import(
+                file_scope,
+                "fhir_bundle",
+                "Import FHIR Bundle",
+                lambda: imports_exports.import_fhir_bundle(fhir_file.read().decode("utf-8"), clear_existing=clear_existing_fhir, db_path=db_path),
+                "Nothing was imported, so the file is still queued and you can retry.",
+            )
 
     st.subheader("JSON Backup")
     backup_scope = "All profiles" if not person else "Selected profile"
@@ -1507,20 +1696,20 @@ def page_import_export(person: dict | None, db_path: Path | str | None = None, d
         backup_person_id = int(person["id"]) if person and backup_scope == "Selected profile" else None
         backup = imports_exports.export_json_backup(db_path=db_path, person_id=backup_person_id)
         st.download_button(action_button_label("Export JSON backup"), backup, "phr_backup.json", "application/json")
-    backup_file = st.file_uploader("Restore JSON backup", type=["json"])
+    backup_file = st.file_uploader("Restore JSON backup", type=["json"], key=import_uploader_key(file_scope, "json_backup"))
     clear_existing = st.checkbox("Clear existing records before restore")
     confirm_restore = st.checkbox("Confirm backup restore", key="confirm_backup_restore")
     if backup_file and st.button(action_button_label("Restore backup")):
         if not confirm_restore:
             st.error("Confirm backup restore before continuing.")
         else:
-            try:
-                imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path)
-            except (ValueError, json.JSONDecodeError, db.DatabaseBusyError) as exc:
-                st.error(f"Backup restore failed: {exc}")
-            else:
-                st.success("Backup restored.")
-                st.rerun()
+            perform_import(
+                file_scope,
+                "json_backup",
+                "Restore backup",
+                lambda: imports_exports.import_json_backup(backup_file.read().decode("utf-8"), clear_existing=clear_existing, db_path=db_path),
+                "Nothing was changed, so the file is still queued and you can retry.",
+            )
 
 
 def page_insights(person: dict, db_path: Path | str | None = None) -> None:
@@ -1621,6 +1810,14 @@ def main() -> None:  # noqa: C901, PLR0915
             st.session_state, condition_ui.profile_scope(person, current_db_path, locked)
         )
         page = page_navigation(nav_slot)
+
+    # Rendered here rather than inside `page_import_export`, because an import can move the app off
+    # that page before it draws: a clear-existing restore that brings in a password-protected
+    # profile deletes the previously selected one, so the next run resolves to the restored profile,
+    # hits the lock gate, and returns -- the page never renders and the user sees no confirmation
+    # that a whole-database restore just happened. The outcome describes the file the user supplied,
+    # not stored records, so it is safe ahead of the gate.
+    render_import_outcome()
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)

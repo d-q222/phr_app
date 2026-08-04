@@ -103,6 +103,25 @@ Steps,7500,steps,2026-04-28,Manual
 
 Use the Import/Export page to download a full JSON backup of all MVP tables. Restore can insert records into the current database or clear existing records first.
 
+## How Imports Behave
+
+Every import — labs CSV, wearables CSV, FHIR Bundle, and JSON backup restore — is **all or nothing**.
+Each runs inside a single database transaction, so a failure partway leaves the database exactly as
+it was. That matters most for a restore with "clear existing records" ticked: the delete and the
+reload succeed together or not at all, so a failure cannot destroy your existing data and leave the
+replacement incomplete.
+
+Consequences you will see on the page:
+
+- A **successful** import clears the file from the uploader, so the same file cannot be applied twice.
+  Importing the same bundle twice would otherwise create a duplicate profile.
+- A **failed** import keeps the file queued, so you can fix the cause and retry without browsing for
+  it again. Retrying is safe precisely because the failure added nothing.
+- Either way a dialog reports what happened — the reason on failure, and on success what actually
+  landed — and the same summary is shown on the page behind it. FHIR and CSV imports report record
+  counts; a JSON backup restore reports completion without counts, because it restores whole tables
+  rather than counting rows.
+
 ## FHIR Interoperability
 
 Use the Import/Export page to export or import HL7 FHIR JSON Bundles. The app supports R4 and R5 Bundle export/import while keeping the local SQLite schema unchanged.

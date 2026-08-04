@@ -274,47 +274,59 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
     payload = json.loads(payload_text)
     resources = _resources_from_payload(payload)
     if clear_existing:
+        # Outside the transaction: the guard reads the database, and a read taken after the DELETE
+        # inside an open write transaction is the second-connection problem write_transaction warns
+        # about. It raises before anything opens, so there is nothing to roll back.
         refuse_unrestorable_clear(resources, db_path)
-        db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
+    with db.write_transaction(db_path) as connection:
+        if clear_existing:
+            db.import_all_tables(
+                {table: [] for table in db.TABLES},
+                clear_existing=True,
+                db_path=db_path,
+                connection=connection,
+            )
 
-    imported = {table: 0 for table in db.TABLES}
-    skipped = []
-    patient_map: dict[str, int] = {}
+        imported = {table: 0 for table in db.TABLES}
+        skipped = []
+        patient_map: dict[str, int] = {}
 
-    for resource in resources:
-        if resource.get("resourceType") != "Patient":
-            continue
-        person_id = services.create_person(_person_from_patient(resource), db_path=db_path)
-        imported["people"] += 1
-        for key in _reference_keys(resource):
-            patient_map[key] = person_id
+        for resource in resources:
+            if resource.get("resourceType") != "Patient":
+                continue
+            person_id = services.create_person(
+                _person_from_patient(resource), db_path=db_path, connection=connection
+            )
+            imported["people"] += 1
+            for key in _reference_keys(resource):
+                patient_map[key] = person_id
 
-    imported_patient_ids = list(dict.fromkeys(patient_map.values()))
-    fallback_person_id = imported_patient_ids[0] if len(imported_patient_ids) == 1 else None
-    for resource in resources:
-        resource_type = resource.get("resourceType")
-        if resource_type == "Patient":
-            continue
-        refusal = _refused_reason(resource)
-        if refusal:
-            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": refusal})
-            continue
-        person_id = _resolve_patient_id(resource, patient_map, fallback_person_id)
-        if person_id is None:
-            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "No matching Patient resource."})
-            continue
-        table, data = _local_record_from_resource(resource)
-        if not table:
-            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "Unsupported FHIR resource."})
-            continue
-        errors = FHIR_VALIDATORS[table](data)
-        if errors:
-            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "; ".join(errors)})
-            continue
-        services.create_item(table, person_id, data, db_path=db_path)
-        imported[table] += 1
+        imported_patient_ids = list(dict.fromkeys(patient_map.values()))
+        fallback_person_id = imported_patient_ids[0] if len(imported_patient_ids) == 1 else None
+        for resource in resources:
+            resource_type = resource.get("resourceType")
+            if resource_type == "Patient":
+                continue
+            refusal = _refused_reason(resource)
+            if refusal:
+                skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": refusal})
+                continue
+            person_id = _resolve_patient_id(resource, patient_map, fallback_person_id)
+            if person_id is None:
+                skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "No matching Patient resource."})
+                continue
+            table, data = _local_record_from_resource(resource)
+            if not table:
+                skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "Unsupported FHIR resource."})
+                continue
+            errors = FHIR_VALIDATORS[table](data)
+            if errors:
+                skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": "; ".join(errors)})
+                continue
+            services.create_item(table, person_id, data, db_path=db_path, connection=connection)
+            imported[table] += 1
 
-    return {"imported": imported, "skipped": skipped}
+        return {"imported": imported, "skipped": skipped}
 
 
 def _entry(resource: dict) -> dict:
