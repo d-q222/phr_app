@@ -1,0 +1,10 @@
+# Streamlit's default primaryColor is its own brand red (#FF4B4B). APP_CSS in app.py hand-overrides
+# buttons, metrics and nav to the app's teal, but it does not reach widgets whose accent Streamlit
+# draws internally -- notably the selected st.pills option and the active st.tabs indicator, both of
+# which are prominent on the Condition Details page. Setting primaryColor here is what keeps those
+# consistent with the rest of the UI.
+#
+# Only primaryColor is set on purpose. APP_CSS already forces backgrounds and text colours
+# explicitly, so declaring backgroundColor/textColor here would fight it for no gain.
+[theme]
+primaryColor = "#16705c"  # --phr-accent in APP_CSS

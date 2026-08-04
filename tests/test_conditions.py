@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+import tempfile
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 import app
+import condition_charts
 import condition_config
 import condition_ui
 import db
@@ -36,48 +39,31 @@ def _unlocked_streamlit(monkeypatch):
     return fake_streamlit
 
 
-# --- hidden_nav_pages: nav visibility is a profile-isolation surface ------------------------------
+# --- navigation no longer depends on profile data at all -----------------------------------------
 
 
-def test_condition_focus_hidden_when_no_profile_selected(db_path, monkeypatch):
-    _unlocked_streamlit(monkeypatch)
+def test_navigation_never_queries_profile_health_data(db_path, monkeypatch):
+    """Nav visibility used to depend on whether a profile had conditions, which made it an
+    observable side channel: the sidebar renders before main()'s lock gate, so a locked profile's
+    nav could reveal that it had conditions.
 
-    assert app.hidden_nav_pages(None, db_path) == frozenset({"Condition Focus"})
-
-
-def test_condition_focus_hidden_for_profile_without_conditions(db_path, monkeypatch):
-    _unlocked_streamlit(monkeypatch)
-    person_id = _person(db_path)
-
-    assert app.hidden_nav_pages({"id": person_id}, db_path) == frozenset({"Condition Focus"})
-
-
-def test_condition_focus_visible_for_profile_with_a_condition(db_path, monkeypatch):
-    _unlocked_streamlit(monkeypatch)
-    person_id = _person(db_path)
-    _add("conditions", person_id, {"condition_name": "Diabetes"}, db_path)
-
-    assert app.hidden_nav_pages({"id": person_id}, db_path) == frozenset()
-
-
-def test_locked_profile_is_never_queried_for_conditions(db_path, monkeypatch):
-    """Whether a locked profile has conditions is itself health data.
-
-    Nav visibility is observable, so the locked branch must return *before* any condition query
-    runs -- not merely ignore the result. Reaching the query fails this test.
+    That surface is gone with the Condition Details page. This asserts the stronger property the
+    removal bought -- rendering navigation issues no condition query for anyone, locked or not --
+    rather than the old, weaker "the locked branch returns early".
     """
     _unlocked_streamlit(monkeypatch)
 
     def explode(*args, **kwargs):
-        raise AssertionError("tracked_conditions must not be reached for a locked profile")
+        raise AssertionError("navigation must not query profile health data")
 
     monkeypatch.setattr(services, "tracked_conditions", explode)
-    locked = {"id": 1, "profile_password_enabled": 1}
+    fake = FakeNavStreamlit()
+    monkeypatch.setattr(app, "st", fake)
 
-    assert app.hidden_nav_pages(locked, db_path) == frozenset({"Condition Focus"})
+    assert app.page_navigation() == "Dashboard"
 
 
-# --- page_navigation: hidden pages must not linger in session state ------------------------------
+# --- page_navigation: a removed page must not linger in session state ----------------------------
 
 
 class FakeNavStreamlit:
@@ -124,40 +110,38 @@ class FakeNavStreamlit:
         self.rerun_called = True
 
 
-def test_page_navigation_falls_back_and_persists_when_current_page_is_hidden(monkeypatch):
+def test_page_navigation_falls_back_from_a_page_that_no_longer_exists(monkeypatch):
+    """A session carrying `nav_page = "Condition Details"` from an older build must not blank out.
+
+    That name matches no dispatch branch now, so without this fallback the whole content area
+    would render empty with no button marked current and no way back.
+    """
     fake = FakeNavStreamlit()
-    fake.session_state["nav_page"] = "Condition Focus"
+    fake.session_state["nav_page"] = "Condition Details"
     monkeypatch.setattr(app, "st", fake)
 
-    page = app.page_navigation(hidden_pages=frozenset({"Condition Focus"}))
+    page = app.page_navigation()
 
     assert page == "Dashboard"
     # Not persisting the fallback would leave no nav button marked current.
     assert fake.session_state["nav_page"] == "Dashboard"
-    assert "nav_page_Condition Focus" not in fake.rendered_buttons
+    assert "nav_page_Condition Details" not in fake.rendered_buttons
     assert "nav_page_Dashboard" in fake.rendered_buttons
 
 
-def test_page_navigation_renders_hidden_free_sections_normally(monkeypatch):
+def test_page_navigation_renders_every_page_in_every_section(monkeypatch):
+    """No page is conditional any more, so every entry in NAV_SECTIONS gets a button."""
     fake = FakeNavStreamlit()
     fake.session_state["nav_page"] = "Dashboard"
     monkeypatch.setattr(app, "st", fake)
 
-    page = app.page_navigation(hidden_pages=frozenset({"Condition Focus"}))
+    page = app.page_navigation()
 
     assert page == "Dashboard"
-    assert "nav_page_Chronic Conditions" in fake.rendered_buttons
-    assert "nav_page_Body Map" in fake.rendered_buttons
-    assert "nav_page_Condition Focus" not in fake.rendered_buttons
-
-
-def test_page_navigation_shows_condition_focus_when_not_hidden(monkeypatch):
-    fake = FakeNavStreamlit()
-    monkeypatch.setattr(app, "st", fake)
-
-    app.page_navigation(hidden_pages=frozenset())
-
-    assert "nav_page_Condition Focus" in fake.rendered_buttons
+    for section_pages in app.NAV_SECTIONS.values():
+        for name in section_pages:
+            assert f"nav_page_{name}" in fake.rendered_buttons
+    assert "nav_page_Condition Details" not in fake.rendered_buttons
 
 
 def test_page_navigation_defaults_to_the_sidebar_container(monkeypatch):
@@ -248,133 +232,259 @@ def test_records_for_condition_omits_tables_with_no_matches(db_path):
 # --- condition_ui state hygiene: session state must not survive a profile switch -----------------
 
 
+def _scope(db_path="real.db", person_id=1, created_at="2026-01-01T09:00:00", locked=False):
+    person = None if person_id is None else {"id": person_id, "created_at": created_at}
+    return condition_ui.profile_scope(person, db_path, locked)
+
+
 def test_profile_change_clears_stale_condition_state():
     state = {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
-        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
-        condition_ui.TREND_STATE_KEY: "Hemoglobin A1c",
+        condition_ui.PROFILE_STATE_KEY: _scope(person_id=1),
+        condition_ui.SELECTED_CONDITION_KEY: "Hypertension",
+        f"{condition_ui.SERIES_KEY_PREFIX}:Hypertension": ["Blood Pressure Systolic"],
+        f"{condition_ui.RANGE_KEY_PREFIX}:Hypertension": "Blood Pressure Systolic",
         "unrelated": True,
     }
+    moved = _scope(person_id=2, created_at="2026-02-02T09:00:00")
 
-    condition_ui.sync_profile_state(state, 2, "real.db", ["Asthma"])
+    condition_ui.sync_profile_scope(state, moved)
 
-    assert state == {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 2),
-        "unrelated": True,
-    }
+    assert state == {condition_ui.PROFILE_STATE_KEY: moved, "unrelated": True}
 
 
 def test_database_switch_clears_stale_condition_state():
     """Real -> demo is a database switch at the same profile ID and must clear too."""
     state = {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
-        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
+        condition_ui.PROFILE_STATE_KEY: _scope(db_path="real.db"),
+        condition_ui.SELECTED_CONDITION_KEY: "Hypertension",
     }
 
-    condition_ui.sync_profile_state(state, 1, "demo.db", ["Diabetes"])
+    condition_ui.sync_profile_scope(state, _scope(db_path="demo.db"))
 
     assert condition_ui.SELECTED_CONDITION_KEY not in state
-    assert state[condition_ui.PROFILE_STATE_KEY] == (str(Path("demo.db").resolve()), 1)
+
+
+def test_locking_the_current_profile_clears_condition_state():
+    """Regression: locking changes neither path nor id, so lock state must be part of the scope.
+
+    Without it, a selected condition and its chart selections stay reachable in session state for a
+    profile that has just become locked.
+    """
+    series_key = f"{condition_ui.SERIES_KEY_PREFIX}:Hypertension"
+    state = {
+        condition_ui.PROFILE_STATE_KEY: _scope(locked=False),
+        condition_ui.SELECTED_CONDITION_KEY: "Hypertension",
+        series_key: ["Blood Pressure Systolic"],
+    }
+
+    condition_ui.sync_profile_scope(state, _scope(locked=True))
+
+    assert condition_ui.SELECTED_CONDITION_KEY not in state
+    assert series_key not in state
+
+
+def test_restoring_a_different_person_at_the_same_id_clears_condition_state():
+    """Regression: a clear-and-restore can put a different human at profile id 1.
+
+    Path and id are identical afterwards, so the profile's created_at is what distinguishes them.
+    """
+    state = {
+        condition_ui.PROFILE_STATE_KEY: _scope(person_id=1, created_at="2026-01-01T09:00:00"),
+        condition_ui.SELECTED_CONDITION_KEY: "Hypertension",
+    }
+
+    condition_ui.sync_profile_scope(state, _scope(person_id=1, created_at="2025-05-05T09:00:00"))
+
+    assert condition_ui.SELECTED_CONDITION_KEY not in state
 
 
 def test_selection_not_belonging_to_the_profile_is_dropped():
     """Same profile and database, but the condition was deleted meanwhile."""
-    scope = (str(Path("real.db").resolve()), 1)
-    state = {
-        condition_ui.PROFILE_STATE_KEY: scope,
-        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
-    }
+    state = {condition_ui.SELECTED_CONDITION_KEY: "Hypertension"}
 
-    condition_ui.sync_profile_state(state, 1, "real.db", ["Asthma"])
+    condition_ui.sync_valid_conditions(state, ["Prediabetes"])
 
     assert condition_ui.SELECTED_CONDITION_KEY not in state
+
+
+def test_valid_selection_is_kept():
+    state = {condition_ui.SELECTED_CONDITION_KEY: "Hypertension"}
+
+    condition_ui.sync_valid_conditions(state, ["Hypertension", "Prediabetes"])
+
+    assert state[condition_ui.SELECTED_CONDITION_KEY] == "Hypertension"
 
 
 # --- end-to-end smoke over the real app, guarding the B5 sidebar change ---------------------------
 
 
-def test_condition_focus_page_runs_with_streamlit_apptest(tmp_path, monkeypatch):
-    app_db_path = tmp_path / "condition-app.db"
-    monkeypatch.setattr(db, "DB_PATH", app_db_path)
-    db.init_db(app_db_path)
-    person_id = services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
-    services.create_item(
-        "conditions", person_id, {"condition_name": "Diabetes", "source": "Endocrinologist"}, db_path=app_db_path
-    )
-    _add("lab_results", person_id, {"test_name": "Hemoglobin A1c", "lab_date": "2026-01-01"}, app_db_path)
-    _add("lab_results", person_id, {"test_name": "Troponin I", "lab_date": "2026-01-02"}, app_db_path)
-    test_app = AppTest.from_file(str(Path(app.__file__)))
-    test_app.session_state["nav_page"] = "Condition Focus"
+def test_a_removed_page_left_in_session_state_falls_back_to_the_dashboard(tmp_path, monkeypatch):
+    """End-to-end version of the stale-nav guard, through the real app rather than a test double.
 
-    test_app.run()
-
-    assert not test_app.exception
-    # The page must be reachable (not hidden and not bounced back to Dashboard) and must open on
-    # content rather than an empty prompt -- this is the regression guard on the B5 sidebar change.
-    assert test_app.session_state["nav_page"] == "Condition Focus"
-    assert [header.value for header in test_app.header] == ["Diabetes"]
-    assert [sub.value for sub in test_app.subheader] == ["Lab results", "Wearable records"]
-
-
-def test_condition_focus_is_unreachable_for_a_profile_with_no_conditions(tmp_path, monkeypatch):
-    """The nav entry is hidden, so a stale stored page must bounce back to the Dashboard."""
-    app_db_path = tmp_path / "condition-app-empty.db"
+    Condition Details was removed; a browser session that still has it stored must land on the
+    Dashboard with content, not on a blank page.
+    """
+    app_db_path = tmp_path / "stale-nav.db"
     monkeypatch.setattr(db, "DB_PATH", app_db_path)
     db.init_db(app_db_path)
     services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
     test_app = AppTest.from_file(str(Path(app.__file__)))
-    test_app.session_state["nav_page"] = "Condition Focus"
+    test_app.session_state["nav_page"] = "Condition Details"
 
-    test_app.run()
+    test_app.run(timeout=60)
 
     assert not test_app.exception
     assert test_app.session_state["nav_page"] == "Dashboard"
+    assert any("<h1>Dashboard</h1>" in block.value for block in test_app.markdown)
 
 
-# --- review follow-ups: state hygiene at the profile-selection site ------------------------------
+# --- the Tracked Conditions detail page ----------------------------------------------------------
+
+DETAIL_SECTIONS = [
+    "Measurement trends",
+    "First and most recent",
+    "Source-flag history",
+    "Monitoring cadence",
+    "Variability",
+    "Recorded symptom severity",
+    "All tracked conditions",
+    "Linked records",
+]
 
 
-def test_scope_sync_needs_no_condition_query_and_clears_across_profiles():
-    """Called on every rerun, including for locked/unselected profiles, so it must not query."""
-    state = {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
-        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
-        condition_ui.TREND_STATE_KEY: "Hemoglobin A1c",
-        "unrelated": True,
-    }
+def test_tracked_conditions_page_degrades_for_a_profile_with_thin_data(tmp_path, monkeypatch):
+    """The app opens on the seed profile, so this page renders before the demo import ever happens.
 
-    condition_ui.sync_profile_scope(state, 2, "real.db")
+    One condition, one lab result, one point. Every section must render its empty state rather than
+    raising or leaving a gap.
+    """
+    app_db_path = tmp_path / "thin.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    person_id = services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    _add("conditions", person_id, {"condition_name": "Prediabetes", "source": "Primary Care"}, app_db_path)
+    _add("lab_results", person_id, {"test_name": "Hemoglobin A1c", "numeric_value": 5.8, "lab_date": "2026-01-01", "flag": "High"}, app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
 
-    assert state == {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 2),
-        "unrelated": True,
-    }
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    assert [header.value for header in test_app.header] == ["Prediabetes"]
+    subheaders = [sub.value for sub in test_app.subheader]
+    for section in DETAIL_SECTIONS:
+        assert section in subheaders
+    # A single-point series still charts; with one reading there is no spread, so the range band
+    # shows its empty state rather than a band collapsed onto its own mean.
+    assert len(test_app.get("vega_lite_chart")) >= 1
+    assert any("no spread to show" in message.value for message in test_app.info)
+
+
+def test_tracked_conditions_page_is_reachable_and_prompts_when_no_conditions_exist(tmp_path, monkeypatch):
+    """Unlike Condition Details this page is never hidden -- it is where a condition gets created."""
+    app_db_path = tmp_path / "empty.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    assert test_app.session_state["nav_page"] == "Tracked Conditions"
+    assert any("Add one below" in message.value for message in test_app.info)
+
+
+def test_tracked_conditions_is_always_in_the_navigation(monkeypatch):
+    """Hiding it would leave a profile with no conditions no way to record its first one."""
+    fake = FakeNavStreamlit()
+    monkeypatch.setattr(app, "st", fake)
+
+    app.page_navigation()
+
+    assert "nav_page_Tracked Conditions" in fake.rendered_buttons
+
+
+def test_dashboard_offers_a_button_through_to_the_detail_page(tmp_path, monkeypatch):
+    """The dashboard carries the accessible slice; the detail view is one click away from it."""
+    app_db_path = tmp_path / "jump.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    person_id = services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    _add("conditions", person_id, {"condition_name": "Prediabetes"}, app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Dashboard"
+    test_app.run(timeout=60)
+
+    test_app.button(key="dashboard_condition_detail").click().run(timeout=60)
+
+    assert not test_app.exception
+    assert test_app.session_state["nav_page"] == "Tracked Conditions"
+
+
+def test_the_detail_button_is_offered_even_with_no_conditions_recorded(tmp_path, monkeypatch):
+    """That profile needs the route most: the page it leads to is where a first condition is added."""
+    app_db_path = tmp_path / "jump-empty.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Dashboard"
+    test_app.run(timeout=60)
+
+    test_app.button(key="dashboard_condition_detail").click().run(timeout=60)
+
+    assert not test_app.exception
+    assert test_app.session_state["nav_page"] == "Tracked Conditions"
+    assert any("Add one below" in message.value for message in test_app.info)
+
+
+def test_generic_record_page_still_renders_its_own_header_by_default(tmp_path, monkeypatch):
+    """The new parameter must not change any of the eight pages that do not pass it."""
+    app_db_path = tmp_path / "labs.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Labs"
+
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    assert any("<h1>Labs</h1>" in block.value for block in test_app.markdown)
 
 
 def test_scope_sync_handles_no_selected_profile():
     state = {
-        condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1),
-        condition_ui.SELECTED_CONDITION_KEY: "Diabetes",
+        condition_ui.PROFILE_STATE_KEY: _scope(person_id=1),
+        condition_ui.SELECTED_CONDITION_KEY: "Hypertension",
     }
 
-    condition_ui.sync_profile_scope(state, None, "real.db")
+    condition_ui.sync_profile_scope(state, _scope(person_id=None))
 
     assert condition_ui.SELECTED_CONDITION_KEY not in state
 
 
 def test_scope_sync_is_idempotent_within_one_profile():
     """It runs on every rerun, so it must not wipe a live selection."""
-    state = {condition_ui.PROFILE_STATE_KEY: (str(Path("real.db").resolve()), 1)}
-    condition_ui.sync_profile_scope(state, 1, "real.db")
-    state[condition_ui.SELECTED_CONDITION_KEY] = "Diabetes"
+    state = {}
+    condition_ui.sync_profile_scope(state, _scope())
+    state[condition_ui.SELECTED_CONDITION_KEY] = "Hypertension"
 
-    condition_ui.sync_profile_scope(state, 1, "real.db")
+    condition_ui.sync_profile_scope(state, _scope())
 
-    assert state[condition_ui.SELECTED_CONDITION_KEY] == "Diabetes"
+    assert state[condition_ui.SELECTED_CONDITION_KEY] == "Hypertension"
+
+
+def test_profile_scope_needs_no_query_and_tolerates_a_bare_profile_row():
+    """Built for locked and unselected profiles, where reading conditions would itself leak."""
+    assert condition_ui.profile_scope(None, "real.db", False)[1] is None
+    assert condition_ui.profile_scope({"id": 3}, "real.db", True)[1] == 3
 
 
 def test_switching_profiles_on_an_unrelated_page_clears_condition_state(tmp_path, monkeypatch):
-    """The leak path: the Dashboard and Condition Focus never render, so only main() can clear."""
+    """The leak path: the Dashboard and Condition Details never render, so only main() can clear."""
     app_db_path = tmp_path / "switch.db"
     monkeypatch.setattr(db, "DB_PATH", app_db_path)
     db.init_db(app_db_path)
@@ -416,17 +526,166 @@ def test_a_condition_saved_without_a_date_keeps_a_blank_date(db_path):
     assert not row["noted_date"]
 
 
+def _user_facing_condition_text():
+    """Every string that can reach the screen from the condition feature.
+
+    `condition_charts` is included because axis titles, legend labels and tooltip titles are user
+    facing too -- a chart is not exempt from the copy rules just because the words are small.
+    """
+    return " ".join(
+        [
+            app.PAGE_DESCRIPTIONS["Tracked Conditions"],
+            Path(condition_ui.__file__).read_text(encoding="utf-8"),
+            Path(condition_charts.__file__).read_text(encoding="utf-8"),
+        ]
+    ).lower()
+
+
 def test_user_facing_condition_copy_makes_no_currency_or_attachment_claim():
     """Without a status column the app cannot claim a condition is ongoing, and the mapping is
     type-level, so no copy may say a specific record belongs to a condition."""
-    text = " ".join(
-        [
-            app.PAGE_DESCRIPTIONS["Chronic Conditions"],
-            app.PAGE_DESCRIPTIONS["Condition Focus"],
-            Path(condition_ui.__file__).read_text(encoding="utf-8"),
-        ]
-    ).lower()
+    text = _user_facing_condition_text()
 
     assert "ongoing" not in text
     assert "matching this condition" not in text
     assert "relevant to" not in text
+
+
+def test_user_facing_condition_copy_passes_no_judgement_on_any_value():
+    """Describing a trend is allowed; grading it is not.
+
+    "decreased" is arithmetic over two stored numbers. "improved" is an opinion about whether that
+    was good, which needs clinical context the app does not have. This guards the line between them
+    now that charts make it much easier to cross.
+    """
+    text = _user_facing_condition_text()
+
+    for word in ("improved", "improving", "worsened", "worsening", "well controlled", "well-managed", "healthy", "concerning"):
+        assert word not in text, f"user-facing condition copy passes judgement with {word!r}"
+
+
+# --- the demo data must not assert anything its own records contradict ---------------------------
+
+
+RECORD_NAME_COLUMNS = {
+    "lab_results": "test_name",
+    "medications": "name",
+    "wearable_records": "metric_type",
+    "health_entries": "title",
+}
+
+
+def _sample_tables():
+    return json.loads(Path(app.SAMPLE_DATA_PATH).read_text(encoding="utf-8"))["tables"]
+
+
+def _record_names_from_backup(tables):
+    """Record names present in the JSON-backup-shaped seed file, keyed by table."""
+    return {
+        table: {row.get(column) for row in tables.get(table, [])}
+        for table, column in RECORD_NAME_COLUMNS.items()
+    }
+
+
+def test_every_seeded_condition_has_a_mapping():
+    """A seeded condition with no mapping silently shows 'no records mapped' to the user."""
+    for row in _sample_tables().get("conditions", []):
+        name = row["condition_name"]
+        assert condition_config.get_condition_record_mapping(name), f"{name} has no mapping"
+
+
+def test_every_mapped_record_name_exists_in_the_sample_data():
+    """Guards the cross-agent contract: a renamed record silently stops appearing.
+
+    This is the cheapest possible tripwire for a later pass that rewrites the demo data.
+    """
+    from_backup = _record_names_from_backup(_sample_tables())
+    missing = []
+    for condition, mapping in condition_config.CONDITION_RECORD_MAPPINGS.items():
+        for table, names in mapping.items():
+            missing += [f"{condition}/{table}/{n}" for n in names if n not in from_backup[table]]
+    assert missing == [], f"mapped names absent from sample data: {missing}"
+
+def test_every_primary_metric_is_in_its_conditions_mapping():
+    """A sparkline must draw a series the condition's own record list also shows.
+
+    Without this, `CONDITION_PRIMARY_METRIC` could name a record the condition does not map, and the
+    at-a-glance chart would show a line that appears nowhere else on the page.
+    """
+    for condition, (table, record_name) in condition_config.CONDITION_PRIMARY_METRIC.items():
+        mapping = condition_config.get_condition_record_mapping(condition)
+        assert record_name in mapping.get(table, ()), f"{condition} primary metric {record_name} is unmapped"
+
+
+def test_every_mapped_condition_has_a_primary_metric():
+    """Otherwise the all-conditions sparkline panel is silently missing a facet."""
+    for condition in condition_config.CONDITION_RECORD_MAPPINGS:
+        assert condition_config.get_condition_primary_metric(condition), f"{condition} has no primary metric"
+
+
+def test_seeded_conditions_are_supported_by_the_profiles_own_records():
+    """Regression on the fabricated-diagnosis defect.
+
+    Every seeded condition must actually surface records for the profile it is attached to. A label
+    with nothing behind it is exactly the failure this replaced.
+    """
+    demo_path = Path(tempfile.mkdtemp()) / "demo.db"
+    app.create_demo_database(demo_path)
+    for person in services.list_people(db_path=demo_path):
+        person_id = int(person["id"])
+        for row in services.tracked_conditions(person_id, db_path=demo_path):
+            found = get_records_for_condition(person_id, row["condition_name"], db_path=demo_path)
+            assert found, f"{person['name']} / {row['condition_name']} surfaces nothing"
+
+
+def test_sample_data_makes_no_diabetes_claim():
+    """Alex's A1c results are 5.8/5.7/5.5/5.4, the last two source-flagged Normal.
+
+    Labelling her diabetic asserts a diagnosis her own records contradict. Prediabetes is what the
+    source-flagged values support.
+    """
+    names = {row["condition_name"] for row in _sample_tables().get("conditions", [])}
+
+    assert "Diabetes" not in names
+
+
+# --- conditions reach the two Markdown documents, profile-scoped ---------------------------------
+
+
+def test_provider_summary_includes_only_this_profiles_conditions(db_path):
+    selected = _person(db_path, "Selected")
+    other = _person(db_path, "Other")
+    _add("conditions", selected, {"condition_name": "Hypertension", "source": "Primary Care"}, db_path)
+    _add("conditions", other, {"condition_name": "Prediabetes", "source": "Cardiologist"}, db_path)
+
+    summary = services.generate_provider_summary(selected, db_path=db_path)
+
+    assert "## Tracked Conditions" in summary
+    assert "Hypertension (reported by Primary Care)" in summary
+    assert "Prediabetes" not in summary
+
+
+def test_emergency_snapshot_includes_only_this_profiles_conditions(db_path):
+    selected = _person(db_path, "Selected")
+    other = _person(db_path, "Other")
+    _add("conditions", selected, {"condition_name": "Hypertension", "source": "Primary Care"}, db_path)
+    _add("conditions", other, {"condition_name": "Prediabetes"}, db_path)
+
+    snapshot = services.generate_emergency_snapshot(selected, db_path=db_path)
+
+    assert "## Tracked Conditions" in snapshot
+    assert "Hypertension" in snapshot
+    assert "Prediabetes" not in snapshot
+    # Conditions belong above medications in an emergency document.
+    assert snapshot.index("## Tracked Conditions") < snapshot.index("## Active Medications")
+
+
+def test_summaries_report_no_conditions_without_implying_absence_of_illness(db_path):
+    person_id = _person(db_path)
+
+    summary = services.generate_provider_summary(person_id, db_path=db_path)
+    snapshot = services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+    for document in (summary, snapshot):
+        section = document.split("## Tracked Conditions")[1].splitlines()[1]
+        assert section == "None recorded."

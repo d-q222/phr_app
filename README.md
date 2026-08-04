@@ -17,10 +17,11 @@ This application is for personal organization and education only. It is not a me
 - Multiple family profiles.
 - Optional lightweight per-profile passwords.
 - Local SQLite storage.
-- CRUD pages for allergies, medications, labs, health timeline entries, appointments, reminders, wearable records, and chronic conditions.
-- Chronic conditions are tagged by you and attributed to whoever reported them (for example "Diabetes — Endocrinologist"). They are not detected automatically from incoming records.
-- Condition Focus page collecting the records commonly tracked alongside a condition you have noted. The condition-to-record links come from a hand-written mapping table, not from clinical inference, and the page is hidden for profiles with no conditions.
-- Profile-specific dashboard, including a tracked-conditions list.
+- CRUD pages for allergies, medications, labs, health timeline entries, appointments, reminders, wearable records, and tracked conditions.
+- Tracked conditions are entered by you and attributed to whoever reported them (for example "Hypertension — Primary Care"). They are not detected automatically from incoming records, and no status is stored, so the app never claims a condition is current.
+- Tracked Conditions page with a chart-driven view of one condition at a time: measurement trends with points coloured and shaped by the flag the source recorded, a medication timeline on the same time axis, first-and-most-recent values, source-flag history, monitoring cadence, variability, recorded symptom severity, and a sparkline per tracked condition. Charts describe what the records show; none of them grades a value or claims a medication caused a change. The record list and add/edit form sit beneath the charts, and the page is never hidden — it is where a condition gets created.
+- Profile-specific dashboard, including a tracked-conditions list with an inline record preview and a button through to the full detail page.
+- Provider Summary and Emergency Snapshot both include tracked conditions. FHIR export does not: a FHIR Condition expects a clinical status this app deliberately does not store.
 - Interactive profile-specific body map with synchronized organ highlighting and record filtering.
 - Filters for dates, body system, body part, medication status, lab flag, reminder status, and keyword search where useful.
 - CSV import for labs and wearable records.

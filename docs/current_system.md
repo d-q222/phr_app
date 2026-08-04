@@ -17,24 +17,29 @@ Companion documents: `docs/domain_invariants.md` (what must always hold),
 A local-first family personal health record. One user runs it on their own machine; the SQLite file
 holds every family member's records. Selecting a profile in the sidebar scopes everything on screen.
 
-Eighteen pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
+17 pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
 
-- **Overview** — Dashboard, Body Map, Condition Focus, Health Insights, AI Chat
+- **Overview** — Dashboard, Body Map, Health Insights, AI Chat
 - **Records** — Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
-  Chronic Conditions
+  Tracked Conditions
 - **Documents** — Provider Summary, Emergency Snapshot, Import/Export
 - **Admin** — Profiles, Settings
 
 Eight of those (Health Timeline, Medications, Allergies, Labs, Appointments, Reminders, Wearables,
-Chronic Conditions) are rendered by a **single** function, `app.generic_record_page`, driven by the
+Tracked Conditions) are rendered by a **single** function, `app.generic_record_page`, driven by the
 `app.FIELD_CONFIGS` table. Adding a record type is mostly a config change rather than a new page —
 though it also requires entries in `db.TABLES` (which drives `delete_person` and person-scoped
 export) and `imports_exports.BACKUP_VALIDATORS` (consulted for every table in `db.TABLES`, so an
 omission makes backup restore raise `KeyError`).
 
-**Condition Focus** is not a record page. It selects one of the profile's tracked conditions and
-shows the records a hand-written mapping associates with it. Its nav entry is hidden when the
-profile has no conditions, is locked, or is unselected — see §3.
+**Tracked Conditions** is the one hybrid: `generic_record_page` supplies its list and forms, but
+`app.page_tracked_conditions` renders a chart-driven detail view above them, selecting one of the
+profile's tracked conditions and showing the records a hand-written mapping associates with it.
+
+There was a second, read-only `Condition Details` page doing a thinner version of the same job. It
+was removed once the detail view landed: two nav entries showing the same records differing only in
+depth is a question a viewer has to stop and answer. Its removal also took the app's only
+profile-data-dependent navigation with it — see §3.
 
 Supporting capabilities: CSV import for labs and wearables, whole-database JSON backup/restore,
 FHIR R4/R5 Bundle export and import, deterministic rule-based insights, optional external AI
@@ -51,26 +56,28 @@ not authorization.
 
 | Module | Lines | Role | Imports Streamlit? |
 |---|---|---|---|
-| `app.py` | 1686 | All UI, routing, forms, presentation, demo mode | yes |
+| `app.py` | 1690 | All UI, routing, forms, presentation, demo mode | yes |
 | `fhir.py` | 713 | FHIR R4/R5 Bundle export and import | no |
 | `insights.py` | 596 | Deterministic analytics + safety-gated AI reports | no |
 | `ai_chat.py` | 526 | AI chat page: context assembly, HTTP transport, rendering | yes |
 | `body_map_config.py` | 393 | Body-part/system taxonomy and record mapping (static) | no |
 | `db.py` | 383 | Repository: connections, schema init, generic CRUD | no |
-| `services.py` | 368 | Service layer: person-scoped operations, derived reads | no |
+| `services.py` | 392 | Service layer: person-scoped operations, derived reads | no |
 | `body_map_services.py` | 205 | Normalizes records into `NormalizedBodyRecord` per body part | no |
 | `body_map_summary.py` | 196 | Conservative current/historical status summarization | no |
 | `imports_exports.py` | 201 | CSV / JSON-backup / FHIR facade | no |
 | `body_map_ui.py` | 191 | Body-map rendering and state sync | yes |
-| `condition_ui.py` | 234 | Condition Focus rendering, preview, and state sync | yes |
-| `condition_config.py` | 55 | Condition→record-name mapping (static; a cross-agent contract) | no |
-| `condition_services.py` | 45 | Profile-scoped retrieval of records mapped to a condition | no |
+| `condition_ui.py` | 424 | Tracked Conditions detail rendering, dashboard preview, state sync | yes |
+| `condition_charts.py` | 625 | Chart frames and Altair specifications for the condition detail view | no |
+| `condition_config.py` | 149 | Condition→record-name mapping and primary metric (static; a cross-agent contract) | no |
+| `condition_services.py` | 96 | Profile-scoped retrieval of records mapped to a condition | no |
 | `ai_config.py` | 138 | Provider config and key lookup | yes |
 | `validation.py` | 139 | Pure field validators | no |
 | `security.py` | 72 | Password hashing + profile unlock state | yes |
 | `models.py` | 67 | Controlled vocabularies only | no |
+| `display_format.py` | 42 | Shared date/datetime display formatting | no |
 
-**6,208 lines of application code; 3,451 lines of tests across 6 files.** Also
+**7,379 lines of application code; 4,789 lines of tests across 8 files.** Also
 `components/body_map/index.html` (31 lines of vanilla JS, a Streamlit custom component), `schema.sql`,
 and `scripts/verify.sh`.
 
@@ -93,18 +100,59 @@ app.main()
               → sqlite3
 ```
 
-Body map, Condition Focus, and AI chat branch off to `body_map_ui.render_body_map_page(person, db_path)`,
-`condition_ui.render_condition_focus_page(person, db_path)`, and
+Body map and AI chat branch off to `body_map_ui.render_body_map_page(person, db_path)` and
 `ai_chat.render_ai_chatbot(person_id, db_path)`.
 
-**Navigation now depends on profile data.** `app.page_navigation(container, hidden_pages)` takes the
-set of pages to hide, computed by `app.hidden_nav_pages(person, db_path)`. Because that set depends on
-the selected profile, which `main()` resolves *after* the nav used to render, the sidebar creates the
-`nav_menu` container in position and fills it afterwards — position and CSS key are unchanged. A
-hidden current page falls back to the Dashboard and the fallback is written back to session state.
-`hidden_nav_pages` returns for a locked profile *before* querying conditions: whether a locked profile
-has conditions is health data, and nav visibility is an observable side channel that `main()`'s lock
-gate — which runs after the sidebar — cannot cover.
+**Navigation no longer depends on profile data.** It briefly did: `hidden_nav_pages` computed a set
+of pages to hide, and the only member was ever `Condition Details`, hidden when a profile had no
+conditions. That made nav visibility an **observable side channel** — the sidebar renders before
+`main()`'s lock gate, so a locked profile's navigation could reveal whether it had conditions, and
+two of the three OPEN findings in an earlier privacy review were about exactly that. Removing the
+page removed the mechanism: `hidden_nav_pages` is gone, `page_navigation(container)` takes no
+hidden-page set, and rendering the sidebar issues no query at all.
+
+The fallback survived in a more general form. `page_navigation` still checks the stored `nav_page`
+and writes back a correction, but the test is now "is this in `PAGES`?" rather than "is this
+hidden?". That matters for real sessions: a browser still holding `nav_page = "Condition Details"`
+matches no dispatch branch in `main()`'s if/elif chain, and without the fallback would render a
+blank content area with no button marked current and no way back.
+
+`Tracked Conditions` routes to `app.page_tracked_conditions(person, db_path, demo_mode)`, which
+renders the page header, then `condition_ui.render_tracked_conditions_detail(person, rows, db_path)`,
+then the existing CRUD block inside an expander via
+`generic_record_page("conditions", ..., render_header=False)`. That parameter exists only for this
+page; it defaults to `True`, so the eight other callers are unchanged. The condition rows are fetched
+once in `page_tracked_conditions` and passed down, rather than queried by each layer.
+
+`Tracked Conditions` is never hidden — it is where a condition is created, so hiding it from a
+profile with none would leave no way to record a first one.
+
+### Charts are specifications, not rendering
+
+`altair` is now a direct dependency in `requirements.txt`. It was already installed — Streamlit's
+own `st.line_chart` is built on it — so this pins what was already resolving transitively rather than
+adding anything to the environment.
+
+`condition_charts.py` imports pandas and altair but **no Streamlit and no database**. Every function
+takes rows it was handed and returns a `pd.DataFrame` or an `alt.Chart`, so a test asserts on
+`chart.to_dict()` instead of driving a browser — something the four `st.line_chart` call sites
+elsewhere in the app cannot support. Retrieval for the cross-condition sparklines lives in
+`condition_services.get_primary_series`, not in the chart module, to keep that seam intact.
+
+Colour there is a medical-safety surface: it encodes a `flag` the source recorded and the app
+stored, never anything computed at render time. Three validated hues carry severity, mark **shape**
+carries direction, and a record with no flag column is drawn as a hollow mark rather than being
+assigned a status it does not have. The medication timeline is concatenated *beneath* a trend on a
+shared time axis rather than layered into it — a second y scale on one plot would imply a
+relationship between a medication and a measurement that nothing here has established.
+
+Condition selection state is cleared from `st.session_state` by `condition_ui.sync_profile_scope`,
+called from the sidebar on every rerun rather than from a page — a page-local call runs only when
+that page renders. Its scope key is `(resolved db path, profile id, profile created_at, locked)`:
+`created_at` catches a clear-and-restore putting a *different person* at the same id, and `locked`
+catches locking, which changes neither path nor id. The detail page creates one widget key per
+condition, so the sweep clears by prefix (`tracked_condition_series`, `tracked_condition_range`)
+rather than by name — the set of keys is not knowable in advance.
 
 ### Layering is cleaner than it looks
 
@@ -213,7 +261,9 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 
 ## 7. Failure modes
 
-- **Validation failures** — surfaced as messages, never exceptions. Row-atomic for imports.
+- **Validation failures** — CSV/FHIR row failures are surfaced as messages and skipped; backup
+  validation rejects the restore before writing.
+- **Import database failures** — surfaced as a message; a `DatabaseBusyError` is retryable.
 - **Isolation violations** — `db.RecordNotFound` (added 2026-08-01). Raised when a scoped write
   matches no row (`db._mutation_scope` supplies the `WHERE`); `app.apply_record_change` renders a
   clean message rather than a traceback.
@@ -233,8 +283,8 @@ own both halves; resolving this is a decision in `target_architecture.md`.
   warning. Fixing it changes FHIR timestamp output (naive → timezone-aware), so it needs its own change.
 - `insights._call_zhipu_chat_completion` still references `socket.timeout` inside an `isinstance` check — redundant on 3.10+
   where it aliases `TimeoutError`, harmless, `socket` still imported.
-- Connections are opened per function call and never explicitly closed; `sqlite3`'s context manager
-  commits/rolls back but does not close. Handles are released by GC. No transaction spans two calls.
+- Connections are opened per function call by default and never explicitly closed; `sqlite3`'s context
+  manager commits/rolls back but does not close. Handles are released by GC.
 
 ---
 

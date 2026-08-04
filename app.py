@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import tempfile
 import uuid
-from collections.abc import Callable, Collection
-from datetime import date, datetime
+from collections.abc import Callable
+from datetime import date
 from html import escape
 from pathlib import Path
 
@@ -16,6 +16,7 @@ import ai_config
 import body_map_ui
 import condition_ui
 import db
+import display_format
 import fhir
 import imports_exports
 import insights
@@ -40,7 +41,6 @@ DEMO_DB_PATH_KEY = "demo_db_path"
 PAGES = [
     "Dashboard",
     "Body Map",
-    "Condition Focus",
     "Profiles",
     "Health Timeline",
     "Medications",
@@ -49,7 +49,7 @@ PAGES = [
     "Appointments",
     "Reminders",
     "Wearables",
-    "Chronic Conditions",
+    "Tracked Conditions",
     "Provider Summary",
     "Emergency Snapshot",
     "Health Insights",
@@ -59,7 +59,7 @@ PAGES = [
 ]
 
 NAV_SECTIONS = {
-    "Overview": ["Dashboard", "Body Map", "Condition Focus", "Health Insights", "AI Chat"],
+    "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
     "Records": [
         "Health Timeline",
         "Medications",
@@ -68,7 +68,7 @@ NAV_SECTIONS = {
         "Appointments",
         "Reminders",
         "Wearables",
-        "Chronic Conditions",
+        "Tracked Conditions",
     ],
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
@@ -77,7 +77,6 @@ NAV_SECTIONS = {
 PAGE_EMOJIS = {
     "Dashboard": "📊",
     "Body Map": "🫀",
-    "Condition Focus": "🎯",
     "Profiles": "👤",
     "Health Timeline": "🗓️",
     "Medications": "💊",
@@ -86,7 +85,7 @@ PAGE_EMOJIS = {
     "Appointments": "📅",
     "Reminders": "🔔",
     "Wearables": "⌚",
-    "Chronic Conditions": "🩺",
+    "Tracked Conditions": "🩺",
     "Provider Summary": "📝",
     "Emergency Snapshot": "🚑",
     "Health Insights": "💡",
@@ -133,7 +132,6 @@ ACTION_PREFIX_EMOJIS = {
 PAGE_DESCRIPTIONS = {
     "Dashboard": "A quick operational view of medications, allergies, labs, reminders, appointments, and recent notes.",
     "Body Map": "Explore profile-specific records by body area without medical interpretation.",
-    "Condition Focus": "Review the records commonly tracked for a condition you have noted.",
     "Profiles": "Manage family member profiles and local profile access settings.",
     "Health Timeline": "Record symptoms, observations, body systems, and dated health notes.",
     "Medications": "Track current and past medications, dose details, reasons, and notes.",
@@ -142,7 +140,7 @@ PAGE_DESCRIPTIONS = {
     "Appointments": "Track provider visits, status, location, and preparation notes.",
     "Reminders": "Manage follow-up items and routine health tasks.",
     "Wearables": "Import and review manually recorded wearable metrics.",
-    "Chronic Conditions": "Record conditions you are tracking and note who reported each one.",
+    "Tracked Conditions": "Chart the records commonly tracked for a condition you have noted, and record new conditions.",
     "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
     "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
     "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
@@ -159,7 +157,7 @@ SINGULAR_TITLES = {
     "Appointments": "Appointment",
     "Reminders": "Reminder",
     "Wearables": "Wearable record",
-    "Chronic Conditions": "Condition",
+    "Tracked Conditions": "Condition",
 }
 
 DISPLAY_COLUMN_LABELS = {
@@ -586,7 +584,7 @@ FIELD_CONFIGS = {
         "order_by": "timestamp",
     },
     "conditions": {
-        "title": "Chronic Conditions",
+        "title": "Tracked Conditions",
         "fields": [
             ("condition_name", "text"),
             ("source", ["", *CONDITION_SOURCES]),
@@ -610,41 +608,15 @@ def display_column_label(name: str) -> str:
     return DISPLAY_COLUMN_LABELS.get(name, format_label(name).replace(" Id", " ID"))
 
 
-def format_display_date(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return text
-    try:
-        parsed = date.fromisoformat(text)
-    except ValueError:
-        return text
-    return f"{parsed:%b} {parsed.day}, {parsed.year}"
-
-
-def format_display_datetime(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return text
-    if "T" not in text and " " not in text:
-        return format_display_date(text)
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return format_display_date(text)
-    time_text = parsed.strftime("%I:%M %p").lstrip("0")
-    return f"{time_text}, {parsed:%b} {parsed.day}, {parsed.year}"
-
-
 def display_dataframe(rows: list[dict]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     hidden_columns = [column for column in HIDDEN_DISPLAY_COLUMNS if column in frame.columns]
     if hidden_columns:
         frame = frame.drop(columns=hidden_columns)
     for column in DATE_DISPLAY_COLUMNS.intersection(frame.columns):
-        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_date(value))
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else display_format.format_display_date(value))
     for column in DATETIME_DISPLAY_COLUMNS.intersection(frame.columns):
-        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_datetime(value))
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else display_format.format_display_datetime(value))
     return frame.rename(columns={column: display_column_label(column) for column in frame.columns})
 
 
@@ -734,27 +706,20 @@ def selected_profile_banner(person: dict | None, db_path: Path | str | None = No
     )
 
 
-def hidden_nav_pages(person: dict | None, db_path: Path | str | None = None) -> frozenset[str]:
-    """Pages hidden from navigation for the currently selected profile.
+def page_navigation(container=None) -> str:
+    """Render the sidebar navigation and return the page to show.
 
-    Condition Focus is hidden when no profile is selected, when the profile is locked, or when the
-    profile tracks no conditions. The locked branch returns before any condition query runs: whether
-    a locked profile has conditions is itself health data, and nav visibility is an observable side
-    channel. main()'s lock gate gets to run only after the sidebar, so it cannot cover this.
+    No page is hidden any more. Navigation used to depend on profile data -- it hid Condition
+    Details for a profile with none -- which made nav visibility an observable side channel for
+    whether a locked profile had conditions. That page is gone, and so is the whole surface.
+
+    The fallback survives in a more general form: a `nav_page` left in session state by an older
+    build (Condition Details, say) matches no dispatch branch and would render a blank page.
+    Anything not in PAGES falls back to the Dashboard, and the fallback is written back so a nav
+    button is still marked current.
     """
-    db_path = db.DB_PATH if db_path is None else db_path
-    if person is None or is_locked_profile(person, db_path):
-        return frozenset({"Condition Focus"})
-    if not services.tracked_conditions(int(person["id"]), db_path=db_path):
-        return frozenset({"Condition Focus"})
-    return frozenset()
-
-
-def page_navigation(container=None, hidden_pages: Collection[str] = ()) -> str:
     current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
-    if current_page in hidden_pages:
-        # Storing the fallback matters: leaving a hidden page in session state would leave no nav
-        # button marked current. Happens when the last condition is deleted while viewing it.
+    if current_page not in PAGES:
         current_page = NAV_SECTIONS["Overview"][0]
         st.session_state["nav_page"] = current_page
 
@@ -762,11 +727,8 @@ def page_navigation(container=None, hidden_pages: Collection[str] = ()) -> str:
     with target:
         st.caption("Navigation")
         for section, pages in NAV_SECTIONS.items():
-            visible = [page for page in pages if page not in hidden_pages]
-            if not visible:
-                continue
             st.markdown(f"**{section}**")
-            for page in visible:
+            for page in pages:
                 is_current = page == current_page
                 if st.button(
                     page_button_label(page),
@@ -1013,6 +975,10 @@ def password_settings(person: dict, db_path: Path | str | None = None) -> None:
             ):
                 security.lock_profile(int(person["id"]), db_path=db_path)
                 st.success("Password saved. Profile is now locked.")
+                # Rerun so the sidebar recomputes. Navigation visibility was already decided for
+                # this render against the unlocked profile, so without this the screen says locked
+                # while still listing profile-data-dependent pages -- which is itself a disclosure.
+                st.rerun()
 
 
 def ai_settings() -> None:
@@ -1186,12 +1152,19 @@ def record_page_scope(table: str, person_id: int, db_path: Path | str) -> str:
     return f"{Path(db_path).resolve()}:{person_id}:{table}"
 
 
-def generic_record_page(table: str, person: dict, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+def generic_record_page(table: str, person: dict, db_path: Path | str | None = None, demo_mode: bool = False, render_header: bool = True) -> None:  # noqa: C901, PLR0915
+    """Render a table's list and add/edit forms.
+
+    `render_header` exists for Tracked Conditions, which composes its own page header above a
+    detail view and nests this CRUD block in an expander beneath it. Defaulting to True keeps every
+    other caller byte-for-byte unchanged.
+    """
     db_path = db.DB_PATH if db_path is None else db_path
     config = FIELD_CONFIGS[table]
     person_id = int(person["id"])
     state_scope = record_page_scope(table, person_id, db_path)
-    page_header(config["title"])
+    if render_header:
+        page_header(config["title"])
     if demo_mode:
         st.caption("Demo changes stay in this Streamlit session and do not affect saved profiles.")
 
@@ -1368,17 +1341,41 @@ def render_dashboard_conditions(person_id: int, rows: list[dict], db_path: Path 
     names = [str(row.get("condition_name") or "").strip() for row in rows]
     names = [name for name in dict.fromkeys(names) if name]
     # Before the empty-profile return, so a stale selection is dropped either way.
-    condition_ui.sync_profile_state(st.session_state, person_id, db_path, names)
+    condition_ui.sync_valid_conditions(st.session_state, names)
     if not lines:
         st.caption("No conditions are being tracked.")
-        return
-    for line in lines:
-        st.markdown(f"- {line}")
-    selected = st.pills(
-        "Condition preview", names, default=names[0], key=condition_ui.SELECTED_CONDITION_KEY
-    )
-    if isinstance(selected, str) and selected in names:
-        condition_ui.render_condition_preview(person_id, selected, db_path=db_path)
+    else:
+        for line in lines:
+            st.markdown(f"- {line}")
+        selected = st.pills(
+            "Condition preview", names, default=names[0], key=condition_ui.SELECTED_CONDITION_KEY
+        )
+        if isinstance(selected, str) and selected in names:
+            condition_ui.render_condition_preview(person_id, selected, db_path=db_path)
+    # Outside the empty-condition branch on purpose. The dashboard carries the accessible slice and
+    # the detail view is a click away rather than a page to hunt for in the sidebar -- and a profile
+    # with no conditions needs that route most, since the page it leads to is where the first one
+    # gets recorded.
+    if st.button("View full condition detail →", key="dashboard_condition_detail"):
+        st.session_state["nav_page"] = "Tracked Conditions"
+        st.rerun()
+
+
+def page_tracked_conditions(person: dict, db_path: Path | str | None = None, demo_mode: bool = False) -> None:
+    """The detailed condition view, with the record list and forms beneath it.
+
+    Ordered detail-first because that is what the page is for; the CRUD block keeps working exactly
+    as it does on every other record page, just nested in an expander. The expander starts open when
+    the profile has no conditions, since adding one is then the only useful thing on the page --
+    the page is never hidden, because it is where a condition is created.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    page_header("Tracked Conditions")
+    rows = services.tracked_conditions(int(person["id"]), db_path=db_path)
+    condition_ui.render_tracked_conditions_detail(person, rows, db_path=db_path)
+    st.divider()
+    with st.expander("Manage tracked conditions", expanded=not rows):
+        generic_record_page("conditions", person, db_path, demo_mode=demo_mode, render_header=False)
 
 
 def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
@@ -1617,11 +1614,13 @@ def main() -> None:  # noqa: C901, PLR0915
             label = "Demo profile" if demo_mode else "Active profile"
             st.caption(f"{label}: {profile_selection_label(person, current_db_path)}")
         # Unconditional, and here rather than in a page: switching profiles while on any other page
-        # must still drop the previous profile's condition selection out of session state.
+        # must still drop the previous profile's condition selection out of session state. Lock state
+        # is part of the scope, so locking clears it too.
+        locked = person is not None and is_locked_profile(person, current_db_path)
         condition_ui.sync_profile_scope(
-            st.session_state, int(person["id"]) if person else None, current_db_path
+            st.session_state, condition_ui.profile_scope(person, current_db_path, locked)
         )
-        page = page_navigation(nav_slot, hidden_pages=hidden_nav_pages(person, current_db_path))
+        page = page_navigation(nav_slot)
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)
@@ -1659,10 +1658,6 @@ def main() -> None:  # noqa: C901, PLR0915
     elif page == "Body Map":
         page_header("Body Map")
         body_map_ui.render_body_map_page(person, db_path=current_db_path)
-    elif page == "Condition Focus":
-        # Deliberately no pre-auth branch like Body Map's above: this page stays behind the lock gate.
-        page_header("Condition Focus")
-        condition_ui.render_condition_focus_page(person, db_path=current_db_path)
     elif page == "Import/Export":
         page_import_export(person, current_db_path, demo_mode=demo_mode)
     elif page == "Health Timeline":
@@ -1679,8 +1674,8 @@ def main() -> None:  # noqa: C901, PLR0915
         generic_record_page("reminders", person, current_db_path, demo_mode=demo_mode)
     elif page == "Wearables":
         generic_record_page("wearable_records", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Chronic Conditions":
-        generic_record_page("conditions", person, current_db_path, demo_mode=demo_mode)
+    elif page == "Tracked Conditions":
+        page_tracked_conditions(person, current_db_path, demo_mode=demo_mode)
     elif page == "Provider Summary":
         page_provider_summary(person, db_path=current_db_path)
     elif page == "Emergency Snapshot":

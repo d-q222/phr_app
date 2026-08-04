@@ -1834,12 +1834,42 @@
       {
         "id": 1,
         "person_id": 1,
-        "condition_name": "Diabetes",
-        "source": "Endocrinologist",
-        "noted_date": "2026-01-15",
-        "notes": "Placeholder demo row. Fictional. A later pass will expand the sample data into a fuller, self-consistent story; keep names aligned with condition_config.CONDITION_RECORD_MAPPINGS.",
-        "created_at": "2026-01-15T09:00:00",
-        "updated_at": "2026-01-15T09:00:00"
+        "condition_name": "Hypertension",
+        "source": "Primary Care",
+        "noted_date": "2025-10-10",
+        "notes": "Fictional sample record. Noted after home blood-pressure readings ran high; followed with lisinopril and home monitoring.",
+        "created_at": "2025-10-10T09:00:00",
+        "updated_at": "2025-10-10T09:00:00"
+      },
+      {
+        "id": 2,
+        "person_id": 1,
+        "condition_name": "High Cholesterol",
+        "source": "Cardiologist",
+        "noted_date": "2025-10-10",
+        "notes": "Fictional sample record. Noted alongside elevated LDL results; followed with atorvastatin, nutrition counseling and a walking routine.",
+        "created_at": "2025-10-10T09:00:00",
+        "updated_at": "2025-10-10T09:00:00"
+      },
+      {
+        "id": 3,
+        "person_id": 1,
+        "condition_name": "Prediabetes",
+        "source": "Primary Care",
+        "noted_date": "2025-10-10",
+        "notes": "Fictional sample record. Noted from source-flagged A1c results in the prediabetic range. Later results are flagged normal; whether that changes the picture is a conversation for her care team, not something this app decides.",
+        "created_at": "2025-10-10T09:00:00",
+        "updated_at": "2025-10-10T09:00:00"
+      },
+      {
+        "id": 4,
+        "person_id": 1,
+        "condition_name": "Vitamin D Deficiency",
+        "source": "Registered Dietitian",
+        "noted_date": "2025-11-14",
+        "notes": "Fictional sample record. Noted at a nutrition consult after low vitamin D results; followed with supplementation.",
+        "created_at": "2025-11-14T09:00:00",
+        "updated_at": "2025-11-14T09:00:00"
       }
     ]
   }

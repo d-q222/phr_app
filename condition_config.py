@@ -1,7 +1,15 @@
-"""This file is a CONTRACT.
+"""Deterministic condition→record-name mappings. This file is a CONTRACT.
 
-Any demo/sample data must use record names that appear here, or condition→record
-links silently miss.
+Any demo/sample data must use record names that appear here, or condition→record links silently
+miss. Matching is exact after case-folding and whitespace normalization -- no fuzzy or substring
+matching -- so a renamed record simply stops appearing rather than failing loudly.
+
+Every entry asserts only that a record *type* is commonly tracked alongside a condition. It never
+asserts that a particular record was created for that condition, and never that the condition is
+present, current, or confirmed. A medication may be listed only where it is actually indicated for
+the condition; listing one prescribed for something else would assert a treatment relationship the
+app has no basis for (AGENTS.md section 5). Omitting a record type is always safe; overclaiming is
+not.
 """
 
 from __future__ import annotations
@@ -11,14 +19,47 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 CONDITION_RECORD_MAPPINGS: dict[str, dict[str, tuple[str, ...]]] = {
-    "Diabetes": {
+    "Hypertension": {
+        # Creatinine and potassium are standard renal/electrolyte monitoring on an ACE inhibitor.
+        "lab_results": ("Creatinine", "Potassium"),
+        "medications": ("Lisinopril",),
+        "wearable_records": ("Blood Pressure Systolic", "Blood Pressure Diastolic", "Weight"),
+    },
+    "High Cholesterol": {
+        "lab_results": ("LDL Cholesterol",),
+        "medications": ("Atorvastatin",),
+        "wearable_records": ("Weight", "Steps"),
+    },
+    "Vitamin D Deficiency": {
+        "lab_results": ("Vitamin D",),
+        "medications": ("Vitamin D3",),
+    },
+    "Prediabetes": {
         "lab_results": ("Hemoglobin A1c",),
         "wearable_records": ("Glucose", "Weight"),
     },
-    "Hypertension": {
-        "medications": ("Lisinopril",),
-        "wearable_records": ("Blood Pressure Systolic", "Blood Pressure Diastolic"),
+    "Diabetes": {
+        # No medication entry on purpose: nothing in the controlled vocabulary treats diabetes, and
+        # the nearest candidates treat blood pressure and cholesterol instead.
+        "lab_results": ("Hemoglobin A1c",),
+        "wearable_records": ("Glucose", "Weight"),
     },
+}
+
+# The one series a condition is most readily followed by, as `(table, record_name)`. Used only to
+# pick which line an at-a-glance sparkline draws -- it makes no claim that this measurement defines,
+# diagnoses, or monitors the condition adequately.
+#
+# Kept here rather than in the chart module so condition->record knowledge lives in exactly one
+# file. Every entry must also appear in that condition's own mapping above, which is asserted by
+# `test_every_primary_metric_is_in_its_conditions_mapping` -- otherwise a sparkline could draw a
+# series the condition's own record list never shows.
+CONDITION_PRIMARY_METRIC: dict[str, tuple[str, str]] = {
+    "Hypertension": ("wearable_records", "Blood Pressure Systolic"),
+    "High Cholesterol": ("lab_results", "LDL Cholesterol"),
+    "Vitamin D Deficiency": ("lab_results", "Vitamin D"),
+    "Prediabetes": ("lab_results", "Hemoglobin A1c"),
+    "Diabetes": ("lab_results", "Hemoglobin A1c"),
 }
 
 
@@ -53,3 +94,18 @@ def get_condition_record_mapping(condition_name: str) -> Mapping[str, tuple[str,
     """Return the exact normalized mapping entry, or an empty mapping when unknown."""
 
     return CONDITION_RECORD_MAPPING_LOOKUP.get(normalize_condition_name(condition_name), {})
+
+
+CONDITION_PRIMARY_METRIC_LOOKUP = MappingProxyType(
+    {normalize_condition_name(name): value for name, value in CONDITION_PRIMARY_METRIC.items()}
+)
+
+
+def get_condition_primary_metric(condition_name: str) -> tuple[str, str] | None:
+    """Return ``(table, record_name)`` for a condition's headline series, or None when unmapped.
+
+    Unmapped is an ordinary outcome, not an error: a condition with no entry simply has no
+    sparkline drawn for it, which is the safe direction.
+    """
+
+    return CONDITION_PRIMARY_METRIC_LOOKUP.get(normalize_condition_name(condition_name))

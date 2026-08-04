@@ -290,6 +290,24 @@ def reminder_filters(person_id: int, status: str | None = None, db_path: Path | 
     return list_items("reminders", person_id, filters, "due_date", False, db_path=db_path)
 
 
+def _condition_lines(person_id: int, db_path: Path | str | None = None) -> list[str]:
+    """Render a profile's tracked conditions as Markdown bullets, or a single "none" line.
+
+    Reads only the person-scoped `conditions` table. Each line states what was entered and who
+    reported it; it makes no claim that the condition is current, since no status is stored.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    rows = tracked_conditions(person_id, db_path=db_path)
+    lines = []
+    for row in rows:
+        name = str(row.get("condition_name") or "").strip()
+        if not name:
+            continue
+        source = str(row.get("source") or "").strip()
+        lines.append(f"- {name} (reported by {source})" if source else f"- {name}")
+    return lines or ["None recorded."]
+
+
 def generate_provider_summary(
     person_id: int,
     start_date: str | None = None,
@@ -317,6 +335,8 @@ def generate_provider_summary(
     ]
     allergies = list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path)
     lines += [f"- {a['allergen']} ({a.get('severity') or 'severity unknown'}): {a.get('reaction') or ''}" for a in allergies] or ["None recorded."]
+    lines += ["", "## Tracked Conditions"]
+    lines += _condition_lines(person_id, db_path=db_path)
     lines += ["", "## Active Medications"]
     meds = active_medications(person_id, db_path=db_path)
     lines += [f"- {m['name']} {m.get('dose') or ''} {m.get('frequency') or ''}".strip() for m in meds] or ["None recorded."]
@@ -359,6 +379,10 @@ def generate_emergency_snapshot(person_id: int, db_path: Path | str | None = Non
         "## Allergies",
     ]
     lines += [f"- {a['allergen']}: {a.get('reaction') or ''} ({a.get('severity') or 'severity unknown'})" for a in allergies] or ["None recorded."]
+    # Before medications on purpose: in an emergency, knowing what is being treated is at least as
+    # useful as knowing what is being taken for it.
+    lines += ["", "## Tracked Conditions"]
+    lines += _condition_lines(person_id, db_path=db_path)
     lines += ["", "## Active Medications"]
     lines += [f"- {m['name']} {m.get('dose') or ''} {m.get('frequency') or ''}".strip() for m in meds] or ["None recorded."]
     lines += ["", "## Key Health Notes"]
