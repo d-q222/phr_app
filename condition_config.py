@@ -44,6 +44,39 @@ CONDITION_RECORD_MAPPINGS: dict[str, dict[str, tuple[str, ...]]] = {
         "lab_results": ("Hemoglobin A1c",),
         "wearable_records": ("Glucose", "Weight"),
     },
+    "Hypothyroidism": {
+        "lab_results": ("TSH", "Free T4"),
+        "medications": ("Levothyroxine",),
+        "health_entries": ("Fatigue",),
+    },
+    "Gout": {
+        # Allopurinol is urate-lowering therapy and colchicine treats a flare; both are indicated.
+        "lab_results": ("Uric Acid",),
+        "medications": ("Allopurinol", "Colchicine"),
+        "health_entries": ("Gout flare",),
+    },
+    "Sleep Apnea": {
+        # No medication entry on purpose: the standard treatment is CPAP, which is a device rather
+        # than a medication, and nothing in the vocabulary treats the condition itself.
+        "wearable_records": ("Sleep", "Oxygen Saturation", "Weight"),
+        "health_entries": ("Daytime sleepiness",),
+    },
+    "Chronic Kidney Disease": {
+        # No medication entry on purpose: an ARB is guideline-indicated only for *albuminuric* CKD,
+        # which is a clinical judgement about a particular person that this type-level table cannot
+        # make. Omitting a record type is always safe; overclaiming is not.
+        "lab_results": ("Creatinine", "eGFR", "Potassium", "Urine Albumin-Creatinine Ratio"),
+        "wearable_records": ("Blood Pressure Systolic", "Blood Pressure Diastolic", "Weight"),
+        "health_entries": ("Ankle swelling",),
+    },
+    "Asthma": {
+        # Blood eosinophils are a standard part of assessing asthma; they are a marker, not a
+        # diagnosis, which is why the mapping claims only that the test is commonly tracked.
+        "lab_results": ("Eosinophils",),
+        "medications": ("Albuterol", "Fluticasone"),
+        "wearable_records": ("Oxygen Saturation", "Peak Flow"),
+        "health_entries": ("Asthma symptoms",),
+    },
 }
 
 # The one series a condition is most readily followed by, as `(table, record_name)`. Used only to
@@ -60,6 +93,11 @@ CONDITION_PRIMARY_METRIC: dict[str, tuple[str, str]] = {
     "Vitamin D Deficiency": ("lab_results", "Vitamin D"),
     "Prediabetes": ("lab_results", "Hemoglobin A1c"),
     "Diabetes": ("lab_results", "Hemoglobin A1c"),
+    "Hypothyroidism": ("lab_results", "TSH"),
+    "Gout": ("lab_results", "Uric Acid"),
+    "Sleep Apnea": ("wearable_records", "Sleep"),
+    "Chronic Kidney Disease": ("lab_results", "eGFR"),
+    "Asthma": ("wearable_records", "Peak Flow"),
 }
 
 

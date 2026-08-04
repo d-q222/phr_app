@@ -21,7 +21,7 @@ This application is for personal organization and education only. It is not a me
 - Tracked conditions are entered by you and attributed to whoever reported them (for example "Hypertension — Primary Care"). They are not detected automatically from incoming records, and no status is stored, so the app never claims a condition is current.
 - Tracked Conditions page with a chart-driven view of one condition at a time: measurement trends with points coloured and shaped by the flag the source recorded, a medication timeline on the same time axis, first-and-most-recent values, source-flag history, monitoring cadence, variability, recorded symptom severity, and a sparkline per tracked condition. Charts describe what the records show; none of them grades a value or claims a medication caused a change. The record list and add/edit form sit beneath the charts, and the page is never hidden — it is where a condition gets created.
 - Profile-specific dashboard, including a tracked-conditions list with an inline record preview and a button through to the full detail page.
-- Provider Summary and Emergency Snapshot both include tracked conditions. FHIR export does not: a FHIR Condition expects a clinical status this app deliberately does not store.
+- Provider Summary and Emergency Snapshot both include tracked conditions. FHIR export does not: a FHIR Condition expects a clinical status this app deliberately does not store. FHIR *import* does accept Condition resources — the Bundle supplies a status and the app simply does not store it, because there is no column for it.
 - Interactive profile-specific body map with synchronized organ highlighting and record filtering.
 - Filters for dates, body system, body part, medication status, lab flag, reminder status, and keyword search where useful.
 - CSV import for labs and wearable records.
@@ -115,8 +115,39 @@ Current mappings:
 - `lab_results`, `health_entries`, and `wearable_records` -> `Observation`
 - `appointments` -> `Appointment`
 - `reminders` -> `Task`
+- `Condition` -> `conditions` (**import only**)
 
 Exports include human-readable text fields where local records do not have clinical terminology codes. Some EHRs may require additional implementation-guide profiles, OAuth/SMART authorization, or coded vocabularies before accepting imported data.
+
+### Why Condition import is supported but export is not
+
+A FHIR `Condition` expects a `clinicalStatus` (active/resolved) and a `verificationStatus`
+(confirmed). This app stores neither, so emitting one would write an unfounded clinical claim into a
+file other software reads as fact. Importing is the mirror image: the Bundle supplies a status and
+the app simply does not store it, because there is no column for it. Dropping a field you cannot
+represent is not an overclaim; inventing one is.
+
+On import, a Condition's `code.text` becomes the condition name and `recordedDate` (or
+`onsetDateTime`) becomes the noted date. A `recorder` or `asserter` display name is kept **only**
+when it exactly matches the app's controlled source list; anything else is left blank rather than
+invented. A Condition with no usable name is skipped rather than stored as "Unknown".
+
+### Demo Bundle
+
+`demo_data/devon_marsh_fhir_bundle.json` is a fictional 24-month record you can import to see every
+page populated. Import it from the Import/Export page and **leave "Clear existing records before
+FHIR import" unticked** — it then adds a new profile alongside whatever is already there.
+
+Regenerate it with:
+
+```bash
+.venv/bin/python scripts/build_demo_bundle.py
+```
+
+The script is the source of truth; do not hand-edit the JSON. Every lab flag in it is computed from
+that row's own reference range, and every record name is taken from
+`condition_config.CONDITION_RECORD_MAPPINGS`, so the flags cannot contradict their values and the
+condition links cannot silently miss.
 
 ## Provider Summary And Emergency Snapshot
 

@@ -7,10 +7,12 @@ from pathlib import Path
 
 import db
 import services
+from models import CONDITION_SOURCES
 from validation import (
     normalize_optional_number,
     validate_allergy,
     validate_appointment,
+    validate_condition,
     validate_health_entry,
     validate_lab,
     validate_medication,
@@ -22,6 +24,10 @@ SUPPORTED_FHIR_VERSIONS = ["R4", "R5"]
 FHIR_MIME_TYPE = "application/fhir+json"
 DOSE_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-dose"
 FREQUENCY_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-frequency"
+# Read on import only, never written on export. Profile notes are free text that can carry health
+# detail, and `_patient_resource` has never emitted them; adding them to export would newly place
+# that text into every exported file, which is a privacy change this feature does not need.
+PROFILE_NOTES_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:profile-notes"
 
 
 FHIR_VALIDATORS = {
@@ -32,6 +38,7 @@ FHIR_VALIDATORS = {
     "appointments": validate_appointment,
     "reminders": validate_reminder,
     "wearable_records": validate_wearable,
+    "conditions": validate_condition,
 }
 
 
@@ -697,7 +704,11 @@ def _person_from_patient(resource: dict) -> dict:
         "sex": _gender_from_fhir(resource.get("gender")),
         "relationship": relationship,
         "emergency_contact": contact,
-        "notes": "Imported from FHIR.",
+        # A supplied profile note wins over the generic literal: the Dashboard renders this string
+        # directly in its callout, so "Imported from FHIR." is what an imported profile would
+        # otherwise say where every other profile shows a real summary. Falls back to the literal
+        # when the bundle carries no note, which is every bundle written before this extension.
+        "notes": _extension_value(resource, PROFILE_NOTES_EXTENSION_URL) or "Imported from FHIR.",
     }
 
 
@@ -713,7 +724,46 @@ def _local_record_from_resource(resource: dict) -> tuple[str | None, dict]:
         return "appointments", _appointment_from_resource(resource)
     if resource_type == "Task":
         return "reminders", _task_from_resource(resource)
+    if resource_type == "Condition":
+        return "conditions", _condition_from_resource(resource)
     return None, {}
+
+
+def _condition_from_resource(resource: dict) -> dict:
+    """Map a FHIR Condition onto the local `conditions` columns.
+
+    Inputs a Condition resource; outputs a dict for the `conditions` table. Import only --
+    `export_bundle` deliberately emits no Condition, and the asymmetry is the point:
+
+    A FHIR Condition expects `clinicalStatus` (active/resolved) and `verificationStatus`
+    (confirmed). This schema stores neither, so emitting one would write an unfounded clinical claim
+    into a file other software ingests as fact. Importing is the mirror image: the Bundle supplies a
+    status and we simply do not store it, because there is no column for it. Dropping a field you
+    cannot represent is not an overclaim; inventing one is.
+
+    Two deliberate departures from the sibling converters:
+
+    - No fallback name. `_allergy_from_resource` falls back to "Unknown allergen" because a nameless
+      allergy row is a harmless placeholder. A row named "Unknown condition" would appear in the
+      tracked-condition list *and* the Emergency Snapshot, asserting someone has a condition nobody
+      can name. Leaving it blank lets `validate_condition` reject it into the visible skip list.
+    - `source` is taken only on an exact `models.CONDITION_SOURCES` match. An unrecognised recorder
+      leaves it blank rather than inventing a vocabulary value the rest of the app would then treat
+      as a real provider category.
+    """
+
+    source = None
+    for reference in (resource.get("recorder"), resource.get("asserter")):
+        display = (reference or {}).get("display")
+        if display in CONDITION_SOURCES:
+            source = display
+            break
+    return {
+        "condition_name": _text_from_codeable(resource.get("code")),
+        "source": source,
+        "noted_date": _date_part(resource.get("recordedDate") or resource.get("onsetDateTime")),
+        "notes": _notes_text(resource.get("note")),
+    }
 
 
 def _allergy_from_resource(resource: dict) -> dict:

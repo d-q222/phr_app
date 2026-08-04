@@ -341,6 +341,7 @@ def test_a_removed_page_left_in_session_state_falls_back_to_the_dashboard(tmp_pa
 
 # --- the Tracked Conditions detail page ----------------------------------------------------------
 
+DEMO_BUNDLE = Path(app.__file__).resolve().parent / "demo_data" / "devon_marsh_fhir_bundle.json"
 DETAIL_SECTIONS = [
     "Measurement trends",
     "First and most recent",
@@ -351,6 +352,58 @@ DETAIL_SECTIONS = [
     "All tracked conditions",
     "Linked records",
 ]
+
+
+def _app_with_imported_demo(tmp_path, monkeypatch, name="devon.db"):
+    """A database holding the shipped demo bundle, wired in as the app's real path."""
+    import fhir
+
+    app_db_path = tmp_path / name
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    fhir.import_bundle(DEMO_BUNDLE.read_text(encoding="utf-8"), db_path=app_db_path)
+    return app_db_path
+
+
+def test_tracked_conditions_page_renders_every_section_for_the_imported_profile(tmp_path, monkeypatch):
+    _app_with_imported_demo(tmp_path, monkeypatch)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    subheaders = [sub.value for sub in test_app.subheader]
+    for section in DETAIL_SECTIONS:
+        assert section in subheaders, f"{section} is missing from the page"
+    assert len(test_app.get("metric")) == 4
+    assert len(test_app.get("vega_lite_chart")) >= 5
+
+
+def test_every_imported_condition_charts_without_error(tmp_path, monkeypatch):
+    """Each condition is a different shape, so each is a different chance to raise.
+
+    Sleep Apnea is the one that renders five charts rather than six: it maps no lab, because there
+    is no blood test commonly tracked for it, and mapping one purely to fill the panel would be the
+    fabricated-claim defect this feature exists to avoid. Its empty state says so.
+    """
+    _app_with_imported_demo(tmp_path, monkeypatch)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+    test_app.run(timeout=60)
+
+    rendered = {}
+    for condition in ("Hypothyroidism", "Gout", "Sleep Apnea", "Chronic Kidney Disease", "Asthma"):
+        # Set after the first run: sync_profile_scope clears the selection on the run that first
+        # establishes the profile scope, which would discard a pre-seeded value.
+        test_app.session_state[condition_ui.SELECTED_CONDITION_KEY] = condition
+        test_app.run(timeout=60)
+        assert not test_app.exception, f"{condition} raised"
+        assert [header.value for header in test_app.header] == [condition]
+        rendered[condition] = len(test_app.get("vega_lite_chart"))
+
+    assert rendered["Sleep Apnea"] == 5
+    assert all(count == 6 for name, count in rendered.items() if name != "Sleep Apnea"), rendered
 
 
 def test_tracked_conditions_page_degrades_for_a_profile_with_thin_data(tmp_path, monkeypatch):
@@ -454,6 +507,26 @@ def test_generic_record_page_still_renders_its_own_header_by_default(tmp_path, m
 
     assert not test_app.exception
     assert any("<h1>Labs</h1>" in block.value for block in test_app.markdown)
+
+
+def test_body_map_and_emergency_snapshot_render_for_the_imported_profile(tmp_path, monkeypatch):
+    """Both read record types the demo bundle fills, so both must survive an import."""
+    _app_with_imported_demo(tmp_path, monkeypatch)
+
+    for page in ("Body Map", "Emergency Snapshot"):
+        test_app = AppTest.from_file(str(Path(app.__file__)))
+        test_app.session_state["nav_page"] = page
+        test_app.run(timeout=60)
+        assert not test_app.exception, f"{page} raised"
+        assert test_app.session_state["nav_page"] == page
+
+    snapshot_person = int(services.list_people(db_path=db.DB_PATH)[0]["id"])
+    snapshot = services.generate_emergency_snapshot(snapshot_person, db_path=db.DB_PATH)
+    assert "## Tracked Conditions" in snapshot
+    assert "Chronic Kidney Disease" in snapshot
+
+
+# --- review follow-ups: state hygiene at the profile-selection site ------------------------------
 
 
 def test_scope_sync_handles_no_selected_profile():
@@ -574,6 +647,7 @@ RECORD_NAME_COLUMNS = {
     "wearable_records": "metric_type",
     "health_entries": "title",
 }
+DEMO_BUNDLE_PATH = Path(app.__file__).resolve().parent / "demo_data" / "devon_marsh_fhir_bundle.json"
 
 
 def _sample_tables():
@@ -588,24 +662,85 @@ def _record_names_from_backup(tables):
     }
 
 
+def _demo_bundle_resources():
+    return [
+        entry["resource"]
+        for entry in json.loads(DEMO_BUNDLE_PATH.read_text(encoding="utf-8"))["entry"]
+        if entry.get("resource")
+    ]
+
+
+def _record_names_from_bundle(resources):
+    """Record names present in the FHIR-shaped demo bundle, keyed by the table each will land in.
+
+    Mirrors `fhir._observation_from_resource`'s routing so the guard checks the table a name will
+    actually occupy rather than where it looks like it belongs.
+    """
+    names = {table: set() for table in RECORD_NAME_COLUMNS}
+    for resource in resources:
+        text = (resource.get("code") or {}).get("text")
+        if resource.get("resourceType") == "MedicationStatement":
+            names["medications"].add((resource.get("medicationCodeableConcept") or {}).get("text"))
+        elif resource.get("resourceType") == "Observation":
+            category = " ".join((item.get("text") or "") for item in resource.get("category", [])).lower()
+            if "laboratory" in category:
+                names["lab_results"].add(text)
+            elif "wearable" in category:
+                names["wearable_records"].add(text)
+            else:
+                names["health_entries"].add(text)
+    return names
+
+
 def test_every_seeded_condition_has_a_mapping():
     """A seeded condition with no mapping silently shows 'no records mapped' to the user."""
-    for row in _sample_tables().get("conditions", []):
-        name = row["condition_name"]
+    bundle_conditions = [
+        (resource.get("code") or {}).get("text")
+        for resource in _demo_bundle_resources()
+        if resource.get("resourceType") == "Condition"
+    ]
+    seeded = [row["condition_name"] for row in _sample_tables().get("conditions", [])]
+    for name in seeded + bundle_conditions:
         assert condition_config.get_condition_record_mapping(name), f"{name} has no mapping"
 
 
-def test_every_mapped_record_name_exists_in_the_sample_data():
+def test_every_mapped_record_name_exists_in_a_shipped_dataset():
     """Guards the cross-agent contract: a renamed record silently stops appearing.
 
-    This is the cheapest possible tripwire for a later pass that rewrites the demo data.
+    Widened, not weakened, when the demo bundle arrived. The seed file and the bundle are two
+    shipped datasets and neither can hold every mapped name on its own -- the Riveras are
+    deliberately left untouched, so the conditions only Devon Marsh carries can never appear in the
+    seed file. A name is satisfied by appearing in *either*; a name in neither is still a failure
+    that names the exact triple.
     """
     from_backup = _record_names_from_backup(_sample_tables())
+    from_bundle = _record_names_from_bundle(_demo_bundle_resources())
     missing = []
     for condition, mapping in condition_config.CONDITION_RECORD_MAPPINGS.items():
         for table, names in mapping.items():
-            missing += [f"{condition}/{table}/{n}" for n in names if n not in from_backup[table]]
-    assert missing == [], f"mapped names absent from sample data: {missing}"
+            present = from_backup[table] | from_bundle[table]
+            missing += [f"{condition}/{table}/{n}" for n in names if n not in present]
+    assert missing == [], f"mapped names absent from every shipped dataset: {missing}"
+
+
+def test_demo_bundle_conditions_resolve_inside_the_bundle_itself():
+    """Stricter than the union guard: Devon's own conditions must be satisfied by his own records.
+
+    The union guard would be happy if a name Devon needs happened to exist in Alex's seed data.
+    That would still leave the imported profile's page empty, which is the thing being demoed.
+    """
+    from_bundle = _record_names_from_bundle(_demo_bundle_resources())
+    bundle_conditions = [
+        (resource.get("code") or {}).get("text")
+        for resource in _demo_bundle_resources()
+        if resource.get("resourceType") == "Condition"
+    ]
+    missing = []
+    for condition in bundle_conditions:
+        for table, names in condition_config.get_condition_record_mapping(condition).items():
+            missing += [f"{condition}/{table}/{n}" for n in names if n not in from_bundle[table]]
+    assert missing == [], f"bundle conditions with no backing records in the bundle: {missing}"
+
 
 def test_every_primary_metric_is_in_its_conditions_mapping():
     """A sparkline must draw a series the condition's own record list also shows.

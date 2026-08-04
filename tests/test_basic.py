@@ -1086,6 +1086,250 @@ def test_fhir_import_skips_bad_patient_references_and_missing_required_fields(tm
     assert {item["id"] for item in result["skipped"]} == {"bad-ref", "missing-date", "missing-value"}
 
 
+def _small_fhir_bundle() -> str:
+    return json.dumps(
+        {
+            "resourceType": "Bundle",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Imported"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": "lab-1",
+                        "category": [{"text": "Laboratory"}],
+                        "code": {"text": "A1c"},
+                        "subject": {"reference": "Patient/p1"},
+                        "effectiveDateTime": "2026-01-01",
+                        "valueQuantity": {"value": 5.6},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": "lab-2",
+                        "category": [{"text": "Laboratory"}],
+                        "code": {"text": "LDL"},
+                        "subject": {"reference": "Patient/p1"},
+                        "effectiveDateTime": "2026-01-02",
+                        "valueQuantity": {"value": 120},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": "lab-3",
+                        "category": [{"text": "Laboratory"}],
+                        "code": {"text": "HDL"},
+                        "subject": {"reference": "Patient/p1"},
+                        "effectiveDateTime": "2026-01-03",
+                        "valueQuantity": {"value": 55},
+                    }
+                },
+            ],
+        }
+    )
+
+
+def _fail_create_item_after(monkeypatch, failure_number: int) -> None:
+    original_create_item = services.create_item
+    calls = 0
+
+    def failing_create_item(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == failure_number:
+            raise db.DatabaseBusyError("injected busy error")
+        return original_create_item(*args, **kwargs)
+
+    monkeypatch.setattr(services, "create_item", failing_create_item)
+
+
+def _condition_bundle(entries):
+    return json.dumps({"resourceType": "Bundle", "entry": [{"resource": r} for r in entries]})
+
+
+def test_fhir_condition_import_lands_rows_scoped_to_their_patient(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = _condition_bundle(
+        [
+            {"resourceType": "Patient", "id": "p1", "name": [{"text": "One"}]},
+            {"resourceType": "Patient", "id": "p2", "name": [{"text": "Two"}]},
+            {
+                "resourceType": "Condition",
+                "id": "c1",
+                "code": {"text": "Hypothyroidism"},
+                "subject": {"reference": "Patient/p1"},
+                "recordedDate": "2024-09-15",
+                "recorder": {"display": "Endocrinologist"},
+                "note": [{"text": "Monitored quarterly."}],
+            },
+            {
+                "resourceType": "Condition",
+                "id": "c2",
+                "code": {"coding": [{"display": "Gout"}]},
+                "subject": {"reference": "Patient/p2"},
+                "onsetDateTime": "2024-11-02T00:00:00Z",
+            },
+        ]
+    )
+
+    result = fhir.import_bundle(payload, db_path=db_path)
+
+    assert result["skipped"] == []
+    assert result["imported"]["conditions"] == 2
+    people = {person["name"]: int(person["id"]) for person in services.list_people(db_path=db_path)}
+    first = services.list_items("conditions", people["One"], db_path=db_path)
+    second = services.list_items("conditions", people["Two"], db_path=db_path)
+    assert [row["condition_name"] for row in first] == ["Hypothyroidism"]
+    assert first[0]["source"] == "Endocrinologist"
+    assert first[0]["noted_date"] == "2024-09-15"
+    assert first[0]["notes"] == "Monitored quarterly."
+    # code.coding[].display is the fallback path, and onsetDateTime the fallback date.
+    assert [row["condition_name"] for row in second] == ["Gout"]
+    assert second[0]["noted_date"] == "2024-11-02"
+
+
+def test_fhir_condition_import_blanks_a_source_outside_the_controlled_vocabulary(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = _condition_bundle(
+        [
+            {"resourceType": "Patient", "id": "p1", "name": [{"text": "One"}]},
+            {
+                "resourceType": "Condition",
+                "id": "c1",
+                "code": {"text": "Asthma"},
+                "recorder": {"display": "Dr. Someone at Some Clinic"},
+            },
+        ]
+    )
+
+    result = fhir.import_bundle(payload, db_path=db_path)
+
+    assert result["skipped"] == []
+    person_id = int(services.list_people(db_path=db_path)[0]["id"])
+    row = services.list_items("conditions", person_id, db_path=db_path)[0]
+    # Blank, not the raw display: inventing a vocabulary value would have the rest of the app treat
+    # an arbitrary string as a real provider category.
+    assert row["source"] in (None, "")
+
+
+def test_fhir_condition_import_ignores_clinical_status(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = _condition_bundle(
+        [
+            {"resourceType": "Patient", "id": "p1", "name": [{"text": "One"}]},
+            {
+                "resourceType": "Condition",
+                "id": "c1",
+                "code": {"text": "Gout"},
+                "clinicalStatus": {"coding": [{"code": "resolved"}]},
+                "verificationStatus": {"coding": [{"code": "confirmed"}]},
+            },
+        ]
+    )
+
+    result = fhir.import_bundle(payload, db_path=db_path)
+
+    assert result["skipped"] == []
+    person_id = int(services.list_people(db_path=db_path)[0]["id"])
+    row = services.list_items("conditions", person_id, db_path=db_path)[0]
+    # The schema stores no status. Nothing may smuggle "resolved" or "confirmed" into another column.
+    assert "resolved" not in json.dumps(dict(row)).lower()
+    assert "confirmed" not in json.dumps(dict(row)).lower()
+
+
+def test_fhir_condition_without_a_name_is_skipped_rather_than_named_unknown(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = _condition_bundle(
+        [
+            {"resourceType": "Patient", "id": "p1", "name": [{"text": "One"}]},
+            {"resourceType": "Condition", "id": "nameless", "subject": {"reference": "Patient/p1"}},
+        ]
+    )
+
+    result = fhir.import_bundle(payload, db_path=db_path)
+
+    assert result["imported"]["conditions"] == 0
+    assert [item["id"] for item in result["skipped"]] == ["nameless"]
+    person_id = int(services.list_people(db_path=db_path)[0]["id"])
+    # Deliberately unlike "Unknown allergen"/"Unknown test": an unnamed condition would surface in
+    # the tracked-condition list and the Emergency Snapshot, asserting an illness nobody can name.
+    assert services.list_items("conditions", person_id, db_path=db_path) == []
+
+
+def test_fhir_export_still_emits_no_condition_resources(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Exporter"}, db_path=db_path)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Hypothyroidism", "source": "Endocrinologist"},
+        db_path=db_path,
+    )
+
+    exported = json.loads(fhir.export_bundle(person_id=person_id, db_path=db_path))
+
+    types = [entry["resource"]["resourceType"] for entry in exported["entry"]]
+    # Import is supported, export deliberately is not: a FHIR Condition expects a clinicalStatus
+    # this schema has no basis for, and emitting one writes an unfounded claim into a file other
+    # software ingests as fact.
+    assert "Condition" not in types
+
+
+def test_fhir_import_without_clear_existing_preserves_existing_conditions(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    existing_id = services.create_person({"name": "Already Here"}, db_path=db_path)
+    services.create_item(
+        "conditions", existing_id, {"condition_name": "Prediabetes"}, db_path=db_path
+    )
+    payload = _condition_bundle(
+        [
+            {"resourceType": "Patient", "id": "p1", "name": [{"text": "Newcomer"}]},
+            {"resourceType": "Condition", "id": "c1", "code": {"text": "Asthma"}},
+        ]
+    )
+
+    result = fhir.import_bundle(payload, clear_existing=False, db_path=db_path)
+
+    assert result["skipped"] == []
+    # `conditions` is in db.TABLES, so clear_existing=True would wipe it. The additive path must
+    # leave existing profiles exactly as they were.
+    assert [row["condition_name"] for row in services.list_items("conditions", existing_id, db_path=db_path)] == ["Prediabetes"]
+    assert len(services.list_people(db_path=db_path)) == 2
+
+
+def test_fhir_patient_note_extension_overrides_the_generic_import_note(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    payload = _condition_bundle(
+        [
+            {
+                "resourceType": "Patient",
+                "id": "with-note",
+                "name": [{"text": "Noted"}],
+                "extension": [
+                    {"url": fhir.PROFILE_NOTES_EXTENSION_URL, "valueString": "Records span 24 months."}
+                ],
+            },
+            {"resourceType": "Patient", "id": "no-note", "name": [{"text": "Plain"}]},
+        ]
+    )
+
+    fhir.import_bundle(payload, db_path=db_path)
+
+    notes = {person["name"]: person["notes"] for person in services.list_people(db_path=db_path)}
+    # The Dashboard renders this string directly, so an imported profile would otherwise read
+    # "Imported from FHIR." where every other profile shows a real summary.
+    assert notes["Noted"] == "Records span 24 months."
+    assert notes["Plain"] == "Imported from FHIR."
+
+
 def test_latest_labs_tie_breaks_same_day_by_newer_record(tmp_path):
     db_path = tmp_path / "phr.db"
     db.init_db(db_path)
