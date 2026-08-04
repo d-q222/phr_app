@@ -733,7 +733,9 @@ def _local_record_from_resource(resource: dict) -> tuple[str | None, dict]:
     return None, {}
 
 
-# FHIR verification statuses this app cannot honestly represent as a tracked condition.
+# FHIR verification statuses this app cannot honestly represent. Applied to Condition and to
+# AllergyIntolerance, which carries the identical value set and reaches the same Emergency Snapshot:
+# a refuted penicillin allergy asserted as real makes a clinician withhold a first-line drug.
 #
 # Two groups, refused for related reasons. `refuted` (a clinician considered it and ruled it out)
 # and `entered-in-error` (the source retracted the record) are **negations**: importing one inverts
@@ -770,13 +772,44 @@ def _refused_reason(resource: dict) -> str | None:
     rather than a silent difference between the bundle and what landed.
     """
 
-    if resource.get("resourceType") != "Condition":
+    kind = resource.get("resourceType")
+    if kind not in {"Condition", "AllergyIntolerance"}:
         return None
-    for coding in resource.get("verificationStatus", {}).get("coding", []):
-        code = str(coding.get("code") or "").strip().lower()
+    status = resource.get("verificationStatus", {})
+    # `text` as well as `coding[]`: a text-only CodeableConcept is not exotic -- this module's own
+    # `_codeable_text` emits one whenever no coding is supplied -- and checking codings alone let
+    # `{"text": "refuted"}` walk straight past the whole set.
+    candidates = [coding.get("code") for coding in status.get("coding", [])] + [status.get("text")]
+    for candidate in candidates:
+        code = str(candidate or "").strip().lower()
         if code in UNIMPORTABLE_CONDITION_STATUSES:
-            return f"Condition verificationStatus is '{code}': {UNIMPORTABLE_CONDITION_STATUSES[code]}."
+            return f"{kind} verificationStatus is '{code}': {UNIMPORTABLE_CONDITION_STATUSES[code]}."
     return None
+
+
+def _discarded_code(value: dict | None) -> str | None:
+    """The terminology code `_human_label` refused, as a note, or None if there was nothing to drop.
+
+    A bare code is a bad medical *name* and still real information: SNOMED 7980 is Penicillin G, and
+    turning that into "Unknown allergen" in an Emergency Snapshot loses the drug to avoid entirely,
+    which is worse than showing an ugly decodable code. The name gets the honest placeholder and the
+    code travels in the note, so nothing the bundle carried is silently dropped.
+    """
+
+    if not value or _human_label(value):
+        return None
+    for coding in value.get("coding", []):
+        if coding.get("code"):
+            system = coding.get("system") or "unknown system"
+            return f"Imported with no readable name; source code {coding['code']} ({system})."
+    return None
+
+
+def _append_note(existing: str | None, extra: str | None) -> str | None:
+    """Join an imported note with provenance, keeping whichever of the two exists."""
+
+    parts = [part for part in (existing, extra) if part]
+    return " ".join(parts) if parts else None
 
 
 def _human_label(value: dict | None) -> str | None:
@@ -852,7 +885,7 @@ def _allergy_from_resource(resource: dict) -> dict:
         "allergen": _human_label(resource.get("code")) or "Unknown allergen",
         "reaction": reaction_text,
         "severity": (reaction.get("severity") or "").title() or None,
-        "notes": _notes_text(resource.get("note")),
+        "notes": _append_note(_notes_text(resource.get("note")), _discarded_code(resource.get("code"))),
     }
 
 
@@ -875,7 +908,7 @@ def _medication_from_resource(resource: dict) -> dict:
         "end_date": effective.get("end"),
         "status": _medication_status_from_fhir(resource.get("status"), effective),
         "reason": reason,
-        "notes": _notes_text(resource.get("note")),
+        "notes": _append_note(_notes_text(resource.get("note")), _discarded_code(medication)),
     }
 
 
@@ -928,14 +961,20 @@ def _health_entry_from_observation(resource: dict) -> dict:
         if "severity" in (_text_from_codeable(component.get("code")) or "").lower():
             severity = component.get("valueInteger")
     categories = [_text_from_codeable(item) for item in resource.get("category", [])]
-    body_system = next((item for item in categories if item and item != "Survey"), None)
+    # Case-insensitive: the standard FHIR category coding is lowercase `survey` with no display, so
+    # `_text_from_codeable` yields "survey" and a title-cased comparison let a raw category code land
+    # in the user-facing body_system column.
+    body_system = next((item for item in categories if item and item.strip().lower() != "survey"), None)
     return {
         "entry_date": _date_part(resource.get("effectiveDateTime")),
         "title": _human_label(resource.get("code")) or "FHIR observation",
         "body_system": body_system,
         "body_part": _text_from_codeable(resource.get("bodySite")),
         "severity": severity,
-        "note": resource.get("valueString") or _notes_text(resource.get("note")),
+        "note": _append_note(
+            resource.get("valueString") or _notes_text(resource.get("note")),
+            _discarded_code(resource.get("code")),
+        ),
     }
 
 

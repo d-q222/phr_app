@@ -1084,6 +1084,149 @@ def test_uncertain_conditions_are_refused_along_with_the_negated_ones(db_path):
     assert len(result["skipped"]) == 3
 
 
+def test_a_bare_terminology_code_becomes_a_placeholder_name_and_a_provenance_note(db_path):
+    """The name must be readable; the code must not vanish.
+
+    A bare code is a bad medical name -- SNOMED 227493005 in an Emergency Snapshot tells a responder
+    nothing. But dropping it is worse than showing it: SNOMED 7980 *is* Penicillin G, and replacing
+    that with "Unknown allergen" loses the drug to avoid entirely, silently, in the document
+    someone reads in an emergency. The placeholder names the row; the note keeps what was dropped.
+    """
+    import imports_exports
+
+    penicillin = {"coding": [{"system": "http://snomed.info/sct", "code": "7980"}]}
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a1",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": penicillin,
+                        "reaction": [{"description": "Hives", "severity": "severe"}],
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "MedicationStatement",
+                        "id": "m1",
+                        "subject": {"reference": "Patient/p1"},
+                        "medicationCodeableConcept": penicillin,
+                        "status": "active",
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": "entry-1",
+                        "subject": {"reference": "Patient/p1"},
+                        "category": [{"coding": [{"code": "survey"}]}],
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "267036007"}]},
+                        "effectiveDateTime": "2026-01-03",
+                    }
+                },
+            ],
+        }
+    )
+
+    imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    allergy = services.list_items("allergies", person_id, db_path=db_path)[0]
+    assert allergy["allergen"] == "Unknown allergen"
+    assert "7980" in allergy["notes"] and "snomed" in allergy["notes"].lower()
+    medication = services.list_items("medications", person_id, db_path=db_path)[0]
+    assert medication["name"] == "Unknown medication"
+    assert "7980" in medication["notes"]
+    entry = services.list_items("health_entries", person_id, db_path=db_path)[0]
+    assert entry["title"] == "FHIR observation"
+    assert "267036007" in entry["note"]
+    # The standard lowercase `survey` category is a routing code, not a body system.
+    assert entry["body_system"] is None
+    # And no bare code is presented as a medical name anywhere a person reads.
+    snapshot = services.generate_emergency_snapshot(person_id, db_path=db_path)
+    assert "- 7980" not in snapshot
+
+
+def test_a_refuted_allergy_is_refused_like_a_refuted_condition(db_path):
+    """AllergyIntolerance carries the same verificationStatus value set and the same stakes.
+
+    A false penicillin allergy in an Emergency Snapshot makes a clinician withhold a first-line
+    drug, so a source saying "we ruled this out" must not arrive as a real allergy.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a1",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": {"text": "Penicillin"},
+                        "verificationStatus": {"coding": [{"code": "refuted"}]},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a2",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": {"text": "Latex"},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["allergen"] for row in services.list_items("allergies", person_id, db_path=db_path)] == ["Latex"]
+    assert [entry["id"] for entry in result["skipped"]] == ["a1"]
+    assert "Penicillin" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
+def test_a_text_only_verification_status_is_matched_too(db_path):
+    """`{"text": "refuted"}` is an ordinary shape -- this module's own exporter emits text-only
+    CodeableConcepts -- and checking `coding[]` alone let it walk past the whole refusal set."""
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"text": "Cancer"},
+                        "verificationStatus": {"text": "refuted"},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert services.tracked_conditions(person_id, db_path=db_path) == []
+    assert len(result["skipped"]) == 1
+    assert "Cancer" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
 def test_no_imported_record_is_ever_named_after_a_bare_terminology_code(db_path):
     """Allergen, medication and health-entry titles reach the provider summary and the snapshot."""
     import imports_exports
