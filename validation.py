@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from datetime import date
 
-from models import APPOINTMENT_STATUSES, LAB_FLAGS, MEDICATION_STATUSES, REMINDER_STATUSES
+from models import (
+    APPOINTMENT_STATUSES,
+    CONDITION_SOURCES,
+    LAB_FLAGS,
+    MEDICATION_STATUSES,
+    REMINDER_STATUSES,
+)
 
 
 def is_blank(value: object) -> bool:
@@ -85,6 +91,13 @@ def validate_medication(data: dict) -> list[str]:
 
 def validate_allergy(data: dict) -> list[str]:
     return require(data.get("allergen"), "Allergen")
+
+
+def validate_condition(data: dict) -> list[str]:
+    errors = require(data.get("condition_name"), "Condition name")
+    errors += valid_choice(data.get("source"), CONDITION_SOURCES, "Source", allow_blank=True)
+    errors += valid_date(data.get("noted_date"), "Noted date")
+    return errors
 
 
 def validate_lab(data: dict) -> list[str]:

@@ -14,6 +14,7 @@ from validation import (
     normalize_optional_number,
     validate_allergy,
     validate_appointment,
+    validate_condition,
     validate_health_entry,
     validate_lab,
     validate_medication,
@@ -31,6 +32,7 @@ BACKUP_VALIDATORS = {
     "appointments": validate_appointment,
     "reminders": validate_reminder,
     "wearable_records": validate_wearable,
+    "conditions": validate_condition,
 }
 
 
@@ -50,7 +52,8 @@ def import_labs_csv(file_obj, person_id: int, db_path: Path | str | None = None)
             "unit": row.get("unit", ""),
             "reference_low": row.get("reference_low", ""),
             "reference_high": row.get("reference_high", ""),
-            "flag": row.get("flag", "Unknown") or "Unknown",
+            # Absent, not "Unknown" -- that is a flag a source can actually record.
+            "flag": row.get("flag") or "",
             "lab_date": row.get("lab_date", ""),
             "notes": row.get("notes", ""),
         }

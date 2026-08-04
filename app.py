@@ -4,7 +4,7 @@ import json
 import tempfile
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date
 from html import escape
 from pathlib import Path
 
@@ -14,7 +14,9 @@ import streamlit as st
 import ai_chat
 import ai_config
 import body_map_ui
+import condition_ui
 import db
+import display_format
 import fhir
 import imports_exports
 import insights
@@ -24,6 +26,7 @@ import validation
 from models import (
     APPOINTMENT_STATUSES,
     BODY_SYSTEMS,
+    CONDITION_SOURCES,
     LAB_FLAGS,
     MEDICATION_STATUSES,
     REMINDER_STATUSES,
@@ -46,6 +49,7 @@ PAGES = [
     "Appointments",
     "Reminders",
     "Wearables",
+    "Tracked Conditions",
     "Provider Summary",
     "Emergency Snapshot",
     "Health Insights",
@@ -56,7 +60,16 @@ PAGES = [
 
 NAV_SECTIONS = {
     "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
-    "Records": ["Health Timeline", "Medications", "Allergies", "Labs", "Appointments", "Reminders", "Wearables"],
+    "Records": [
+        "Health Timeline",
+        "Medications",
+        "Allergies",
+        "Labs",
+        "Appointments",
+        "Reminders",
+        "Wearables",
+        "Tracked Conditions",
+    ],
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
 }
@@ -72,6 +85,7 @@ PAGE_EMOJIS = {
     "Appointments": "📅",
     "Reminders": "🔔",
     "Wearables": "⌚",
+    "Tracked Conditions": "🩺",
     "Provider Summary": "📝",
     "Emergency Snapshot": "🚑",
     "Health Insights": "💡",
@@ -126,6 +140,7 @@ PAGE_DESCRIPTIONS = {
     "Appointments": "Track provider visits, status, location, and preparation notes.",
     "Reminders": "Manage follow-up items and routine health tasks.",
     "Wearables": "Import and review manually recorded wearable metrics.",
+    "Tracked Conditions": "Chart the records commonly tracked for a condition you have noted, and record new conditions.",
     "Provider Summary": "Generate a provider-ready Markdown summary from selected records.",
     "Emergency Snapshot": "Create a concise emergency Markdown snapshot.",
     "Health Insights": "Generate rule-based reports or safety-checked AI insights from a compact data packet.",
@@ -142,6 +157,7 @@ SINGULAR_TITLES = {
     "Appointments": "Appointment",
     "Reminders": "Reminder",
     "Wearables": "Wearable record",
+    "Tracked Conditions": "Condition",
 }
 
 DISPLAY_COLUMN_LABELS = {
@@ -185,6 +201,8 @@ DISPLAY_COLUMN_LABELS = {
     "reminder_type": "Reminder Type",
     "due_date": "Due Date",
     "metric_type": "Metric",
+    "condition_name": "Condition",
+    "noted_date": "Noted",
     "value": "Value",
     "timestamp": "Timestamp",
     "source": "Source",
@@ -206,6 +224,7 @@ DATE_DISPLAY_COLUMNS = {
     "entry_date",
     "appointment_date",
     "due_date",
+    "noted_date",
 }
 
 DATETIME_DISPLAY_COLUMNS = {
@@ -564,6 +583,20 @@ FIELD_CONFIGS = {
         "validator": validation.validate_wearable,
         "order_by": "timestamp",
     },
+    "conditions": {
+        "title": "Tracked Conditions",
+        "fields": [
+            ("condition_name", "text"),
+            ("source", ["", *CONDITION_SOURCES]),
+            # Plain text, not "date_text": that kind prefills today when empty, which would invent a
+            # date the user never gave and re-stamp one on every unrelated edit. Still format-checked
+            # by validate_condition, and still rendered as a date via DATE_DISPLAY_COLUMNS.
+            ("noted_date", "text"),
+            ("notes", "textarea"),
+        ],
+        "validator": validation.validate_condition,
+        "order_by": "condition_name",
+    },
 }
 
 
@@ -575,41 +608,15 @@ def display_column_label(name: str) -> str:
     return DISPLAY_COLUMN_LABELS.get(name, format_label(name).replace(" Id", " ID"))
 
 
-def format_display_date(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return text
-    try:
-        parsed = date.fromisoformat(text)
-    except ValueError:
-        return text
-    return f"{parsed:%b} {parsed.day}, {parsed.year}"
-
-
-def format_display_datetime(value) -> str:
-    text = str(value).strip()
-    if not text:
-        return text
-    if "T" not in text and " " not in text:
-        return format_display_date(text)
-    normalized = text.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return format_display_date(text)
-    time_text = parsed.strftime("%I:%M %p").lstrip("0")
-    return f"{time_text}, {parsed:%b} {parsed.day}, {parsed.year}"
-
-
 def display_dataframe(rows: list[dict]) -> pd.DataFrame:
     frame = pd.DataFrame(rows)
     hidden_columns = [column for column in HIDDEN_DISPLAY_COLUMNS if column in frame.columns]
     if hidden_columns:
         frame = frame.drop(columns=hidden_columns)
     for column in DATE_DISPLAY_COLUMNS.intersection(frame.columns):
-        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_date(value))
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else display_format.format_display_date(value))
     for column in DATETIME_DISPLAY_COLUMNS.intersection(frame.columns):
-        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else format_display_datetime(value))
+        frame[column] = frame[column].apply(lambda value: "" if pd.isna(value) else display_format.format_display_datetime(value))
     return frame.rename(columns={column: display_column_label(column) for column in frame.columns})
 
 
@@ -699,10 +706,25 @@ def selected_profile_banner(person: dict | None, db_path: Path | str | None = No
     )
 
 
-def page_navigation() -> str:
-    current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
+def page_navigation(container=None) -> str:
+    """Render the sidebar navigation and return the page to show.
 
-    with st.sidebar.container(key="nav_menu"):
+    No page is hidden any more. Navigation used to depend on profile data -- it hid Condition
+    Details for a profile with none -- which made nav visibility an observable side channel for
+    whether a locked profile had conditions. That page is gone, and so is the whole surface.
+
+    The fallback survives in a more general form: a `nav_page` left in session state by an older
+    build (Condition Details, say) matches no dispatch branch and would render a blank page.
+    Anything not in PAGES falls back to the Dashboard, and the fallback is written back so a nav
+    button is still marked current.
+    """
+    current_page = st.session_state.get("nav_page", NAV_SECTIONS["Overview"][0])
+    if current_page not in PAGES:
+        current_page = NAV_SECTIONS["Overview"][0]
+        st.session_state["nav_page"] = current_page
+
+    target = st.sidebar.container(key="nav_menu") if container is None else container
+    with target:
         st.caption("Navigation")
         for section, pages in NAV_SECTIONS.items():
             st.markdown(f"**{section}**")
@@ -885,7 +907,14 @@ def close_form(key: str) -> None:
 
 
 def record_label(row: dict) -> str:
-    label = row.get("title") or row.get("name") or row.get("test_name") or row.get("allergen") or row.get("metric_type")
+    label = (
+        row.get("title")
+        or row.get("name")
+        or row.get("test_name")
+        or row.get("allergen")
+        or row.get("metric_type")
+        or row.get("condition_name")
+    )
     return f"{label or 'Record'} (ID {row['id']})"
 
 
@@ -946,6 +975,10 @@ def password_settings(person: dict, db_path: Path | str | None = None) -> None:
             ):
                 security.lock_profile(int(person["id"]), db_path=db_path)
                 st.success("Password saved. Profile is now locked.")
+                # Rerun so the sidebar recomputes. Navigation visibility was already decided for
+                # this render against the unlocked profile, so without this the screen says locked
+                # while still listing profile-data-dependent pages -- which is itself a disclosure.
+                st.rerun()
 
 
 def ai_settings() -> None:
@@ -1119,12 +1152,19 @@ def record_page_scope(table: str, person_id: int, db_path: Path | str) -> str:
     return f"{Path(db_path).resolve()}:{person_id}:{table}"
 
 
-def generic_record_page(table: str, person: dict, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
+def generic_record_page(table: str, person: dict, db_path: Path | str | None = None, demo_mode: bool = False, render_header: bool = True) -> None:  # noqa: C901, PLR0915
+    """Render a table's list and add/edit forms.
+
+    `render_header` exists for Tracked Conditions, which composes its own page header above a
+    detail view and nests this CRUD block in an expander beneath it. Defaulting to True keeps every
+    other caller byte-for-byte unchanged.
+    """
     db_path = db.DB_PATH if db_path is None else db_path
     config = FIELD_CONFIGS[table]
     person_id = int(person["id"])
     state_scope = record_page_scope(table, person_id, db_path)
-    page_header(config["title"])
+    if render_header:
+        page_header(config["title"])
     if demo_mode:
         st.caption("Demo changes stay in this Streamlit session and do not affect saved profiles.")
 
@@ -1148,7 +1188,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
         status = st.selectbox("Reminder status", ["", *REMINDER_STATUSES])
         rows = services.reminder_filters(person_id, status or None, db_path=db_path)
     else:
-        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications"}, db_path=db_path)
+        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications", "conditions"}, db_path=db_path)
 
     dataframe(rows)
 
@@ -1275,6 +1315,69 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
                 st.rerun()
 
 
+def condition_display_lines(rows: list[dict]) -> list[str]:
+    """Format tracked-condition rows as "Condition — Source" display lines.
+
+    Pure formatting over rows already scoped to a single profile. The source is omitted when the
+    record does not carry one; nothing is inferred about the condition beyond what was entered.
+    """
+    lines = []
+    for row in rows:
+        name = str(row.get("condition_name") or "").strip()
+        if not name:
+            continue
+        source = str(row.get("source") or "").strip()
+        lines.append(f"{name} — {source}" if source else name)
+    return lines
+
+
+def render_dashboard_conditions(person_id: int, rows: list[dict], db_path: Path | str) -> None:
+    """Render the dashboard's tracked-condition list and the preview for the selected one.
+
+    Reads only rows already scoped to `person_id`. Selecting a condition shows the records the
+    deterministic mapping associates with it; nothing here interprets those records.
+    """
+    lines = condition_display_lines(rows)
+    names = [str(row.get("condition_name") or "").strip() for row in rows]
+    names = [name for name in dict.fromkeys(names) if name]
+    # Before the empty-profile return, so a stale selection is dropped either way.
+    condition_ui.sync_valid_conditions(st.session_state, names)
+    if not lines:
+        st.caption("No conditions are being tracked.")
+    else:
+        for line in lines:
+            st.markdown(f"- {line}")
+        selected = st.pills(
+            "Condition preview", names, default=names[0], key=condition_ui.SELECTED_CONDITION_KEY
+        )
+        if isinstance(selected, str) and selected in names:
+            condition_ui.render_condition_preview(person_id, selected, db_path=db_path)
+    # Outside the empty-condition branch on purpose. The dashboard carries the accessible slice and
+    # the detail view is a click away rather than a page to hunt for in the sidebar -- and a profile
+    # with no conditions needs that route most, since the page it leads to is where the first one
+    # gets recorded.
+    if st.button("View full condition detail →", key="dashboard_condition_detail"):
+        st.session_state["nav_page"] = "Tracked Conditions"
+        st.rerun()
+
+
+def page_tracked_conditions(person: dict, db_path: Path | str | None = None, demo_mode: bool = False) -> None:
+    """The detailed condition view, with the record list and forms beneath it.
+
+    Ordered detail-first because that is what the page is for; the CRUD block keeps working exactly
+    as it does on every other record page, just nested in an expander. The expander starts open when
+    the profile has no conditions, since adding one is then the only useful thing on the page --
+    the page is never hidden, because it is where a condition is created.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    page_header("Tracked Conditions")
+    rows = services.tracked_conditions(int(person["id"]), db_path=db_path)
+    condition_ui.render_tracked_conditions_detail(person, rows, db_path=db_path)
+    st.divider()
+    with st.expander("Manage tracked conditions", expanded=not rows):
+        generic_record_page("conditions", person, db_path, demo_mode=demo_mode, render_header=False)
+
+
 def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     db_path = db.DB_PATH if db_path is None else db_path
     page_header("Dashboard")
@@ -1306,6 +1409,8 @@ def page_dashboard(person: dict, db_path: Path | str | None = None) -> None:
     section = st.selectbox("Dashboard section", list(section_map), key="dashboard_section")
     st.subheader(section)
     dataframe(section_map[section])
+    st.subheader("Tracked Conditions")
+    render_dashboard_conditions(int(person["id"]), data["conditions"], db_path)
 
 
 def page_provider_summary(person: dict, db_path: Path | str | None = None) -> None:
@@ -1498,7 +1603,9 @@ def main() -> None:  # noqa: C901, PLR0915
         st.divider()
         demo_mode_controls()
         st.divider()
-        page = page_navigation()
+        # Created here so navigation keeps its position in the sidebar, but filled below: which
+        # pages are visible depends on the selected profile, which is not resolved until after.
+        nav_slot = st.container(key="nav_menu")
         st.divider()
         demo_mode = is_demo_mode()
         current_db_path = active_db_path()
@@ -1506,6 +1613,14 @@ def main() -> None:  # noqa: C901, PLR0915
         if person:
             label = "Demo profile" if demo_mode else "Active profile"
             st.caption(f"{label}: {profile_selection_label(person, current_db_path)}")
+        # Unconditional, and here rather than in a page: switching profiles while on any other page
+        # must still drop the previous profile's condition selection out of session state. Lock state
+        # is part of the scope, so locking clears it too.
+        locked = person is not None and is_locked_profile(person, current_db_path)
+        condition_ui.sync_profile_scope(
+            st.session_state, condition_ui.profile_scope(person, current_db_path, locked)
+        )
+        page = page_navigation(nav_slot)
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)
@@ -1559,6 +1674,8 @@ def main() -> None:  # noqa: C901, PLR0915
         generic_record_page("reminders", person, current_db_path, demo_mode=demo_mode)
     elif page == "Wearables":
         generic_record_page("wearable_records", person, current_db_path, demo_mode=demo_mode)
+    elif page == "Tracked Conditions":
+        page_tracked_conditions(person, current_db_path, demo_mode=demo_mode)
     elif page == "Provider Summary":
         page_provider_summary(person, db_path=current_db_path)
     elif page == "Emergency Snapshot":

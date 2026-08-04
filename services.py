@@ -104,6 +104,17 @@ def active_medications(person_id: int, db_path: Path | str | None = None) -> lis
     return list_items("medications", person_id, {"status": "Active"}, order_by="name", descending=False, db_path=db_path)
 
 
+def tracked_conditions(person_id: int, db_path: Path | str | None = None) -> list[dict]:
+    """Return the selected profile's tracked conditions, ordered by name for stable output.
+
+    Reads only the person-scoped `conditions` table. A row is exactly what the user (or demo seed
+    data) entered, attributed to whoever reported it; nothing is inferred from other records.
+    Callers are responsible for authorization -- this does not check locked-profile state.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    return list_items("conditions", person_id, order_by="condition_name", descending=False, db_path=db_path)
+
+
 def latest_labs(person_id: int, db_path: Path | str | None = None) -> list[dict]:
     db_path = db.DB_PATH if db_path is None else db_path
     labs = list_items("lab_results", person_id, order_by="id", descending=True, db_path=db_path)
@@ -203,6 +214,7 @@ def dashboard_data(person_id: int, db_path: Path | str | None = None) -> dict:
     return {
         "person": get_person(person_id, db_path=db_path),
         "allergies": list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path),
+        "conditions": tracked_conditions(person_id, db_path=db_path),
         "active_medications": active_medications(person_id, db_path=db_path),
         "latest_labs": latest_labs(person_id, db_path=db_path),
         "recent_entries": recent_health_entries(person_id, db_path=db_path),
@@ -278,6 +290,24 @@ def reminder_filters(person_id: int, status: str | None = None, db_path: Path | 
     return list_items("reminders", person_id, filters, "due_date", False, db_path=db_path)
 
 
+def _condition_lines(person_id: int, db_path: Path | str | None = None) -> list[str]:
+    """Render a profile's tracked conditions as Markdown bullets, or a single "none" line.
+
+    Reads only the person-scoped `conditions` table. Each line states what was entered and who
+    reported it; it makes no claim that the condition is current, since no status is stored.
+    """
+    db_path = db.DB_PATH if db_path is None else db_path
+    rows = tracked_conditions(person_id, db_path=db_path)
+    lines = []
+    for row in rows:
+        name = str(row.get("condition_name") or "").strip()
+        if not name:
+            continue
+        source = str(row.get("source") or "").strip()
+        lines.append(f"- {name} (reported by {source})" if source else f"- {name}")
+    return lines or ["None recorded."]
+
+
 def generate_provider_summary(
     person_id: int,
     start_date: str | None = None,
@@ -305,6 +335,8 @@ def generate_provider_summary(
     ]
     allergies = list_items("allergies", person_id, order_by="allergen", descending=False, db_path=db_path)
     lines += [f"- {a['allergen']} ({a.get('severity') or 'severity unknown'}): {a.get('reaction') or ''}" for a in allergies] or ["None recorded."]
+    lines += ["", "## Tracked Conditions"]
+    lines += _condition_lines(person_id, db_path=db_path)
     lines += ["", "## Active Medications"]
     meds = active_medications(person_id, db_path=db_path)
     lines += [f"- {m['name']} {m.get('dose') or ''} {m.get('frequency') or ''}".strip() for m in meds] or ["None recorded."]
@@ -315,7 +347,10 @@ def generate_provider_summary(
     if include_labs:
         lines += ["", "## Recent Labs"]
         labs = filter_labs(person_id, start_date, end_date, db_path=db_path)[:20]
-        lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag') or 'Unknown'}]".strip() for lab in labs] or ["None recorded."]
+        # "Unknown" is a real member of `models.LAB_FLAGS`, so falling back to it made a lab nobody
+        # flagged read, in a provider-facing document, exactly like one a source flagged Unknown.
+        # An absent flag is reported as absent.
+        lines += [f"- {lab['lab_date']}: {lab['test_name']} {lab.get('result_value') or lab.get('numeric_value') or ''} {lab.get('unit') or ''} [{lab.get('flag') or 'Not flagged'}]".strip() for lab in labs] or ["None recorded."]
     lines += ["", "## Upcoming Appointments"]
     appointments = upcoming_appointments(person_id, db_path=db_path)[:10]
     lines += [f"- {a['appointment_date']}: {a['title']} with {a.get('provider') or 'provider not recorded'}" for a in appointments] or ["None recorded."]
@@ -347,6 +382,10 @@ def generate_emergency_snapshot(person_id: int, db_path: Path | str | None = Non
         "## Allergies",
     ]
     lines += [f"- {a['allergen']}: {a.get('reaction') or ''} ({a.get('severity') or 'severity unknown'})" for a in allergies] or ["None recorded."]
+    # Before medications on purpose: in an emergency, knowing what is being treated is at least as
+    # useful as knowing what is being taken for it.
+    lines += ["", "## Tracked Conditions"]
+    lines += _condition_lines(person_id, db_path=db_path)
     lines += ["", "## Active Medications"]
     lines += [f"- {m['name']} {m.get('dose') or ''} {m.get('frequency') or ''}".strip() for m in meds] or ["None recorded."]
     lines += ["", "## Key Health Notes"]

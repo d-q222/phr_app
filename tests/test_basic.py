@@ -23,6 +23,7 @@ import imports_exports  # noqa: E402
 import insights  # noqa: E402
 import security  # noqa: E402
 import services  # noqa: E402
+import validation  # noqa: E402
 
 CHILD_TABLE_SEEDS = {
     "allergies": {"allergen": "Peanuts", "severity": "Severe"},
@@ -36,6 +37,7 @@ CHILD_TABLE_SEEDS = {
         "value": 100,
         "timestamp": "2026-01-01T08:00:00",
     },
+    "conditions": {"condition_name": "Asthma"},
 }
 
 
@@ -1885,3 +1887,572 @@ def test_locked_profile_stays_locked_when_db_path_is_omitted(tmp_path, monkeypat
 
     assert app.is_locked_profile(person, other_db) is False
     assert app.is_locked_profile(person) is True
+
+
+# --- Chronic conditions (person-scoped record type) ---------------------------------------------
+
+
+def _two_profiles_with_conditions(tmp_path):
+    """Alice and Bob, each with one condition. Returns (db_path, alice, bob, bob_record_id)."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    bob = services.create_person({"name": "Bob"}, db_path=db_path)
+    services.create_item(
+        "conditions", alice, {"condition_name": "Diabetes", "source": "Endocrinologist"}, db_path=db_path
+    )
+    bob_record = services.create_item(
+        "conditions", bob, {"condition_name": "Hypertension", "source": "Cardiologist"}, db_path=db_path
+    )
+    return db_path, alice, bob, bob_record
+
+
+def test_condition_crud_round_trip(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+
+    record_id = services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"},
+        db_path=db_path,
+    )
+    rows = services.tracked_conditions(person_id, db_path=db_path)
+    assert [row["condition_name"] for row in rows] == ["Diabetes"]
+    assert rows[0]["source"] == "Endocrinologist"
+
+    services.update_item(
+        "conditions",
+        person_id=person_id,
+        record_id=record_id,
+        data={"source": "Primary Care"},
+        db_path=db_path,
+    )
+    assert services.tracked_conditions(person_id, db_path=db_path)[0]["source"] == "Primary Care"
+
+    services.delete_item("conditions", person_id=person_id, record_id=record_id, db_path=db_path)
+    assert services.tracked_conditions(person_id, db_path=db_path) == []
+
+
+def test_tracked_conditions_orders_by_name_ascending(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    for name in ("Hypertension", "Asthma", "Diabetes"):
+        services.create_item("conditions", person_id, {"condition_name": name}, db_path=db_path)
+
+    names = [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)]
+    assert names == ["Asthma", "Diabetes", "Hypertension"]
+
+
+def test_validate_condition_accepts_and_rejects():
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"}
+    ) == []
+    # A blank source is allowed; the column is optional.
+    assert validation.validate_condition({"condition_name": "Diabetes", "source": ""}) == []
+    assert validation.validate_condition({"condition_name": ""}) == ["Condition name is required."]
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "source": "Astrologer"}
+    ) != []
+    assert validation.validate_condition(
+        {"condition_name": "Diabetes", "noted_date": "not-a-date"}
+    ) != []
+
+
+def test_validate_condition_does_not_mutate_input():
+    data = {"condition_name": "Diabetes", "source": "Endocrinologist"}
+    validation.validate_condition(data)
+    assert data == {"condition_name": "Diabetes", "source": "Endocrinologist"}
+
+
+def test_conditions_are_isolated_between_profiles(tmp_path):
+    db_path, alice, bob, _ = _two_profiles_with_conditions(tmp_path)
+
+    alice_names = [row["condition_name"] for row in services.tracked_conditions(alice, db_path=db_path)]
+    bob_names = [row["condition_name"] for row in services.tracked_conditions(bob, db_path=db_path)]
+    assert alice_names == ["Diabetes"]
+    assert bob_names == ["Hypertension"]
+
+    alice_dashboard = services.dashboard_data(alice, db_path=db_path)
+    assert [row["condition_name"] for row in alice_dashboard["conditions"]] == ["Diabetes"]
+    assert "Hypertension" not in json.dumps(alice_dashboard)
+
+
+def test_selected_json_backup_excludes_other_profiles_conditions(tmp_path):
+    db_path, alice, _, _ = _two_profiles_with_conditions(tmp_path)
+
+    backup = json.loads(imports_exports.export_json_backup(db_path=db_path, person_id=alice))
+
+    assert [row["condition_name"] for row in backup["tables"]["conditions"]] == ["Diabetes"]
+    assert "Hypertension" not in json.dumps(backup)
+    assert "Cardiologist" not in json.dumps(backup)
+
+
+def test_condition_update_rejects_a_record_owned_by_another_profile(tmp_path):
+    db_path, alice, _, bob_record = _two_profiles_with_conditions(tmp_path)
+
+    with pytest.raises(db.RecordNotFound):
+        services.update_item(
+            "conditions", person_id=alice, record_id=bob_record, data={"condition_name": "Owned"}, db_path=db_path
+        )
+    with pytest.raises(db.RecordNotFound):
+        services.delete_item("conditions", person_id=alice, record_id=bob_record, db_path=db_path)
+
+
+def test_delete_person_removes_conditions_without_foreign_key_error(tmp_path):
+    """Regression: conditions must be in db.TABLES or this raises IntegrityError."""
+    db_path, alice, bob, _ = _two_profiles_with_conditions(tmp_path)
+
+    db.delete_person(alice, db_path=db_path)
+
+    assert services.tracked_conditions(alice, db_path=db_path) == []
+    assert [row["condition_name"] for row in services.tracked_conditions(bob, db_path=db_path)] == [
+        "Hypertension"
+    ]
+
+
+def test_json_backup_round_trip_preserves_conditions(tmp_path):
+    """Regression: conditions must be in BACKUP_VALIDATORS or restore raises KeyError."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Diabetes", "source": "Endocrinologist", "noted_date": "2026-01-15"},
+        db_path=db_path,
+    )
+
+    backup = imports_exports.export_json_backup(db_path=db_path, person_id=person_id)
+
+    restore_path = tmp_path / "restored.db"
+    db.init_db(restore_path)
+    imports_exports.import_json_backup(backup, db_path=restore_path)
+
+    restored_people = services.list_people(db_path=restore_path)
+    assert len(restored_people) == 1
+    rows = services.tracked_conditions(int(restored_people[0]["id"]), db_path=restore_path)
+    assert [(row["condition_name"], row["source"]) for row in rows] == [("Diabetes", "Endocrinologist")]
+
+
+def test_init_db_adds_conditions_table_to_a_pre_existing_database(tmp_path):
+    """Schema idempotency: an older database gains the table, and re-running is a no-op."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DROP TABLE conditions")
+        connection.commit()
+
+    db.init_db(db_path)
+    db.init_db(db_path)
+
+    person_id = services.create_person({"name": "Alex"}, db_path=db_path)
+    services.create_item("conditions", person_id, {"condition_name": "Asthma"}, db_path=db_path)
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == [
+        "Asthma"
+    ]
+
+
+def test_condition_display_lines_omits_missing_source_and_blank_rows():
+    lines = app.condition_display_lines(
+        [
+            {"condition_name": "Diabetes", "source": "Endocrinologist"},
+            {"condition_name": "Asthma", "source": None},
+            {"condition_name": "  ", "source": "Primary Care"},
+        ]
+    )
+    assert lines == ["Diabetes — Endocrinologist", "Asthma"]
+
+
+# --- regressions from the 2026-08-04 independent review ---------------------------------------
+
+
+def test_fhir_replace_import_refuses_to_delete_what_it_cannot_restore(tmp_path):
+    """A FHIR bundle carries no Condition, so clear-and-replace used to destroy tracked conditions.
+
+    Reproduced before the fix: export a profile's own bundle, re-import it with clear-existing, and
+    every condition was gone -- while the result dict reported `conditions: 0`, which is
+    indistinguishable from "the bundle had none to import". Medications and every other table came
+    back, so nothing on screen suggested a loss had happened.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
+    services.create_item(
+        "conditions",
+        person_id,
+        {"condition_name": "Hypertension", "source": "Primary Care", "noted_date": "2025-01-01"},
+        db_path=database,
+    )
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "conditions" in str(excinfo.value)
+    # The refusal happens before anything is deleted, so both tables are untouched.
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]
+    assert len(services.list_items("medications", person_id, db_path=database)) == 1
+
+
+def test_fhir_replace_import_refuses_to_unlock_a_password_protected_profile(tmp_path):
+    """A table-level check passed this and the profile came back UNLOCKED.
+
+    `Patient` carries name, birth date, sex, relationship and emergency contact -- and nothing for
+    `profile_password_enabled`, `profile_password_hash` or `profile_password_hint`. So a protected
+    profile with no conditions cleared the table-level guard, and clear-and-replace reset
+    `profile_password_enabled` to 0: an import silently unlocking a profile, which is the failure
+    AGENTS.md section 4 exists to prevent. Its notes were overwritten with a fixed string too.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person(
+        {"name": "Protected Person", "relationship": "Self", "notes": "Keep private."}, db_path=database
+    )
+    db.update_record(
+        "people",
+        person_id,
+        {
+            "profile_password_enabled": 1,
+            "profile_password_hash": security.hash_password("correct horse"),
+            "profile_password_hint": "the usual one",
+        },
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    # The profile is protected, so the refusal stays generic rather than naming the categories.
+    assert "some existing data" in str(excinfo.value)
+    row = db.list_records("people", db_path=database)[0]
+    assert row["profile_password_enabled"] == 1
+    assert row["profile_password_hint"] == "the usual one"
+    assert row["notes"] == "Keep private."
+    assert security.verify_password("correct horse", row["profile_password_hash"])
+
+
+def test_the_guard_measures_person_round_trip_loss_rather_than_declaring_it(tmp_path):
+    """The premise is checked by round-tripping, so no hand-written list can drift out of date.
+
+    The previous version declared which columns were "faithful" and the list was wrong: `sex` looked
+    faithful because Male and Female survive, but `_gender_to_fhir` collapses anything outside its
+    vocabulary to "unknown". Seven mutations that made a converter keep a key and drop its value
+    survived the suite, because the test asserted key presence rather than value fidelity.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    services.create_person(
+        {
+            "name": "Test Person",
+            "date_of_birth": "1990-01-01",
+            "sex": "Female",
+            "relationship": "Self",
+            "emergency_contact": "Next Of Kin",
+        },
+        db_path=database,
+    )
+    people = db.list_records("people", db_path=database)
+
+    # Nothing here is lossy, so nothing is reported and clear-import stays available.
+    assert fhir._lossy_person_columns(people) == set()
+
+    # Every one of those columns must actually survive both converters, by value.
+    restored = fhir._person_from_patient(fhir._patient_resource(people[0]))
+    for column in ("name", "date_of_birth", "sex", "relationship", "emergency_contact"):
+        assert restored[column] == people[0][column], column
+    # And a converter that keeps the key while dropping the value is caught, which is the whole point.
+    assert fhir._lossy_person_columns([{**people[0], "sex": "Nonbinary"}]) == {"sex"}
+    assert fhir._lossy_person_columns([{**people[0], "notes": "Keep private."}]) == {"notes"}
+
+
+def test_a_profile_already_imported_from_fhir_can_be_replaced_again(tmp_path):
+    """The guard must not block the re-import-over-the-top workflow forever.
+
+    `_person_from_patient` stamps `notes` with "Imported from FHIR.". Treating `notes` as
+    categorically unrestorable meant that after one import, every later clear-and-replace refused --
+    protecting a placeholder the importer would rewrite byte-identically.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    source = tmp_path / "fhir_source.db"
+    db.init_db(source)
+    person_id = services.create_person({"name": "Test Person"}, db_path=source)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=source)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=source)
+
+    imports_exports.import_fhir_bundle(bundle, clear_existing=False, db_path=database)
+    assert db.list_records("people", db_path=database)[0]["notes"] == "Imported from FHIR."
+
+    # The same bundle again, this time replacing: nothing is at risk, so it must go through.
+    result = imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert result["imported"]["medications"] == 1
+    assert len(db.list_records("people", db_path=database)) == 1
+
+
+def test_fhir_replace_import_still_works_when_nothing_would_be_lost(tmp_path):
+    """The guard is scoped to state that actually exists, so a plain profile is unaffected."""
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "relationship": "Self"}, db_path=database)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    result = imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert result["imported"]["medications"] == 1
+    restored = services.list_people(db_path=database)
+    assert len(restored) == 1
+
+
+def test_restorability_is_asked_of_the_bundle_not_of_what_the_importer_can_parse(tmp_path):
+    """The capability-derived version of this check is a trap, and a live one.
+
+    `FHIR_VALIDATORS` is keyed by what the IMPORTER accepts; restoring after a clear needs what the
+    EXPORTER emits. Those sets coincide only by accident, and the next change in this stack separates
+    them -- Condition import support puts `conditions` into FHIR_VALIDATORS while `export_bundle`
+    still deliberately emits none. A capability-derived guard would then stop reporting conditions as
+    at risk and the original data loss would return silently.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    for table, seed in CHILD_TABLE_SEEDS.items():
+        services.create_item(table, person_id, dict(seed), db_path=database)
+    resources = [entry["resource"] for entry in json.loads(fhir.export_bundle("R4", db_path=database))["entry"]]
+
+    carried = fhir.tables_this_bundle_restores(resources)
+
+    # Whatever the exporter actually emitted is restorable; everything else in db.TABLES is not,
+    # and every one of those holds a row here, so all of them must be reported.
+    missing = set(db.TABLES) - carried
+    assert "conditions" in missing, "the exporter emits no Condition; if that changes, revisit the guard"
+    reported = fhir.unrestorable_state(database, bundle_tables=carried)
+    for table in missing:
+        assert table in reported, table
+    # And a table the bundle does carry is not reported, so the guard is not simply refusing always.
+    assert "medications" in carried
+    assert "medications" not in reported
+
+
+def test_the_fhir_clear_guard_sees_every_profile_not_just_the_bundle_s_own(tmp_path):
+    """The clear is database-global, so the guard must be too.
+
+    A one-profile fixture cannot tell a global count from a person-scoped one. If the guard were
+    ever scoped to the bundle's Patient -- which looks like the natural response to the fact that it
+    reports on profiles the importer did not choose -- then profile B could clear-import while
+    profile A's conditions were destroyed, and every other test here would stay green.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    keeper = services.create_person({"name": "Profile A"}, db_path=database)
+    services.create_item("conditions", keeper, {"condition_name": "Asthma"}, db_path=database)
+    importer = services.create_person({"name": "Profile B"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=importer, db_path=database)
+
+    with pytest.raises(ValueError):
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert [row["condition_name"] for row in services.tracked_conditions(keeper, db_path=database)] == ["Asthma"]
+
+
+def test_the_fhir_clear_refusal_names_what_is_lost_but_never_how_much(tmp_path):
+    """A locked profile's row count is health data, and this string reaches st.error verbatim.
+
+    AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
+    through, and the guard is database-global by necessity -- it sees locked profiles too.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    locked = services.create_person({"name": "Locked Profile"}, db_path=database)
+    for name in ("Asthma", "Gout", "Hypertension"):
+        services.create_item("conditions", locked, {"condition_name": name}, db_path=database)
+    db.update_record(
+        "people",
+        locked,
+        {"profile_password_enabled": 1, "profile_password_hash": security.hash_password("secret")},
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=locked, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    message = str(excinfo.value)
+    assert "3" not in message
+    # A protected profile exists, so even the category is withheld -- "a profile here tracks
+    # conditions" is health data about someone who locked their record.
+    assert "conditions" not in message
+    assert "some existing data" in message
+
+
+def test_a_lab_observation_with_no_interpretation_imports_without_a_flag(tmp_path):
+    """A round trip must not turn "nobody flagged this" into the recorded flag "Unknown"."""
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "Hemoglobin A1c", "numeric_value": 5.5, "unit": "%", "lab_date": "2026-01-01"},
+        db_path=database,
+    )
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    target = tmp_path / "fhir_target.db"
+    db.init_db(target)
+    imports_exports.import_fhir_bundle(bundle, clear_existing=False, db_path=target)
+
+    imported = db.list_records("lab_results", db_path=target)[0]
+    assert not imported["flag"]
+
+
+def test_fhir_replace_import_refuses_when_the_bundle_omits_an_existing_profile(tmp_path):
+    """Representable in FHIR is not the same as present in THIS bundle.
+
+    Reproduced before the fix: with two profiles and a bundle exported for only one of them, the
+    guard returned nothing to report, the clear deleted every row in the database, and the bundle
+    rebuilt only its own patient. The other profile -- name, medications, labs, all of it -- was
+    gone, and every table it used was one FHIR can represent, so a table-level check saw no risk.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    absent = services.create_person({"name": "Profile A"}, db_path=database)
+    services.create_item("medications", absent, {"name": "A-med", "start_date": "2025-01-01"}, db_path=database)
+    exported = services.create_person({"name": "Profile B"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=exported, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "does not contain" in str(excinfo.value)
+    assert {row["name"] for row in services.list_people(db_path=database)} == {"Profile A", "Profile B"}
+    assert len(services.list_items("medications", absent, db_path=database)) == 1
+
+
+def test_fhir_replace_import_refuses_a_profile_sex_fhir_cannot_represent(tmp_path):
+    """Per value, not per column: "Female" round-trips, "Nonbinary" does not.
+
+    `_gender_to_fhir` collapses anything outside its vocabulary to "unknown" and `profile_form`
+    takes free text, so a profile recorded as Nonbinary came back as Unknown. Flagging the whole
+    column instead would block every profile that has a sex recorded at all.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person", "sex": "Nonbinary"}, db_path=database)
+    bundle = fhir.export_bundle("R4", person_id=person_id, db_path=database)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "sex" in str(excinfo.value)
+    assert db.list_records("people", db_path=database)[0]["sex"] == "Nonbinary"
+    # A representable value is not blocked by the same check.
+    other = tmp_path / "fhir_ok.db"
+    db.init_db(other)
+    ok_id = services.create_person({"name": "Test Person", "sex": "Female"}, db_path=other)
+    ok_bundle = fhir.export_bundle("R4", person_id=ok_id, db_path=other)
+    imports_exports.import_fhir_bundle(ok_bundle, clear_existing=True, db_path=other)
+    assert db.list_records("people", db_path=other)[0]["sex"] == "Female"
+
+
+def test_the_provider_summary_reports_an_absent_lab_flag_as_absent(tmp_path):
+    """"Unknown" is a flag a source can record, so it must not stand in for no flag at all."""
+    database = tmp_path / "provider_summary.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "Hemoglobin A1c", "numeric_value": 5.5, "lab_date": "2026-01-01"},
+        db_path=database,
+    )
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "TSH", "numeric_value": 2.1, "lab_date": "2026-01-02", "flag": "Unknown"},
+        db_path=database,
+    )
+
+    summary = services.generate_provider_summary(person_id, db_path=database)
+
+    lines = {line.split(": ", 1)[1].split(" ")[0]: line for line in summary.splitlines() if line.startswith("- 2026")}
+    assert "[Not flagged]" in lines["Hemoglobin"]
+    assert "[Unknown]" in lines["TSH"]
+
+
+def test_fhir_replace_import_refuses_a_bundle_about_a_different_person(tmp_path):
+    """Matching Patient COUNTS is not the same as containing the same profiles.
+
+    One existing profile and one unrelated incoming Patient made the counts equal, so a count-based
+    check passed, the clear ran, and the existing profile was replaced by a stranger's record.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    mine = services.create_person({"name": "My Profile"}, db_path=database)
+    services.create_item("medications", mine, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+
+    elsewhere = tmp_path / "fhir_elsewhere.db"
+    db.init_db(elsewhere)
+    for _ in range(4):  # push ids past mine, so identity and not ordering is what decides
+        services.create_person({"name": "Filler"}, db_path=elsewhere)
+    stranger = services.create_person({"name": "Someone Else"}, db_path=elsewhere)
+    foreign_bundle = fhir.export_bundle("R4", person_id=stranger, db_path=elsewhere)
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(foreign_bundle, clear_existing=True, db_path=database)
+
+    assert "does not contain" in str(excinfo.value)
+    assert [row["name"] for row in services.list_people(db_path=database)] == ["My Profile"]
+    assert len(services.list_items("medications", mine, db_path=database)) == 1
+
+
+def test_a_bundle_of_this_database_s_own_profiles_still_replaces_cleanly(tmp_path):
+    """The identity check must not block the legitimate full-database restore."""
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    first = services.create_person({"name": "Profile One"}, db_path=database)
+    services.create_item("medications", first, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+    services.create_person({"name": "Profile Two"}, db_path=database)
+    whole_database = fhir.export_bundle("R4", db_path=database)
+
+    result = imports_exports.import_fhir_bundle(whole_database, clear_existing=True, db_path=database)
+
+    assert result["imported"]["people"] == 2
+    assert sorted(row["name"] for row in services.list_people(db_path=database)) == ["Profile One", "Profile Two"]
+
+
+def test_teaching_the_importer_a_new_resource_cannot_re_open_the_data_loss(tmp_path, monkeypatch):
+    """Simulates the next change in this stack, which is where this guard would have failed.
+
+    PR #12 adds Condition *import* support, putting `conditions` into `FHIR_VALIDATORS` while
+    `export_bundle` still deliberately emits no Condition. Had the guard derived restorability from
+    `{"people", *FHIR_VALIDATORS}`, that single addition would have made it stop reporting
+    conditions as at risk -- and a full export re-imported with "clear existing" would have deleted
+    every tracked condition and restored none, silently reinstating the exact loss this guard exists
+    to prevent, with both branches' test suites green because neither contains both halves.
+
+    Deriving from the payload makes that impossible, and this test pins it by teaching the importer
+    the resource without teaching the exporter to emit it.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item("conditions", person_id, {"condition_name": "Hypertension"}, db_path=database)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+
+    # The importer now understands conditions; the exporter still emits none.
+    monkeypatch.setitem(fhir.FHIR_VALIDATORS, "conditions", validation.validate_condition)
+    bundle = fhir.export_bundle("R4", db_path=database)
+    assert "Condition" not in {entry["resource"]["resourceType"] for entry in json.loads(bundle)["entry"]}
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "conditions" in str(excinfo.value)
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]

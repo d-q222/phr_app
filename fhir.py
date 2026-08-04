@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -78,11 +79,195 @@ def export_bundle(version: str = "R4", person_id: int | None = None, db_path: Pa
     return json.dumps(bundle, indent=2)
 
 
+# Regenerated on insert. Losing the previous values is bookkeeping, not data loss.
+_PERSON_BOOKKEEPING_COLUMNS = frozenset({"created_at", "updated_at"})
+# Phrasing for the columns whose loss needs more explanation than a column name gives. Anything not
+# named here falls back to the raw column, so a newly added column still surfaces rather than hiding.
+_PERSON_LOSS_DESCRIPTIONS = {
+    "profile_password_enabled": "password protection (profiles would come back unlocked)",
+    "profile_password_hash": "stored profile passwords",
+    "profile_password_hint": "profile password hints",
+    "notes": "profile notes (replaced with a fixed 'Imported from FHIR.' string)",
+    "sex": "profile sex values FHIR cannot represent",
+    "name": "profile names FHIR cannot represent",
+    "date_of_birth": "profile dates of birth",
+    "relationship": "profile relationships",
+    "emergency_contact": "profile emergency contacts",
+}
+
+
+def tables_this_bundle_restores(resources: Sequence[dict]) -> set[str]:
+    """Which tables the resources in hand can actually repopulate.
+
+    Asked of the payload, not of the codebase's capabilities. The obvious version of this check --
+    "which tables can the importer populate in principle", i.e. ``{"people", *FHIR_VALIDATORS}`` --
+    is a trap, and a live one:
+
+    ``FHIR_VALIDATORS`` is keyed by what the **importer** accepts. Restoring after a clear needs
+    what the **exporter** emits. Those two sets coincided only by accident, and the very next change
+    in this stack separates them: adding Condition *import* support puts ``conditions`` into
+    ``FHIR_VALIDATORS`` while ``export_bundle`` still deliberately emits no Condition. A
+    capability-derived guard would then stop reporting conditions as at risk, and a full export
+    re-imported with "clear existing" would delete every tracked condition and restore none --
+    reinstating, silently, the exact data loss this guard was written to prevent.
+
+    Deriving from the bundle is immune to that, because a bundle that carries no Condition resource
+    cannot restore the conditions table no matter what the importer is capable of.
+    """
+
+    tables = {"people"} if any(r.get("resourceType") == "Patient" for r in resources) else set()
+    for resource in resources:
+        if resource.get("resourceType") == "Patient":
+            continue
+        table, _ = _local_record_from_resource(resource)
+        if table:
+            tables.add(table)
+    return tables
+
+
+def _lossy_person_columns(people: Sequence[dict]) -> set[str]:
+    """Which `people` columns actually lose their value in a Patient round trip, for these rows.
+
+    Measured, not declared. An earlier version listed the "faithful" columns by hand and the list was
+    wrong: `sex` looked faithful because Male/Female survive, but `_gender_to_fhir` collapses
+    anything outside its vocabulary to "unknown" and `profile_form` takes free text, so a profile
+    recorded as "Nonbinary" came back "Unknown" and the guard permitted the clear. A hand-written
+    list also cannot notice a converter that later stops carrying a field.
+
+    Round-tripping each real row through both converters answers the question directly, per value:
+    "Female" is not flagged, "Nonbinary" is. It also stops a re-import loop from being blocked
+    forever -- a profile already carrying the importer's own "Imported from FHIR." note round-trips
+    to the identical string, so there is nothing to lose and nothing to refuse.
+    """
+
+    lossy: set[str] = set()
+    for row in people:
+        restored = _person_from_patient(_patient_resource(row))
+        for column in db.TABLE_COLUMNS["people"]:
+            if column in _PERSON_BOOKKEEPING_COLUMNS or column in lossy:
+                continue
+            stored = row.get(column)
+            if stored in (None, "", 0):
+                continue
+            if restored.get(column) != stored:
+                lossy.add(column)
+    return lossy
+
+
+def bundle_person_ids(resources: Sequence[dict]) -> set[str]:
+    """The local person ids a bundle's Patient resources claim to be.
+
+    ``_patient_resource`` stamps each Patient with ``identifier`` ``urn:phr:ids:person`` carrying the
+    row's own id, so a bundle exported from this database names exactly which profiles it can put
+    back. A bundle from elsewhere carries none of them, which is the correct answer: it cannot
+    restore local profiles either.
+    """
+
+    found = set()
+    for resource in resources:
+        if resource.get("resourceType") != "Patient":
+            continue
+        for identifier in resource.get("identifier", []):
+            if identifier.get("system") == "urn:phr:ids:person" and identifier.get("value"):
+                found.add(str(identifier["value"]))
+    return found
+
+
+def unrestorable_state(
+    db_path: Path | str | None = None,
+    bundle_people: set[str] | None = None,
+    bundle_tables: set[str] | None = None,
+) -> list[str]:
+    """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
+
+    Three levels, because each of the first two alone gave false assurance:
+
+    * whole tables the **incoming bundle** carries no resource for -- see
+      ``tables_this_bundle_restores`` for why this is asked of the payload rather than of what the
+      importer is capable of;
+    * columns of ``people`` a ``Patient`` cannot carry, measured by round-tripping each real row
+      through both converters (see ``_lossy_person_columns``) -- a password-protected profile with
+      no conditions passed the table-level check and came back with ``profile_password_enabled``
+      reset to 0, silently unlocked by an import;
+    * **profiles this particular bundle does not contain.** The clear is database-wide while a
+      bundle is usually one profile's export, so importing profile B's bundle over a two-profile
+      database deleted profile A outright -- every table, restorable or not. Being *representable*
+      in FHIR is not the same as being *in this bundle*, and only the second one saves the data.
+
+    ``bundle_people`` is the set of local person ids the incoming bundle's Patients claim (see
+    ``bundle_person_ids``). Passing ``None`` skips that check, for callers asking only "what is at
+    risk here" without a specific payload in hand.
+
+    **Names what would be lost, never how much, and stays generic when any profile is protected.**
+    This is database-global by necessity and the result is rendered verbatim in a Streamlit error;
+    AGENTS.md section 4 lists error messages among the channels a locked profile must not leak
+    through. A count is a fact about someone's health, and so is the category, so when a protected
+    profile exists the caller gets no categories at all.
+    """
+
+    db_path = db.DB_PATH if db_path is None else db_path
+    # Falls back to "every table" only when no payload is supplied, i.e. a caller asking what is at
+    # risk in the abstract. The destructive path always supplies one.
+    restorable = db.TABLES if bundle_tables is None else bundle_tables
+    losses = []
+    for table in db.TABLES:
+        if table in restorable:
+            continue
+        if db.list_records(table, db_path=db_path):
+            losses.append(table)
+
+    people = db.list_records("people", db_path=db_path)
+    for column in sorted(_lossy_person_columns(people)):
+        losses.append(_PERSON_LOSS_DESCRIPTIONS.get(column, f"people.{column}"))
+
+    # Identity, not arithmetic. Counting Patients let one existing profile be replaced by one
+    # unrelated incoming Patient: the counts matched, the guard passed, and the profile was gone.
+    if bundle_people is not None and any(str(row["id"]) not in bundle_people for row in people):
+        losses.append("profiles this bundle does not contain")
+    return losses
+
+
+def refuse_unrestorable_clear(resources: Sequence[dict], db_path: Path | str | None = None) -> None:
+    """Raise if clearing before replaying `resources` would destroy something they cannot restore.
+
+    Extracted from `import_bundle` rather than inlined: three separate changes in this stack each add
+    a branch to that function, and it is the one place where a missed early return means data loss,
+    so it should stay short enough to read in one go.
+
+    A FHIR bundle carries no Condition on export, so clearing every table and replaying the bundle
+    deleted a profile's tracked conditions with nothing able to bring them back -- while the result
+    dict reported `conditions: 0`, indistinguishable from "the bundle had none". The rows cannot
+    simply be spared either: `import_all_tables` deletes in reverse table order precisely so children
+    go before `people`, and leaving conditions behind would fail the foreign key on the parent delete.
+    """
+
+    blocked = unrestorable_state(
+        db_path,
+        bundle_people=bundle_person_ids(resources),
+        bundle_tables=tables_this_bundle_restores(resources),
+    )
+    if not blocked:
+        return
+    # Categories are withheld entirely when any profile is password-protected: "a profile here
+    # tracks conditions" is health data about someone who locked their record, and this string is
+    # rendered verbatim by st.error (AGENTS.md section 4).
+    protected = any(row.get("profile_password_enabled") for row in db.list_records("people", db_path=db_path))
+    detail = "some existing data" if protected else ", ".join(blocked)
+    # The remedies named here are the ones that actually change this outcome. "Take a backup first"
+    # does not: the guard would refuse the retry identically, which reads as a precondition the user
+    # can satisfy when it is not one.
+    raise ValueError(
+        "Clearing existing records would permanently delete data this FHIR bundle cannot restore: "
+        f"{detail}. Import without clearing, or use a JSON backup, which does round-trip all of it."
+    )
+
+
 def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
     db_path = db.DB_PATH if db_path is None else db_path
     payload = json.loads(payload_text)
     resources = _resources_from_payload(payload)
     if clear_existing:
+        refuse_unrestorable_clear(resources, db_path)
         db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
 
     imported = {table: 0 for table in db.TABLES}
@@ -588,7 +773,11 @@ def _lab_from_observation(resource: dict) -> dict:
         "unit": quantity.get("unit"),
         "reference_low": normalize_optional_number(low) if low is not None else None,
         "reference_high": normalize_optional_number(high) if high is not None else None,
-        "flag": (_text_from_codeable(resource.get("interpretation", [{}])[0]) if resource.get("interpretation") else None) or "Unknown",
+        # No `interpretation` means no source flag, so the field stays empty. It used to fall back
+        # to "Unknown", which is a real member of `models.LAB_FLAGS` -- a value a source can
+        # actually record -- so a round trip through FHIR silently converted "nobody flagged this"
+        # into "the source flagged this Unknown", and the charts then drew it as a recorded flag.
+        "flag": (_text_from_codeable(resource.get("interpretation", [{}])[0]) if resource.get("interpretation") else None),
         "lab_date": _date_part(resource.get("effectiveDateTime")),
         "notes": _notes_text(resource.get("note")),
     }
