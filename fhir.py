@@ -7,10 +7,12 @@ from pathlib import Path
 
 import db
 import services
+from models import CONDITION_SOURCES
 from validation import (
     normalize_optional_number,
     validate_allergy,
     validate_appointment,
+    validate_condition,
     validate_health_entry,
     validate_lab,
     validate_medication,
@@ -22,6 +24,10 @@ SUPPORTED_FHIR_VERSIONS = ["R4", "R5"]
 FHIR_MIME_TYPE = "application/fhir+json"
 DOSE_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-dose"
 FREQUENCY_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:medication-frequency"
+# Read on import only, never written on export. Profile notes are free text that can carry health
+# detail, and `_patient_resource` has never emitted them; adding them to export would newly place
+# that text into every exported file, which is a privacy change this feature does not need.
+PROFILE_NOTES_EXTENSION_URL = "urn:phr:fhir:StructureDefinition:profile-notes"
 
 
 FHIR_VALIDATORS = {
@@ -32,6 +38,7 @@ FHIR_VALIDATORS = {
     "appointments": validate_appointment,
     "reminders": validate_reminder,
     "wearable_records": validate_wearable,
+    "conditions": validate_condition,
 }
 
 
@@ -287,6 +294,10 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
     for resource in resources:
         resource_type = resource.get("resourceType")
         if resource_type == "Patient":
+            continue
+        refusal = _refused_reason(resource)
+        if refusal:
+            skipped.append({"resourceType": resource_type or "Unknown", "id": resource.get("id"), "reason": refusal})
             continue
         person_id = _resolve_patient_id(resource, patient_map, fallback_person_id)
         if person_id is None:
@@ -697,7 +708,11 @@ def _person_from_patient(resource: dict) -> dict:
         "sex": _gender_from_fhir(resource.get("gender")),
         "relationship": relationship,
         "emergency_contact": contact,
-        "notes": "Imported from FHIR.",
+        # A supplied profile note wins over the generic literal: the Dashboard renders this string
+        # directly in its callout, so "Imported from FHIR." is what an imported profile would
+        # otherwise say where every other profile shows a real summary. Falls back to the literal
+        # when the bundle carries no note, which is every bundle written before this extension.
+        "notes": _extension_value(resource, PROFILE_NOTES_EXTENSION_URL) or "Imported from FHIR.",
     }
 
 
@@ -713,7 +728,153 @@ def _local_record_from_resource(resource: dict) -> tuple[str | None, dict]:
         return "appointments", _appointment_from_resource(resource)
     if resource_type == "Task":
         return "reminders", _task_from_resource(resource)
+    if resource_type == "Condition":
+        return "conditions", _condition_from_resource(resource)
     return None, {}
+
+
+# FHIR verification statuses this app cannot honestly represent. Applied to Condition and to
+# AllergyIntolerance, which carries the identical value set and reaches the same Emergency Snapshot:
+# a refuted penicillin allergy asserted as real makes a clinician withhold a first-line drug.
+#
+# Two groups, refused for related reasons. `refuted` (a clinician considered it and ruled it out)
+# and `entered-in-error` (the source retracted the record) are **negations**: importing one inverts
+# the source's meaning into an assertion of illness. `unconfirmed`, `provisional` and `differential`
+# are **not yet established**: the source is explicitly withholding the claim, and with no status
+# column to carry that qualification, storing them in a list titled "Tracked Conditions" -- which
+# feeds the Emergency Snapshot -- states more than the bundle does.
+#
+# `confirmed`, and an absent status, are accepted. Absent is the common case: real bundles routinely
+# omit it, this repository's own demo bundle included.
+UNIMPORTABLE_CONDITION_STATUSES = {
+    "refuted": "the source states this condition was ruled out",
+    "entered-in-error": "the source has retracted this record",
+    "unconfirmed": "the source has not confirmed this condition",
+    "provisional": "the source records this condition as provisional only",
+    "differential": "the source lists this condition as a differential, not a finding",
+}
+
+
+def _refused_reason(resource: dict) -> str | None:
+    """Why this resource must not be imported at all, or None if it may proceed.
+
+    Distinct from validation, which asks whether a record is well formed. This asks whether the
+    source is asserting the thing exists.
+
+    The Condition converter drops `clinicalStatus` and `verificationStatus` because the schema has no
+    column for them, and for `active` versus `resolved` that is right -- dropping a field you cannot
+    represent is not an overclaim. It inverts for `refuted` and `entered-in-error`: those are not
+    statuses of a real condition, they are the source stating the condition is not real. A Condition
+    coded `refuted` for "Cancer" was imported as a tracked condition and then listed in the
+    **Emergency Snapshot** -- the app asserting a diagnosis the source explicitly ruled out.
+
+    Skipping is reported in the visible `skipped` list, so an omission is something the user can see
+    rather than a silent difference between the bundle and what landed.
+    """
+
+    kind = resource.get("resourceType")
+    if kind not in {"Condition", "AllergyIntolerance"}:
+        return None
+    status = resource.get("verificationStatus", {})
+    # `text` as well as `coding[]`: a text-only CodeableConcept is not exotic -- this module's own
+    # `_codeable_text` emits one whenever no coding is supplied -- and checking codings alone let
+    # `{"text": "refuted"}` walk straight past the whole set.
+    candidates = [coding.get("code") for coding in status.get("coding", [])] + [status.get("text")]
+    for candidate in candidates:
+        code = str(candidate or "").strip().lower()
+        if code in UNIMPORTABLE_CONDITION_STATUSES:
+            return f"{kind} verificationStatus is '{code}': {UNIMPORTABLE_CONDITION_STATUSES[code]}."
+    return None
+
+
+def _discarded_code(value: dict | None) -> str | None:
+    """The terminology code `_human_label` refused, as a note, or None if there was nothing to drop.
+
+    A bare code is a bad medical *name* and still real information: SNOMED 7980 is Penicillin G, and
+    turning that into "Unknown allergen" in an Emergency Snapshot loses the drug to avoid entirely,
+    which is worse than showing an ugly decodable code. The name gets the honest placeholder and the
+    code travels in the note, so nothing the bundle carried is silently dropped.
+    """
+
+    if not value or _human_label(value):
+        return None
+    for coding in value.get("coding", []):
+        if coding.get("code"):
+            system = coding.get("system") or "unknown system"
+            return f"Imported with no readable name; source code {coding['code']} ({system})."
+    return None
+
+
+def _append_note(existing: str | None, extra: str | None) -> str | None:
+    """Join an imported note with provenance, keeping whichever of the two exists."""
+
+    parts = [part for part in (existing, extra) if part]
+    return " ".join(parts) if parts else None
+
+
+def _human_label(value: dict | None) -> str | None:
+    """A label a person would recognise, or None -- never a bare terminology code.
+
+    `text` and `coding[].display` are written for humans; `coding[].code` is an identifier.
+    `_text_from_codeable` falls back to the code, which is right for routing decisions and wrong
+    everywhere a value becomes a medical string a person reads: a tracked condition named
+    "44054006", an allergen named "227493005", a medication named "1049502". All three reach the
+    provider summary or the Emergency Snapshot. Returning None lets each caller fall back to its own
+    honest placeholder, or lets validation reject the row into the visible skip list.
+    """
+
+    if not value:
+        return None
+    if value.get("text"):
+        return value["text"]
+    for coding in value.get("coding", []):
+        if coding.get("display"):
+            return coding["display"]
+    return None
+
+
+def _condition_from_resource(resource: dict) -> dict:
+    """Map a FHIR Condition onto the local `conditions` columns.
+
+    Inputs a Condition resource; outputs a dict for the `conditions` table. Import only --
+    `export_bundle` deliberately emits no Condition, and the asymmetry is the point:
+
+    A FHIR Condition expects `clinicalStatus` (active/resolved) and `verificationStatus`
+    (confirmed). This schema stores neither, so emitting one would write an unfounded clinical claim
+    into a file other software ingests as fact. Importing is the mirror image: the Bundle supplies a
+    status and we simply do not store it, because there is no column for it. Dropping a field you
+    cannot represent is not an overclaim; inventing one is.
+
+    Two deliberate departures from the sibling converters:
+
+    - No fallback name. `_allergy_from_resource` falls back to "Unknown allergen" because a nameless
+      allergy row is a harmless placeholder. A row named "Unknown condition" would appear in the
+      tracked-condition list *and* the Emergency Snapshot, asserting someone has a condition nobody
+      can name. Leaving it blank lets `validate_condition` reject it into the visible skip list.
+    - `source` is taken only on an exact `models.CONDITION_SOURCES` match. An unrecognised recorder
+      leaves it blank rather than inventing a vocabulary value the rest of the app would then treat
+      as a real provider category.
+    """
+
+    source = None
+    for reference in (resource.get("recorder"), resource.get("asserter")):
+        display = (reference or {}).get("display")
+        if display in CONDITION_SOURCES:
+            source = display
+            break
+    return {
+        # Deliberately NOT `_text_from_codeable`, which falls back to `coding[].code`. That fallback
+        # is right for a lab test but wrong here: a machine-generated EHR export routinely codes a
+        # Condition as SNOMED `44054006` with no text and no display, and the shared helper turned
+        # that into a tracked condition literally named "44054006" -- shown in the condition list and
+        # in the Emergency Snapshot, and matching no entry in CONDITION_RECORD_MAPPINGS. That is the
+        # same failure the "no fallback name" rule below exists to prevent, arriving by another door.
+        # A blank name lets `validate_condition` reject it into the visible skip list instead.
+        "condition_name": _human_label(resource.get("code")),
+        "source": source,
+        "noted_date": _date_part(resource.get("recordedDate") or resource.get("onsetDateTime")),
+        "notes": _notes_text(resource.get("note")),
+    }
 
 
 def _allergy_from_resource(resource: dict) -> dict:
@@ -721,10 +882,10 @@ def _allergy_from_resource(resource: dict) -> dict:
     manifestation = reaction.get("manifestation", [{}])[0] if reaction.get("manifestation") else {}
     reaction_text = reaction.get("description") or _text_from_codeable_reference(manifestation)
     return {
-        "allergen": _text_from_codeable(resource.get("code")) or "Unknown allergen",
+        "allergen": _human_label(resource.get("code")) or "Unknown allergen",
         "reaction": reaction_text,
         "severity": (reaction.get("severity") or "").title() or None,
-        "notes": _notes_text(resource.get("note")),
+        "notes": _append_note(_notes_text(resource.get("note")), _discarded_code(resource.get("code"))),
     }
 
 
@@ -733,21 +894,21 @@ def _medication_from_resource(resource: dict) -> dict:
     medication = resource.get("medicationCodeableConcept") or resource.get("medication", {}).get("concept")
     reason = None
     if resource.get("reasonCode"):
-        reason = _text_from_codeable(resource["reasonCode"][0])
+        reason = _human_label(resource["reasonCode"][0])
     elif resource.get("reason"):
         reason = _text_from_codeable_reference(resource["reason"][0])
     dosage = resource.get("dosage", [{}])[0].get("text") if resource.get("dosage") else None
     dose = _extension_value(resource, DOSE_EXTENSION_URL) or dosage
     frequency = _extension_value(resource, FREQUENCY_EXTENSION_URL)
     return {
-        "name": _text_from_codeable(medication) or "Unknown medication",
+        "name": _human_label(medication) or "Unknown medication",
         "dose": dose,
         "frequency": frequency,
         "start_date": effective.get("start"),
         "end_date": effective.get("end"),
         "status": _medication_status_from_fhir(resource.get("status"), effective),
         "reason": reason,
-        "notes": _notes_text(resource.get("note")),
+        "notes": _append_note(_notes_text(resource.get("note")), _discarded_code(medication)),
     }
 
 
@@ -800,14 +961,20 @@ def _health_entry_from_observation(resource: dict) -> dict:
         if "severity" in (_text_from_codeable(component.get("code")) or "").lower():
             severity = component.get("valueInteger")
     categories = [_text_from_codeable(item) for item in resource.get("category", [])]
-    body_system = next((item for item in categories if item and item != "Survey"), None)
+    # Case-insensitive: the standard FHIR category coding is lowercase `survey` with no display, so
+    # `_text_from_codeable` yields "survey" and a title-cased comparison let a raw category code land
+    # in the user-facing body_system column.
+    body_system = next((item for item in categories if item and item.strip().lower() != "survey"), None)
     return {
         "entry_date": _date_part(resource.get("effectiveDateTime")),
-        "title": _text_from_codeable(resource.get("code")) or "FHIR observation",
+        "title": _human_label(resource.get("code")) or "FHIR observation",
         "body_system": body_system,
         "body_part": _text_from_codeable(resource.get("bodySite")),
         "severity": severity,
-        "note": resource.get("valueString") or _notes_text(resource.get("note")),
+        "note": _append_note(
+            resource.get("valueString") or _notes_text(resource.get("note")),
+            _discarded_code(resource.get("code")),
+        ),
     }
 
 

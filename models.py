@@ -63,5 +63,6 @@ WEARABLE_METRIC_TYPES = [
     "Oxygen Saturation",
     "Temperature",
     "Glucose",
+    "Peak Flow",
     "Other",
 ]

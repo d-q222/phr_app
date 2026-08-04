@@ -341,6 +341,7 @@ def test_a_removed_page_left_in_session_state_falls_back_to_the_dashboard(tmp_pa
 
 # --- the Tracked Conditions detail page ----------------------------------------------------------
 
+DEMO_BUNDLE = Path(app.__file__).resolve().parent / "demo_data" / "devon_marsh_fhir_bundle.json"
 DETAIL_SECTIONS = [
     "Measurement trends",
     "First and most recent",
@@ -351,6 +352,58 @@ DETAIL_SECTIONS = [
     "All tracked conditions",
     "Linked records",
 ]
+
+
+def _app_with_imported_demo(tmp_path, monkeypatch, name="devon.db"):
+    """A database holding the shipped demo bundle, wired in as the app's real path."""
+    import fhir
+
+    app_db_path = tmp_path / name
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    fhir.import_bundle(DEMO_BUNDLE.read_text(encoding="utf-8"), db_path=app_db_path)
+    return app_db_path
+
+
+def test_tracked_conditions_page_renders_every_section_for_the_imported_profile(tmp_path, monkeypatch):
+    _app_with_imported_demo(tmp_path, monkeypatch)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    subheaders = [sub.value for sub in test_app.subheader]
+    for section in DETAIL_SECTIONS:
+        assert section in subheaders, f"{section} is missing from the page"
+    assert len(test_app.get("metric")) == 4
+    assert len(test_app.get("vega_lite_chart")) >= 5
+
+
+def test_every_imported_condition_charts_without_error(tmp_path, monkeypatch):
+    """Each condition is a different shape, so each is a different chance to raise.
+
+    Sleep Apnea is the one that renders five charts rather than six: it maps no lab, because there
+    is no blood test commonly tracked for it, and mapping one purely to fill the panel would be the
+    fabricated-claim defect this feature exists to avoid. Its empty state says so.
+    """
+    _app_with_imported_demo(tmp_path, monkeypatch)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Tracked Conditions"
+    test_app.run(timeout=60)
+
+    rendered = {}
+    for condition in ("Hypothyroidism", "Gout", "Sleep Apnea", "Chronic Kidney Disease", "Asthma"):
+        # Set after the first run: sync_profile_scope clears the selection on the run that first
+        # establishes the profile scope, which would discard a pre-seeded value.
+        test_app.session_state[condition_ui.SELECTED_CONDITION_KEY] = condition
+        test_app.run(timeout=60)
+        assert not test_app.exception, f"{condition} raised"
+        assert [header.value for header in test_app.header] == [condition]
+        rendered[condition] = len(test_app.get("vega_lite_chart"))
+
+    assert rendered["Sleep Apnea"] == 5
+    assert all(count == 6 for name, count in rendered.items() if name != "Sleep Apnea"), rendered
 
 
 def test_tracked_conditions_page_degrades_for_a_profile_with_thin_data(tmp_path, monkeypatch):
@@ -454,6 +507,26 @@ def test_generic_record_page_still_renders_its_own_header_by_default(tmp_path, m
 
     assert not test_app.exception
     assert any("<h1>Labs</h1>" in block.value for block in test_app.markdown)
+
+
+def test_body_map_and_emergency_snapshot_render_for_the_imported_profile(tmp_path, monkeypatch):
+    """Both read record types the demo bundle fills, so both must survive an import."""
+    _app_with_imported_demo(tmp_path, monkeypatch)
+
+    for page in ("Body Map", "Emergency Snapshot"):
+        test_app = AppTest.from_file(str(Path(app.__file__)))
+        test_app.session_state["nav_page"] = page
+        test_app.run(timeout=60)
+        assert not test_app.exception, f"{page} raised"
+        assert test_app.session_state["nav_page"] == page
+
+    snapshot_person = int(services.list_people(db_path=db.DB_PATH)[0]["id"])
+    snapshot = services.generate_emergency_snapshot(snapshot_person, db_path=db.DB_PATH)
+    assert "## Tracked Conditions" in snapshot
+    assert "Chronic Kidney Disease" in snapshot
+
+
+# --- review follow-ups: state hygiene at the profile-selection site ------------------------------
 
 
 def test_scope_sync_handles_no_selected_profile():
@@ -574,6 +647,7 @@ RECORD_NAME_COLUMNS = {
     "wearable_records": "metric_type",
     "health_entries": "title",
 }
+DEMO_BUNDLE_PATH = Path(app.__file__).resolve().parent / "demo_data" / "devon_marsh_fhir_bundle.json"
 
 
 def _sample_tables():
@@ -588,24 +662,85 @@ def _record_names_from_backup(tables):
     }
 
 
+def _demo_bundle_resources():
+    return [
+        entry["resource"]
+        for entry in json.loads(DEMO_BUNDLE_PATH.read_text(encoding="utf-8"))["entry"]
+        if entry.get("resource")
+    ]
+
+
+def _record_names_from_bundle(resources):
+    """Record names present in the FHIR-shaped demo bundle, keyed by the table each will land in.
+
+    Mirrors `fhir._observation_from_resource`'s routing so the guard checks the table a name will
+    actually occupy rather than where it looks like it belongs.
+    """
+    names = {table: set() for table in RECORD_NAME_COLUMNS}
+    for resource in resources:
+        text = (resource.get("code") or {}).get("text")
+        if resource.get("resourceType") == "MedicationStatement":
+            names["medications"].add((resource.get("medicationCodeableConcept") or {}).get("text"))
+        elif resource.get("resourceType") == "Observation":
+            category = " ".join((item.get("text") or "") for item in resource.get("category", [])).lower()
+            if "laboratory" in category:
+                names["lab_results"].add(text)
+            elif "wearable" in category:
+                names["wearable_records"].add(text)
+            else:
+                names["health_entries"].add(text)
+    return names
+
+
 def test_every_seeded_condition_has_a_mapping():
     """A seeded condition with no mapping silently shows 'no records mapped' to the user."""
-    for row in _sample_tables().get("conditions", []):
-        name = row["condition_name"]
+    bundle_conditions = [
+        (resource.get("code") or {}).get("text")
+        for resource in _demo_bundle_resources()
+        if resource.get("resourceType") == "Condition"
+    ]
+    seeded = [row["condition_name"] for row in _sample_tables().get("conditions", [])]
+    for name in seeded + bundle_conditions:
         assert condition_config.get_condition_record_mapping(name), f"{name} has no mapping"
 
 
-def test_every_mapped_record_name_exists_in_the_sample_data():
+def test_every_mapped_record_name_exists_in_a_shipped_dataset():
     """Guards the cross-agent contract: a renamed record silently stops appearing.
 
-    This is the cheapest possible tripwire for a later pass that rewrites the demo data.
+    Widened, not weakened, when the demo bundle arrived. The seed file and the bundle are two
+    shipped datasets and neither can hold every mapped name on its own -- the Riveras are
+    deliberately left untouched, so the conditions only Devon Marsh carries can never appear in the
+    seed file. A name is satisfied by appearing in *either*; a name in neither is still a failure
+    that names the exact triple.
     """
     from_backup = _record_names_from_backup(_sample_tables())
+    from_bundle = _record_names_from_bundle(_demo_bundle_resources())
     missing = []
     for condition, mapping in condition_config.CONDITION_RECORD_MAPPINGS.items():
         for table, names in mapping.items():
-            missing += [f"{condition}/{table}/{n}" for n in names if n not in from_backup[table]]
-    assert missing == [], f"mapped names absent from sample data: {missing}"
+            present = from_backup[table] | from_bundle[table]
+            missing += [f"{condition}/{table}/{n}" for n in names if n not in present]
+    assert missing == [], f"mapped names absent from every shipped dataset: {missing}"
+
+
+def test_demo_bundle_conditions_resolve_inside_the_bundle_itself():
+    """Stricter than the union guard: Devon's own conditions must be satisfied by his own records.
+
+    The union guard would be happy if a name Devon needs happened to exist in Alex's seed data.
+    That would still leave the imported profile's page empty, which is the thing being demoed.
+    """
+    from_bundle = _record_names_from_bundle(_demo_bundle_resources())
+    bundle_conditions = [
+        (resource.get("code") or {}).get("text")
+        for resource in _demo_bundle_resources()
+        if resource.get("resourceType") == "Condition"
+    ]
+    missing = []
+    for condition in bundle_conditions:
+        for table, names in condition_config.get_condition_record_mapping(condition).items():
+            missing += [f"{condition}/{table}/{n}" for n in names if n not in from_bundle[table]]
+    assert missing == [], f"bundle conditions with no backing records in the bundle: {missing}"
+
 
 def test_every_primary_metric_is_in_its_conditions_mapping():
     """A sparkline must draw a series the condition's own record list also shows.
@@ -776,3 +911,350 @@ def test_most_recent_record_keeps_the_calendar_day_across_a_day_crossing_offset(
     )
 
     assert latest.date().isoformat() == "2026-01-01"
+def _bundle(*conditions):
+    return json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                *(
+                    {
+                        "resource": {
+                            "resourceType": "Condition",
+                            "id": f"c{index}",
+                            "subject": {"reference": "Patient/p1"},
+                            "code": {"text": name},
+                            **({"verificationStatus": {"coding": [{"code": status}]}} if status else {}),
+                        }
+                    }
+                    for index, (name, status) in enumerate(conditions)
+                ),
+            ],
+        }
+    )
+
+
+def test_a_refuted_condition_is_not_imported_as_a_tracked_condition(db_path):
+    """`refuted` means a clinician considered it and ruled it out.
+
+    Dropping `verificationStatus` is right for active-versus-resolved -- the schema has no column for
+    it and inventing one would overclaim. It inverts for a negation: importing "Cancer / refuted" as
+    a tracked condition asserts a diagnosis the source explicitly excluded, and the row then appeared
+    in the Emergency Snapshot.
+    """
+    import imports_exports
+
+    result = imports_exports.import_fhir_bundle(
+        _bundle(("Cancer", "refuted"), ("Typo Condition", "entered-in-error"), ("Asthma", "confirmed")),
+        db_path=db_path,
+    )
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Asthma"]
+    # Visible, not silent: the user can see what did not come in and why.
+    reasons = {entry["reason"] for entry in result["skipped"]}
+    assert any("refuted" in reason for reason in reasons)
+    assert any("entered-in-error" in reason for reason in reasons)
+    assert result["imported"]["conditions"] == 1
+
+
+def test_a_refuted_condition_never_reaches_the_emergency_snapshot(db_path):
+    """The document an emergency responder reads is the reason this matters most."""
+    import imports_exports
+
+    imports_exports.import_fhir_bundle(_bundle(("Cancer", "refuted")), db_path=db_path)
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+
+    snapshot = services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+    assert "Cancer" not in snapshot
+
+
+def test_a_condition_with_no_verification_status_still_imports(db_path):
+    """Real bundles routinely omit it, including this repository's own demo bundle."""
+    import imports_exports
+
+    imports_exports.import_fhir_bundle(_bundle(("Hypothyroidism", None)), db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Hypothyroidism"]
+
+
+def test_a_condition_coded_only_by_number_is_skipped_not_named_after_its_code(db_path):
+    """`_text_from_codeable` falls back to `coding[].code`, which is right for a lab and wrong here.
+
+    Machine-generated EHR exports routinely code a Condition as SNOMED `44054006` with no text and
+    no display. The shared helper turned that into a tracked condition literally named "44054006",
+    shown in the condition list and the Emergency Snapshot and matching no mapping -- the same
+    failure the converter's "no fallback name" rule exists to prevent, arriving by another door.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006"}]},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c2",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Diabetes"}]},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    # The one carrying a human-readable display still imports; only the bare code is refused.
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Diabetes"]
+    assert [entry["id"] for entry in result["skipped"]] == ["c1"]
+    assert "44054006" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
+def test_a_refused_condition_reports_the_refusal_not_the_missing_patient(db_path):
+    """Precedence when a resource fails two ways at once.
+
+    The verification-status refusal is intrinsic and terminal -- repairing the subject reference
+    would not make the condition importable -- so it is the more useful reason to show.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {"resource": {"resourceType": "Patient", "id": "p2", "name": [{"text": "Second Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/ghost"},
+                        "code": {"text": "Cancer"},
+                        "verificationStatus": {"coding": [{"code": "refuted"}]},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    reason = next(entry["reason"] for entry in result["skipped"] if entry["id"] == "c1")
+    assert "refuted" in reason
+    assert "No matching Patient" not in reason
+
+
+def test_uncertain_conditions_are_refused_along_with_the_negated_ones(db_path):
+    """`provisional` and `differential` withhold the claim; storing them unqualified asserts it.
+
+    There is no status column to carry "the source has not confirmed this", and the tracked list
+    feeds the Emergency Snapshot, so an unqualified row states more than the bundle does.
+    """
+    import imports_exports
+
+    result = imports_exports.import_fhir_bundle(
+        _bundle(
+            ("Provisional Thing", "provisional"),
+            ("Differential Thing", "differential"),
+            ("Unconfirmed Thing", "unconfirmed"),
+            ("Asthma", "confirmed"),
+        ),
+        db_path=db_path,
+    )
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=db_path)] == ["Asthma"]
+    assert len(result["skipped"]) == 3
+
+
+def test_a_bare_terminology_code_becomes_a_placeholder_name_and_a_provenance_note(db_path):
+    """The name must be readable; the code must not vanish.
+
+    A bare code is a bad medical name -- SNOMED 227493005 in an Emergency Snapshot tells a responder
+    nothing. But dropping it is worse than showing it: SNOMED 7980 *is* Penicillin G, and replacing
+    that with "Unknown allergen" loses the drug to avoid entirely, silently, in the document
+    someone reads in an emergency. The placeholder names the row; the note keeps what was dropped.
+    """
+    import imports_exports
+
+    penicillin = {"coding": [{"system": "http://snomed.info/sct", "code": "7980"}]}
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a1",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": penicillin,
+                        "reaction": [{"description": "Hives", "severity": "severe"}],
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "MedicationStatement",
+                        "id": "m1",
+                        "subject": {"reference": "Patient/p1"},
+                        "medicationCodeableConcept": penicillin,
+                        "status": "active",
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "id": "entry-1",
+                        "subject": {"reference": "Patient/p1"},
+                        "category": [{"coding": [{"code": "survey"}]}],
+                        "code": {"coding": [{"system": "http://snomed.info/sct", "code": "267036007"}]},
+                        "effectiveDateTime": "2026-01-03",
+                    }
+                },
+            ],
+        }
+    )
+
+    imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    allergy = services.list_items("allergies", person_id, db_path=db_path)[0]
+    assert allergy["allergen"] == "Unknown allergen"
+    assert "7980" in allergy["notes"] and "snomed" in allergy["notes"].lower()
+    medication = services.list_items("medications", person_id, db_path=db_path)[0]
+    assert medication["name"] == "Unknown medication"
+    assert "7980" in medication["notes"]
+    entry = services.list_items("health_entries", person_id, db_path=db_path)[0]
+    assert entry["title"] == "FHIR observation"
+    assert "267036007" in entry["note"]
+    # The standard lowercase `survey` category is a routing code, not a body system.
+    assert entry["body_system"] is None
+    # And no bare code is presented as a medical name anywhere a person reads.
+    snapshot = services.generate_emergency_snapshot(person_id, db_path=db_path)
+    assert "- 7980" not in snapshot
+
+
+def test_a_refuted_allergy_is_refused_like_a_refuted_condition(db_path):
+    """AllergyIntolerance carries the same verificationStatus value set and the same stakes.
+
+    A false penicillin allergy in an Emergency Snapshot makes a clinician withhold a first-line
+    drug, so a source saying "we ruled this out" must not arrive as a real allergy.
+    """
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a1",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": {"text": "Penicillin"},
+                        "verificationStatus": {"coding": [{"code": "refuted"}]},
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "AllergyIntolerance",
+                        "id": "a2",
+                        "patient": {"reference": "Patient/p1"},
+                        "code": {"text": "Latex"},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["allergen"] for row in services.list_items("allergies", person_id, db_path=db_path)] == ["Latex"]
+    assert [entry["id"] for entry in result["skipped"]] == ["a1"]
+    assert "Penicillin" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
+def test_a_text_only_verification_status_is_matched_too(db_path):
+    """`{"text": "refuted"}` is an ordinary shape -- this module's own exporter emits text-only
+    CodeableConcepts -- and checking `coding[]` alone let it walk past the whole refusal set."""
+    import imports_exports
+
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {
+                    "resource": {
+                        "resourceType": "Condition",
+                        "id": "c1",
+                        "subject": {"reference": "Patient/p1"},
+                        "code": {"text": "Cancer"},
+                        "verificationStatus": {"text": "refuted"},
+                    }
+                },
+            ],
+        }
+    )
+
+    result = imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert services.tracked_conditions(person_id, db_path=db_path) == []
+    assert len(result["skipped"]) == 1
+    assert "Cancer" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
+
+
+def test_no_imported_record_is_ever_named_after_a_bare_terminology_code(db_path):
+    """Allergen, medication and health-entry titles reach the provider summary and the snapshot."""
+    import imports_exports
+
+    coded = {"coding": [{"system": "http://snomed.info/sct", "code": "227493005"}]}
+    bundle = json.dumps(
+        {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Fictional Person"}]}},
+                {"resource": {"resourceType": "AllergyIntolerance", "id": "a1", "patient": {"reference": "Patient/p1"}, "code": coded}},
+                {
+                    "resource": {
+                        "resourceType": "MedicationStatement",
+                        "id": "m1",
+                        "subject": {"reference": "Patient/p1"},
+                        "medicationCodeableConcept": coded,
+                        "status": "active",
+                    }
+                },
+            ],
+        }
+    )
+
+    imports_exports.import_fhir_bundle(bundle, db_path=db_path)
+
+    person_id = services.list_people(db_path=db_path)[0]["id"]
+    assert [row["allergen"] for row in services.list_items("allergies", person_id, db_path=db_path)] == ["Unknown allergen"]
+    assert [row["name"] for row in services.list_items("medications", person_id, db_path=db_path)] == ["Unknown medication"]
+    assert "227493005" not in services.generate_emergency_snapshot(person_id, db_path=db_path)
