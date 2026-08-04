@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 
@@ -145,6 +145,28 @@ def _write_connection(db_path: Path | str | None):
         raise
 
 
+@contextmanager
+def write_transaction(db_path: Path | str | None = None):
+    """Open one write connection whose whole context commits together or not at all.
+
+    Pass the yielded connection to `create_record` / `create_item` and every write inside becomes
+    one transaction: sqlite3's connection context manager commits on clean exit and **rolls back on
+    any exception**, including writes that already succeeded. This works only because
+    `get_connection` leaves `isolation_level` at the default `''` (deferred). Setting it to None
+    would make every execute autocommit and silently turn this into a no-op.
+
+    Importers need this because they write many rows per run. Without it each row is its own
+    transaction, so a failure partway leaves the earlier rows committed -- and with a clear-existing
+    restore, the delete commits before the inserts, so a failure destroys the old data *and* leaves
+    the new data incomplete.
+
+    Nothing inside the context may open a second connection: the first holds the write lock, so the
+    second raises SQLITE_BUSY and surfaces as a confusing `DatabaseBusyError`.
+    """
+    with _write_connection(db_path) as connection:
+        yield connection
+
+
 def init_db(db_path: Path | str | None = None) -> Path:
     """Create the local SQLite database and all MVP tables if needed."""
     db_path = Path(_resolve_db_path(db_path))
@@ -169,7 +191,12 @@ def rows_to_dicts(rows: list[sqlite3.Row]) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def create_record(table: str, data: dict, db_path: Path | str | None = None) -> int:
+def create_record(
+    table: str,
+    data: dict,
+    db_path: Path | str | None = None,
+    connection: sqlite3.Connection | None = None,
+) -> int:
     if table not in TABLE_COLUMNS:
         raise ValueError(f"Unknown table: {table}")
     if "person_id" in TABLE_COLUMNS[table]:
@@ -187,7 +214,8 @@ def create_record(table: str, data: dict, db_path: Path | str | None = None) -> 
     placeholders = ", ".join("?" for _ in columns)
     column_sql = ", ".join(columns)
     sql = f"INSERT INTO {table} ({column_sql}) VALUES ({placeholders})"
-    with _write_connection(db_path) as connection:
+    connection_context = nullcontext(connection) if connection is not None else _write_connection(db_path)
+    with connection_context as connection:
         cursor = connection.execute(sql, [values[column] for column in columns])
         return int(cursor.lastrowid)
 
@@ -332,8 +360,12 @@ def list_people(db_path: Path | str | None = None) -> list[dict]:
     return list_records("people", order_by="name", descending=False, db_path=db_path)
 
 
-def create_person(data: dict, db_path: Path | str | None = None) -> int:
-    return create_record("people", data, db_path=db_path)
+def create_person(
+    data: dict,
+    db_path: Path | str | None = None,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    return create_record("people", data, db_path=db_path, connection=connection)
 
 
 def export_all_tables(db_path: Path | str | None = None) -> dict:
@@ -361,11 +393,17 @@ def _import_row_sql(table: str, values: dict) -> tuple[str, list]:
     return sql, params
 
 
-def import_all_tables(payload: dict, clear_existing: bool = False, db_path: Path | str | None = None) -> None:
+def import_all_tables(
+    payload: dict,
+    clear_existing: bool = False,
+    db_path: Path | str | None = None,
+    connection: sqlite3.Connection | None = None,
+) -> None:
     if not isinstance(payload, dict):
         raise ValueError("Backup payload tables must be a JSON object.")
 
-    with _write_connection(db_path) as connection:
+    connection_context = nullcontext(connection) if connection is not None else _write_connection(db_path)
+    with connection_context as connection:
         if clear_existing:
             for table in reversed(TABLES):
                 connection.execute(f"DELETE FROM {table}")

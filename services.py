@@ -33,9 +33,9 @@ def list_people(db_path: Path | str | None = None) -> list[dict]:
     return db.list_people(db_path=db_path)
 
 
-def create_person(data: dict, db_path: Path | str | None = None) -> int:
+def create_person(data: dict, db_path: Path | str | None = None, connection=None) -> int:
     db_path = db.DB_PATH if db_path is None else db_path
-    return db.create_person(data, db_path=db_path)
+    return db.create_person(data, db_path=db_path, connection=connection)
 
 
 def update_person(person_id: int, data: dict, db_path: Path | str | None = None) -> None:
@@ -48,13 +48,13 @@ def delete_person(person_id: int, db_path: Path | str | None = None) -> None:
     db.delete_person(person_id, db_path=db_path)
 
 
-def create_item(table: str, person_id: int, data: dict, db_path: Path | str | None = None) -> int:
+def create_item(table: str, person_id: int, data: dict, db_path: Path | str | None = None, connection=None) -> int:
     db_path = db.DB_PATH if db_path is None else db_path
     if person_id is None:
         raise ValueError("person_id is required")
     data = dict(data)
     data["person_id"] = person_id
-    return db.create_record(table, data, db_path=db_path)
+    return db.create_record(table, data, db_path=db_path, connection=connection)
 
 
 def update_item(

@@ -154,6 +154,36 @@ catches locking, which changes neither path nor id. The detail page creates one 
 condition, so the sweep clears by prefix (`tracked_condition_series`, `tracked_condition_range`)
 rather than by name — the set of keys is not knowable in advance.
 
+### Imports run in one transaction
+
+`db.write_transaction(db_path)` yields a connection whose whole context commits together or not at
+all, and `create_record` / `create_person` / `import_all_tables` / `services.create_item` each take
+an optional `connection=`: supplied, they execute on it; omitted, they open their own exactly as
+before, so the eight non-import callers are untouched.
+
+`fhir.import_bundle` and both CSV importers open one and thread it through every write.
+`import_json_backup` already had this property — `import_all_tables` always owned one transaction —
+and is unchanged.
+
+This is a correctness fix, not an optimisation. Per-record transactions meant a failure partway left
+the earlier records committed; with *clear existing* ticked the delete committed first, so a failure
+destroyed the old data **and** left the new data incomplete. It is also much faster as a side
+effect: a 1,290-record bundle went from 1,290 connections and commits to **one**, and the whole test
+suite from ~11s to ~5s, because each commit is a disk sync.
+
+Nothing inside such a block may open a second connection — the first holds the write lock, so the
+second raises `SQLITE_BUSY` and surfaces as a misleading `DatabaseBusyError`. A test asserts the
+whole-bundle import calls `sqlite3.connect` exactly once, which catches any path an audit missed.
+
+Atomicity is what makes the Import/Export page's behaviour honest: a successful import clears the
+uploader (a nonce in the widget key remounts it empty, the same idiom `generic_record_page` uses for
+its edit selector), a failed one keeps the file queued, and the failure message can truthfully say
+nothing was written. The outcome is stashed in session state and rendered on the *next* run — both
+as an `st.dialog` and as an inline panel — because anything written immediately before `st.rerun()`
+is discarded before the browser sees it, which is why a successful import used to display nothing at
+all. The dialog is read-and-clear so dismissing it with the X cannot reopen it; `AppTest` cannot see
+dialogs, so the inline panel is what the tests assert on.
+
 ### Layering is cleaner than it looks
 
 Direct `db.*` **calls** by module: `app.py` **3** (all bootstrap/demo-seed — `db.init_db()` at
@@ -263,7 +293,8 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 
 - **Validation failures** — CSV/FHIR row failures are surfaced as messages and skipped; backup
   validation rejects the restore before writing.
-- **Import database failures** — surfaced as a message; a `DatabaseBusyError` is retryable.
+- **Import database failures** — FHIR and CSV writes roll back as one transaction, including the
+  clear-existing step; JSON restore already uses one transaction.
 - **Isolation violations** — `db.RecordNotFound` (added 2026-08-01). Raised when a scoped write
   matches no row (`db._mutation_scope` supplies the `WHERE`); `app.apply_record_change` renders a
   clean message rather than a traceback.
@@ -284,7 +315,8 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 - `insights._call_zhipu_chat_completion` still references `socket.timeout` inside an `isinstance` check — redundant on 3.10+
   where it aliases `TimeoutError`, harmless, `socket` still imported.
 - Connections are opened per function call by default and never explicitly closed; `sqlite3`'s context
-  manager commits/rolls back but does not close. Handles are released by GC.
+  manager commits/rolls back but does not close. Handles are released by GC. `db.write_transaction`
+  deliberately spans the FHIR and CSV import calls that must commit or roll back as one unit.
 
 ---
 

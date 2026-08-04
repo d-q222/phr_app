@@ -1144,6 +1144,151 @@ def _fail_create_item_after(monkeypatch, failure_number: int) -> None:
     monkeypatch.setattr(services, "create_item", failing_create_item)
 
 
+def test_write_transaction_rolls_back_all_inserts_atomically(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+
+    with pytest.raises(RuntimeError, match="abort"):
+        with db.write_transaction(db_path) as connection:
+            person_id = db.create_person({"name": "Temporary"}, connection=connection)
+            for test_name in ("A1c", "LDL"):
+                db.create_record(
+                    "lab_results",
+                    {"person_id": person_id, "test_name": test_name, "lab_date": "2026-01-01"},
+                    connection=connection,
+                )
+            raise RuntimeError("abort")
+
+    assert all(not rows for rows in db.export_all_tables(db_path=db_path).values())
+
+
+def test_fhir_bundle_import_opens_exactly_one_connection(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    original_connect = sqlite3.connect
+    calls = 0
+
+    def counting_connect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting_connect)
+
+    result = fhir.import_bundle(_small_fhir_bundle(), db_path=db_path)
+
+    assert result["skipped"] == []
+    assert calls == 1
+
+
+def test_fhir_import_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    _fail_create_item_after(monkeypatch, 2)
+
+    with pytest.raises(db.DatabaseBusyError):
+        fhir.import_bundle(_small_fhir_bundle(), db_path=db_path)
+
+    assert all(not rows for rows in db.export_all_tables(db_path=db_path).values())
+
+
+def test_fhir_import_clear_existing_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    seeded_person = services.create_person({"name": "Seeded"}, db_path=db_path)
+    services.create_item(
+        "lab_results",
+        seeded_person,
+        {"test_name": "Existing", "lab_date": "2026-01-01"},
+        db_path=db_path,
+    )
+    before = db.export_all_tables(db_path=db_path)
+    _fail_create_item_after(monkeypatch, 2)
+
+    with pytest.raises(db.DatabaseBusyError):
+        fhir.import_bundle(_small_fhir_bundle(), clear_existing=True, db_path=db_path)
+
+    assert db.export_all_tables(db_path=db_path) == before
+
+
+def test_labs_csv_import_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Lab Profile"}, db_path=db_path)
+    services.create_item(
+        "lab_results",
+        person_id,
+        {"test_name": "Existing", "lab_date": "2026-01-01"},
+        db_path=db_path,
+    )
+    before = db.export_all_tables(db_path=db_path)
+    _fail_create_item_after(monkeypatch, 2)
+    csv_text = (
+        "test_name,result_value,numeric_value,unit,reference_low,reference_high,flag,lab_date,notes\n"
+        "A1c,5.6,5.6,%,4,6,Normal,2026-01-02,\n"
+        "LDL,120,120,mg/dL,0,100,High,2026-01-03,\n"
+    )
+
+    with pytest.raises(db.DatabaseBusyError):
+        imports_exports.import_labs_csv(StringIO(csv_text), person_id, db_path=db_path)
+
+    assert db.export_all_tables(db_path=db_path) == before
+
+
+def test_wearables_csv_import_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Wearable Profile"}, db_path=db_path)
+    services.create_item(
+        "wearable_records",
+        person_id,
+        {"metric_type": "Steps", "value": 50, "timestamp": "2026-01-01"},
+        db_path=db_path,
+    )
+    before = db.export_all_tables(db_path=db_path)
+    _fail_create_item_after(monkeypatch, 2)
+    csv_text = (
+        "metric_type,value,unit,timestamp,source\n"
+        "Steps,100,steps,2026-01-02,Manual\n"
+        "Steps,200,steps,2026-01-03,Manual\n"
+    )
+
+    with pytest.raises(db.DatabaseBusyError):
+        imports_exports.import_wearables_csv(StringIO(csv_text), person_id, db_path=db_path)
+
+    assert db.export_all_tables(db_path=db_path) == before
+
+
+def test_write_transaction_with_omitted_db_path_uses_db_path(tmp_path, monkeypatch):
+    db_path = tmp_path / "default.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db()
+
+    with db.write_transaction() as connection:
+        person_id = services.create_person({"name": "Default Path"}, connection=connection)
+        services.create_item(
+            "conditions", person_id, {"condition_name": "Asthma"}, connection=connection
+        )
+
+    assert [person["name"] for person in services.list_people()] == ["Default Path"]
+    assert services.list_items("conditions", person_id)[0]["condition_name"] == "Asthma"
+
+
+def test_create_record_without_connection_keeps_per_call_path_working(tmp_path):
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+
+    person_id = db.create_person({"name": "Per Call"}, db_path=db_path)
+    record_id = db.create_record(
+        "lab_results",
+        {"person_id": person_id, "test_name": "A1c", "lab_date": "2026-01-01"},
+        db_path=db_path,
+    )
+
+    assert db.get_record("people", person_id, db_path=db_path)["name"] == "Per Call"
+    assert db.get_record("lab_results", record_id, db_path=db_path)["test_name"] == "A1c"
+
+
 def _condition_bundle(entries):
     return json.dumps({"resourceType": "Bundle", "entry": [{"resource": r} for r in entries]})
 
@@ -1328,6 +1473,201 @@ def test_fhir_patient_note_extension_overrides_the_generic_import_note(tmp_path)
     # "Imported from FHIR." where every other profile shows a real summary.
     assert notes["Noted"] == "Records span 24 months."
     assert notes["Plain"] == "Imported from FHIR."
+
+
+def _import_export_app(tmp_path, monkeypatch, name="import-export.db"):
+    """An app wired to a throwaway database, parked on the Import/Export page."""
+    app_db_path = tmp_path / name
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    services.create_person({"name": "Fictional Person"}, db_path=app_db_path)
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Import/Export"
+    test_app.run(timeout=60)
+    return app_db_path, test_app
+
+
+def _fhir_uploader(test_app):
+    return next(widget for widget in test_app.file_uploader if widget.label == "Import FHIR Bundle")
+
+
+SMALL_BUNDLE = json.dumps(
+    {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Patient", "id": "p1", "name": [{"text": "Uploaded Person"}]}},
+            {"resource": {"resourceType": "Condition", "id": "c1", "code": {"text": "Gout"}}},
+        ],
+    }
+).encode()
+
+
+def test_successful_fhir_import_empties_the_uploader_so_it_cannot_run_twice(tmp_path, monkeypatch):
+    """The double-import this fixes: the file used to stay queued with the button still live, and a
+    second click created a complete duplicate profile with no warning."""
+    app_db_path, test_app = _import_export_app(tmp_path, monkeypatch)
+    _fhir_uploader(test_app).set_value(("bundle.json", SMALL_BUNDLE, "application/json")).run(timeout=60)
+
+    next(button for button in test_app.button if "Import FHIR Bundle" in str(button.label)).click().run(timeout=60)
+
+    assert not test_app.exception
+    names = [person["name"] for person in services.list_people(db_path=app_db_path)]
+    assert names == ["Fictional Person", "Uploaded Person"]
+    # The widget is remounted under a new key, so it comes back empty and the Import button is gone.
+    assert _fhir_uploader(test_app).value is None
+    assert not [button for button in test_app.button if "Import FHIR Bundle" in str(button.label)]
+
+
+def test_successful_import_reports_what_landed(tmp_path, monkeypatch):
+    """A successful import used to display nothing at all: st.rerun() discarded the success message
+    written immediately before it, which is very likely why anyone would click Import twice."""
+    _, test_app = _import_export_app(tmp_path, monkeypatch)
+    _fhir_uploader(test_app).set_value(("bundle.json", SMALL_BUNDLE, "application/json")).run(timeout=60)
+
+    next(button for button in test_app.button if "Import FHIR Bundle" in str(button.label)).click().run(timeout=60)
+
+    # Asserted on the inline panel, not the dialog: AppTest cannot see dialogs, which is exactly why
+    # the outcome is rendered in both places.
+    assert any("Imported 2 record(s)" in message.value for message in test_app.success)
+
+
+def test_a_failed_import_keeps_the_file_queued_and_says_nothing_was_imported(tmp_path, monkeypatch):
+    """Keeping the file is only safe because the import is atomic -- before that, a retry could
+    compound a partial import rather than repeat a no-op."""
+    app_db_path, test_app = _import_export_app(tmp_path, monkeypatch)
+    _fhir_uploader(test_app).set_value(("bundle.json", b"{not valid json", "application/json")).run(timeout=60)
+
+    next(button for button in test_app.button if "Import FHIR Bundle" in str(button.label)).click().run(timeout=60)
+
+    assert not test_app.exception
+    assert [person["name"] for person in services.list_people(db_path=app_db_path)] == ["Fictional Person"]
+    assert any("Nothing was imported" in message.value for message in test_app.error)
+    # Still queued, so the user can fix the cause and retry without browsing for the file again.
+    assert _fhir_uploader(test_app).value is not None
+
+
+def test_uploader_key_changes_only_after_a_successful_import(monkeypatch):
+    """The reset counter is what remounts the widget; bumping it on failure would drop the file."""
+    fake = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(app, "st", fake)
+    scope = app.import_scope("/tmp/phr.db", 1)
+
+    first = app.import_uploader_key(scope, "fhir_bundle")
+
+    assert app.import_uploader_key(scope, "fhir_bundle") == first
+    app.clear_import_uploader(scope, "fhir_bundle")
+    assert app.import_uploader_key(scope, "fhir_bundle") != first
+
+
+def test_a_queued_csv_cannot_follow_the_user_to_another_profile(monkeypatch):
+    """A file chosen while one profile is selected must not import into a different one.
+
+    The rows land on whoever is selected when Import is clicked, so an unscoped uploader key would
+    silently write one profile's file into another's records -- a misdirected write, not a visible
+    error. Same reason `record_page_scope` scopes CRUD widget state.
+    """
+    fake = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(app, "st", fake)
+
+    alpha = app.import_uploader_key(app.import_scope("/tmp/phr.db", 1), "labs_csv")
+    beta = app.import_uploader_key(app.import_scope("/tmp/phr.db", 2), "labs_csv")
+    demo = app.import_uploader_key(app.import_scope("/tmp/demo.db", 1), "labs_csv")
+
+    assert alpha != beta, "a queued CSV would carry across a profile switch"
+    assert alpha != demo, "a queued CSV would carry across a real/demo database switch"
+
+
+def test_clearing_one_uploader_leaves_other_scopes_queued(monkeypatch):
+    """Clearing is per (database, profile, importer) -- a success in one scope must not drop a file
+    queued in another."""
+    fake = type("FakeStreamlit", (), {"session_state": {}})()
+    monkeypatch.setattr(app, "st", fake)
+    mine, theirs = app.import_scope("/tmp/phr.db", 1), app.import_scope("/tmp/phr.db", 2)
+    before = app.import_uploader_key(theirs, "labs_csv")
+
+    app.clear_import_uploader(mine, "labs_csv")
+
+    assert app.import_uploader_key(theirs, "labs_csv") == before
+
+
+@pytest.mark.parametrize(
+    "label, payload, importer",
+    [
+        # A syntactically valid JSON document of the wrong shape: reaches attribute access on a list.
+        ("bundle that is a bare list", "[]", "fhir"),
+        # Structurally valid backup naming a parent row that does not exist: sqlite3.IntegrityError.
+        ("backup with an orphan foreign key", json.dumps({"version": 1, "tables": {"allergies": [{"id": 1, "person_id": 999, "allergen": "X"}]}}), "backup"),
+    ],
+)
+def test_import_failures_the_ui_must_catch_are_all_in_the_caught_tuple(tmp_path, label, payload, importer):
+    """These reach the UI as a raw traceback unless caught, which is the no-feedback bug again.
+
+    Neither is a `ValueError`: the first raises AttributeError inside the bundle parser, the second
+    sqlite3.IntegrityError inside the write. Enumerating only the obvious exception types is how the
+    friendly failure dialog gets bypassed.
+    """
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    call = (
+        (lambda: fhir.import_bundle(payload, db_path=db_path))
+        if importer == "fhir"
+        else (lambda: imports_exports.import_json_backup(payload, db_path=db_path))
+    )
+
+    with pytest.raises(app.IMPORT_FAILURES):
+        call()
+
+
+def test_labs_csv_import_opens_exactly_one_connection(tmp_path, monkeypatch):
+    """Without this the CSV atomicity tests could pass with a nested-connection bug still present:
+    a second connection would raise DatabaseBusyError immediately, which is what they assert."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    person_id = services.create_person({"name": "Counter"}, db_path=db_path)
+    csv_text = "test_name,result_value,numeric_value,unit,reference_low,reference_high,flag,lab_date,notes\n" + "".join(
+        f"A1c,5.{index},5.{index},%,4.0,5.6,Normal,2026-01-0{index + 1},\n" for index in range(5)
+    )
+    connections = {"count": 0}
+    real_connect = sqlite3.connect
+
+    def counting(*args, **kwargs):
+        connections["count"] += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", counting)
+    imports_exports.import_labs_csv(StringIO(csv_text), person_id, db_path=db_path)
+
+    assert connections["count"] == 1
+    assert len(services.list_items("lab_results", person_id, db_path=db_path)) == 5
+
+
+def test_json_restore_rolls_back_a_clear_existing_that_fails_mid_write(tmp_path):
+    """The worst case for the restore path: the clear must not survive a failed reload."""
+    db_path = tmp_path / "phr.db"
+    db.init_db(db_path)
+    keeper = services.create_person({"name": "Pre-existing"}, db_path=db_path)
+    services.create_item("lab_results", keeper, {"test_name": "A1c", "lab_date": "2026-01-01"}, db_path=db_path)
+    # Valid shape, but the allergy names a person the payload never creates.
+    payload = json.dumps(
+        {"version": 1, "tables": {"people": [{"id": 5, "name": "Replacement", "created_at": "x", "updated_at": "x"}],
+                                  "allergies": [{"id": 1, "person_id": 999, "allergen": "Nuts"}]}}
+    )
+
+    with pytest.raises(app.IMPORT_FAILURES):
+        imports_exports.import_json_backup(payload, clear_existing=True, db_path=db_path)
+
+    assert [person["name"] for person in services.list_people(db_path=db_path)] == ["Pre-existing"]
+    assert len(services.list_items("lab_results", keeper, db_path=db_path)) == 1
+
+
+def test_import_result_counts_normalises_all_three_importer_shapes():
+    """FHIR returns per-table counts, CSV returns an integer, JSON restore returns nothing."""
+    assert app.import_result_counts({"imported": {"people": 1, "lab_results": 4, "allergies": 0}}) == {
+        "people": 1,
+        "lab_results": 4,
+    }
+    assert app.import_result_counts({"imported": 7}) == {"records": 7}
+    assert app.import_result_counts(None) == {}
 
 
 def test_latest_labs_tie_breaks_same_day_by_newer_record(tmp_path):
