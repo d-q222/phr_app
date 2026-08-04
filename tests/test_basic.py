@@ -1193,7 +1193,15 @@ def test_fhir_import_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
 
 
 def test_fhir_import_clear_existing_is_atomic_when_an_item_fails(tmp_path, monkeypatch):
-    db_path = tmp_path / "phr.db"
+    """The real worst case: clear the database, replay its OWN export, and fail partway.
+
+    Deliberately not a foreign bundle. Replacing a database with someone else's records is a
+    different operation with a different hazard -- the rows it deletes are ones no bundle here can
+    restore, which is a data-loss question rather than an atomicity one. This exercises the case a
+    user actually performs, and it is the case where a half-applied clear does the most damage:
+    the delete lands, the restore stops halfway, and the only copy of the data was the one deleted.
+    """
+    db_path = tmp_path / "atomic_clear.db"
     db.init_db(db_path)
     seeded_person = services.create_person({"name": "Seeded"}, db_path=db_path)
     services.create_item(
@@ -1202,11 +1210,12 @@ def test_fhir_import_clear_existing_is_atomic_when_an_item_fails(tmp_path, monke
         {"test_name": "Existing", "lab_date": "2026-01-01"},
         db_path=db_path,
     )
+    own_bundle = fhir.export_bundle("R4", db_path=db_path)
     before = db.export_all_tables(db_path=db_path)
-    _fail_create_item_after(monkeypatch, 2)
+    _fail_create_item_after(monkeypatch, 1)
 
     with pytest.raises(db.DatabaseBusyError):
-        fhir.import_bundle(_small_fhir_bundle(), clear_existing=True, db_path=db_path)
+        fhir.import_bundle(own_bundle, clear_existing=True, db_path=db_path)
 
     assert db.export_all_tables(db_path=db_path) == before
 
