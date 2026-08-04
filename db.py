@@ -145,6 +145,12 @@ def _write_connection(db_path: Path | str | None):
         raise
 
 
+# Databases with a `write_transaction` currently open, so nesting fails fast instead of silently
+# using a second connection. Module-level rather than thread-local: Streamlit reruns are sequential
+# per session, and a stray cross-thread nest is exactly as broken as a same-thread one.
+_OPEN_WRITE_TRANSACTIONS: set[str] = set()
+
+
 @contextmanager
 def write_transaction(db_path: Path | str | None = None):
     """Open one write connection whose whole context commits together or not at all.
@@ -162,9 +168,26 @@ def write_transaction(db_path: Path | str | None = None):
 
     Nothing inside the context may open a second connection: the first holds the write lock, so the
     second raises SQLITE_BUSY and surfaces as a confusing `DatabaseBusyError`.
+
+    **Nesting on the same database raises rather than misbehaving.** Two blocks would be two
+    connections, so the guarantee in the first paragraph would quietly stop holding: an inner block
+    that commits before the outer one writes survives the outer's rollback, and an inner block that
+    starts after the outer has written deadlocks into `DatabaseBusyError` instead. No importer nests
+    today; failing fast is what stops the first one that tries from getting a silent half-write.
     """
-    with _write_connection(db_path) as connection:
-        yield connection
+    resolved = str(Path(_resolve_db_path(db_path)).resolve())
+    if resolved in _OPEN_WRITE_TRANSACTIONS:
+        raise RuntimeError(
+            f"write_transaction is already open for {resolved}. Nesting would use a second "
+            "connection, so the inner block would not share the outer transaction. Pass the "
+            "connection already yielded instead."
+        )
+    _OPEN_WRITE_TRANSACTIONS.add(resolved)
+    try:
+        with _write_connection(db_path) as connection:
+            yield connection
+    finally:
+        _OPEN_WRITE_TRANSACTIONS.discard(resolved)
 
 
 def init_db(db_path: Path | str | None = None) -> Path:

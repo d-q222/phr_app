@@ -1485,7 +1485,9 @@ def import_result_counts(result: object) -> dict[str, int]:
     if isinstance(imported, dict):
         return {table: count for table, count in imported.items() if count}
     if isinstance(imported, int):
-        return {"records": imported}
+        # Same zero filter as the dict branch. Without it an all-rejected CSV rendered a table
+        # reading "Records: 0" while the identical all-rejected FHIR bundle rendered none.
+        return {"records": imported} if imported else {}
     return {}
 
 
@@ -1501,13 +1503,26 @@ def stash_import_outcome(title: str, succeeded: bool, message: str, result: obje
         "message": message,
         "counts": import_result_counts(result),
         "skipped": list(result.get("skipped", [])) if isinstance(result, dict) else [],
+        # Which database this describes. An outcome that somehow outlives its run must not surface
+        # against a different one -- reporting a real-database import while the app sits in demo
+        # mode would attribute records to the wrong place.
+        "db_path": str(Path(active_db_path()).resolve()),
     }
 
 
 def import_outcome_summary(outcome: dict) -> str:
+    """One sentence saying what actually landed -- including when that is nothing.
+
+    "Import complete." was returned whenever the total was zero, which dropped the skip count in
+    exactly the case the user most needs it: a CSV where every row failed validation reported a
+    bare success. The JSON restore legitimately reports no counts, so that case still reads as
+    plain completion; an importer that returned counts and imported none of them does not.
+    """
     total = sum(outcome["counts"].values())
     skipped = len(outcome["skipped"])
     if not total:
+        if skipped:
+            return f"No records imported; {skipped} entr(y/ies) skipped."
         return "Import complete."
     text = f"Imported {total:,} record(s)."
     return f"{text} {skipped} entr(y/ies) skipped." if skipped else f"{text} Nothing skipped."
@@ -1538,12 +1553,19 @@ def render_import_outcome() -> None:
     on the next rerun, including when it is dismissed with the X instead of the button, which traps
     the user in a modal that keeps coming back.
 
-    Deliberately rendered twice -- as the dialog and as an inline panel below it. The dialog is what
-    forces acknowledgement; the inline panel is what guarantees the information is on screen at all,
-    because Streamlit's AppTest cannot see dialogs, so nothing here can test that the dialog behaved.
+    Deliberately rendered twice -- as the dialog and as an inline panel below it. The dialog forces
+    acknowledgement; the panel guarantees the information is on screen even if the dialog lifecycle
+    misbehaves, whose failure mode would be no feedback at all, which is the bug being fixed.
+
+    (An earlier version of this docstring justified the pair by claiming AppTest cannot see dialogs.
+    On the pinned Streamlit it can -- it walks the dialog body too, which is why the assertions in
+    `tests/test_basic.py` see each message twice. The redundancy is still wanted; the reason given
+    for it was wrong.)
     """
     outcome = st.session_state.pop(IMPORT_OUTCOME_KEY, None)
     if not outcome:
+        return
+    if outcome.get("db_path") and outcome["db_path"] != str(Path(active_db_path()).resolve()):
         return
     import_outcome_dialog(outcome)
     render_import_outcome_body(outcome)
@@ -1571,7 +1593,8 @@ def perform_import(scope: str, name: str, title: str, importer: Callable[[], obj
 def page_import_export(person: dict | None, db_path: Path | str | None = None, demo_mode: bool = False) -> None:  # noqa: C901, PLR0915
     db_path = db.DB_PATH if db_path is None else db_path
     page_header("Import/Export")
-    render_import_outcome()
+    # The outcome is rendered by `main` before the page dispatch, so it appears wherever the import
+    # leaves the user -- including the lock gate, which this page cannot reach.
     if demo_mode:
         st.caption("Imports and restores in demo mode modify only the session demo database.")
     if person:
@@ -1771,6 +1794,14 @@ def main() -> None:  # noqa: C901, PLR0915
             st.session_state, condition_ui.profile_scope(person, current_db_path, locked)
         )
         page = page_navigation(nav_slot)
+
+    # Rendered here rather than inside `page_import_export`, because an import can move the app off
+    # that page before it draws: a clear-existing restore that brings in a password-protected
+    # profile deletes the previously selected one, so the next run resolves to the restored profile,
+    # hits the lock gate, and returns -- the page never renders and the user sees no confirmation
+    # that a whole-database restore just happened. The outcome describes the file the user supplied,
+    # not stored records, so it is safe ahead of the gate.
+    render_import_outcome()
 
     if page == "Profiles":
         page_profiles(person, current_db_path, demo_mode=demo_mode)

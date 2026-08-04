@@ -1526,9 +1526,11 @@ def test_successful_import_reports_what_landed(tmp_path, monkeypatch):
 
     next(button for button in test_app.button if "Import FHIR Bundle" in str(button.label)).click().run(timeout=60)
 
-    # Asserted on the inline panel, not the dialog: AppTest cannot see dialogs, which is exactly why
-    # the outcome is rendered in both places.
-    assert any("Imported 2 record(s)" in message.value for message in test_app.success)
+    # `any` over both surfaces on purpose. AppTest walks the dialog body as well as the inline
+    # panel on the pinned Streamlit, so the message appears twice; the assertion below pins that
+    # both are present, because an `any` alone would pass with either one deleted.
+    landed = [message for message in test_app.success if "Imported 2 record(s)" in message.value]
+    assert len(landed) == 2, f"expected the dialog and the inline panel, got {len(landed)}"
 
 
 def test_a_failed_import_keeps_the_file_queued_and_says_nothing_was_imported(tmp_path, monkeypatch):
@@ -3040,3 +3042,43 @@ def test_teaching_the_importer_a_new_resource_cannot_re_open_the_data_loss(tmp_p
 
     assert "conditions" in str(excinfo.value)
     assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]
+def test_nesting_write_transaction_fails_fast_rather_than_half_committing(tmp_path):
+    """Two blocks would be two connections, so the outer's rollback would not cover the inner.
+
+    An inner block committing before the outer writes survives the outer's rollback; an inner block
+    starting after the outer has written deadlocks instead. Neither is a transaction, so the
+    primitive refuses rather than appearing to work.
+    """
+    database = tmp_path / "nested.db"
+    db.init_db(database)
+
+    with db.write_transaction(database) as connection:
+        person_id = db.create_person({"name": "Test Person"}, connection=connection)
+        with pytest.raises(RuntimeError, match="already open"):
+            with db.write_transaction(database):
+                pass
+        assert person_id
+
+    # The refusal must not leave the flag set, or every later import on this database would fail.
+    with db.write_transaction(database) as connection:
+        db.create_person({"name": "Second Person"}, connection=connection)
+    assert len(services.list_people(db_path=database)) == 2
+
+
+def test_an_all_invalid_csv_does_not_report_a_bare_success(tmp_path):
+    """"Import complete." dropped the skip count in exactly the case that needs it."""
+    outcome = {
+        "title": "Import labs CSV",
+        "succeeded": True,
+        "message": "",
+        "counts": app.import_result_counts({"imported": 0, "skipped": [{"row": 1}, {"row": 2}]}),
+        "skipped": [{"row": 1}, {"row": 2}],
+    }
+
+    summary = app.import_outcome_summary(outcome)
+
+    assert "No records imported" in summary
+    assert "2 entr(y/ies) skipped" in summary
+    # And no zero-row table: the int shape now drops zero exactly as the per-table dict shape does.
+    assert app.import_result_counts({"imported": 0}) == {}
+    assert app.import_result_counts({"imported": 3}) == {"records": 3}

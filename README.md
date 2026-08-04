@@ -117,8 +117,10 @@ Consequences you will see on the page:
   Importing the same bundle twice would otherwise create a duplicate profile.
 - A **failed** import keeps the file queued, so you can fix the cause and retry without browsing for
   it again. Retrying is safe precisely because the failure added nothing.
-- Either way a dialog reports what happened — per-table record counts on success, the reason on
-  failure — and the same summary is shown on the page behind it.
+- Either way a dialog reports what happened — the reason on failure, and on success what actually
+  landed — and the same summary is shown on the page behind it. FHIR and CSV imports report record
+  counts; a JSON backup restore reports completion without counts, because it restores whole tables
+  rather than counting rows.
 
 ## FHIR Interoperability
 
