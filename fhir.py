@@ -227,36 +227,47 @@ def unrestorable_state(
     return losses
 
 
+def refuse_unrestorable_clear(resources: Sequence[dict], db_path: Path | str | None = None) -> None:
+    """Raise if clearing before replaying `resources` would destroy something they cannot restore.
+
+    Extracted from `import_bundle` rather than inlined: three separate changes in this stack each add
+    a branch to that function, and it is the one place where a missed early return means data loss,
+    so it should stay short enough to read in one go.
+
+    A FHIR bundle carries no Condition on export, so clearing every table and replaying the bundle
+    deleted a profile's tracked conditions with nothing able to bring them back -- while the result
+    dict reported `conditions: 0`, indistinguishable from "the bundle had none". The rows cannot
+    simply be spared either: `import_all_tables` deletes in reverse table order precisely so children
+    go before `people`, and leaving conditions behind would fail the foreign key on the parent delete.
+    """
+
+    blocked = unrestorable_state(
+        db_path,
+        bundle_people=bundle_person_ids(resources),
+        bundle_tables=tables_this_bundle_restores(resources),
+    )
+    if not blocked:
+        return
+    # Categories are withheld entirely when any profile is password-protected: "a profile here
+    # tracks conditions" is health data about someone who locked their record, and this string is
+    # rendered verbatim by st.error (AGENTS.md section 4).
+    protected = any(row.get("profile_password_enabled") for row in db.list_records("people", db_path=db_path))
+    detail = "some existing data" if protected else ", ".join(blocked)
+    # The remedies named here are the ones that actually change this outcome. "Take a backup first"
+    # does not: the guard would refuse the retry identically, which reads as a precondition the user
+    # can satisfy when it is not one.
+    raise ValueError(
+        "Clearing existing records would permanently delete data this FHIR bundle cannot restore: "
+        f"{detail}. Import without clearing, or use a JSON backup, which does round-trip all of it."
+    )
+
+
 def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path | str | None = None) -> dict:
     db_path = db.DB_PATH if db_path is None else db_path
     payload = json.loads(payload_text)
     resources = _resources_from_payload(payload)
     if clear_existing:
-        # Refuse rather than destroy. A FHIR bundle carries no Condition on export, so clearing
-        # every table and replaying the bundle deleted a profile's tracked conditions with nothing
-        # able to bring them back -- and the result dict reported `conditions: 0`, which is
-        # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
-        # `import_all_tables` deletes in reverse table order precisely so children go before
-        # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
-        blocked = unrestorable_state(
-            db_path,
-            bundle_people=bundle_person_ids(resources),
-            bundle_tables=tables_this_bundle_restores(resources),
-        )
-        if blocked:
-            # Categories are withheld entirely when any profile is password-protected: "a profile
-            # here tracks conditions" is health data about someone who locked their record, and this
-            # string is rendered verbatim by st.error (AGENTS.md section 4).
-            protected = any(row.get("profile_password_enabled") for row in db.list_records("people", db_path=db_path))
-            detail = "some existing data" if protected else ", ".join(blocked)
-            # The remedies named here are the ones that actually change this outcome. "Take a backup
-            # first" does not: the guard would refuse the retry identically, which reads as a
-            # precondition the user can satisfy when it is not one.
-            raise ValueError(
-                "Clearing existing records would permanently delete data this FHIR bundle cannot "
-                f"restore: {detail}. Import without clearing, or use a JSON backup, which does "
-                "round-trip all of it."
-            )
+        refuse_unrestorable_clear(resources, db_path)
         db.import_all_tables({table: [] for table in db.TABLES}, clear_existing=True, db_path=db_path)
 
     imported = {table: 0 for table in db.TABLES}
