@@ -2210,25 +2210,34 @@ def test_fhir_replace_import_still_works_when_nothing_would_be_lost(tmp_path):
     assert len(restored) == 1
 
 
-def test_every_table_is_either_fhir_restorable_or_guarded(tmp_path):
-    """Derived, not hand-listed: the next table added cannot slip through the same way.
+def test_restorability_is_asked_of_the_bundle_not_of_what_the_importer_can_parse(tmp_path):
+    """The capability-derived version of this check is a trap, and a live one.
 
-    `conditions` was only ever lost because `db.TABLES` happened to equal the set FHIR could emit
-    until it was added, so the replace-import was lossless by coincidence rather than by check.
+    `FHIR_VALIDATORS` is keyed by what the IMPORTER accepts; restoring after a clear needs what the
+    EXPORTER emits. Those sets coincide only by accident, and the next change in this stack separates
+    them -- Condition import support puts `conditions` into FHIR_VALIDATORS while `export_bundle`
+    still deliberately emits none. A capability-derived guard would then stop reporting conditions as
+    at risk and the original data loss would return silently.
     """
     database = tmp_path / "fhir_guard.db"
     db.init_db(database)
     person_id = services.create_person({"name": "Test Person"}, db_path=database)
-    unrestorable = set(db.TABLES) - fhir.restorable_tables()
+    for table, seed in CHILD_TABLE_SEEDS.items():
+        services.create_item(table, person_id, dict(seed), db_path=database)
+    resources = [entry["resource"] for entry in json.loads(fhir.export_bundle("R4", db_path=database))["entry"]]
 
-    assert unrestorable, "if this is ever empty the guard is dead code -- delete it deliberately"
-    for table in unrestorable:
-        seed = dict(CHILD_TABLE_SEEDS[table])
-        services.create_item(table, person_id, seed, db_path=database)
+    carried = fhir.tables_this_bundle_restores(resources)
 
-    blocked = fhir.unrestorable_state(database)
-
-    assert set(blocked) >= unrestorable
+    # Whatever the exporter actually emitted is restorable; everything else in db.TABLES is not,
+    # and every one of those holds a row here, so all of them must be reported.
+    missing = set(db.TABLES) - carried
+    assert "conditions" in missing, "the exporter emits no Condition; if that changes, revisit the guard"
+    reported = fhir.unrestorable_state(database, bundle_tables=carried)
+    for table in missing:
+        assert table in reported, table
+    # And a table the bundle does carry is not reported, so the guard is not simply refusing always.
+    assert "medications" in carried
+    assert "medications" not in reported
 
 
 def test_the_fhir_clear_guard_sees_every_profile_not_just_the_bundle_s_own(tmp_path):
@@ -2416,3 +2425,34 @@ def test_a_bundle_of_this_database_s_own_profiles_still_replaces_cleanly(tmp_pat
 
     assert result["imported"]["people"] == 2
     assert sorted(row["name"] for row in services.list_people(db_path=database)) == ["Profile One", "Profile Two"]
+
+
+def test_teaching_the_importer_a_new_resource_cannot_re_open_the_data_loss(tmp_path, monkeypatch):
+    """Simulates the next change in this stack, which is where this guard would have failed.
+
+    PR #12 adds Condition *import* support, putting `conditions` into `FHIR_VALIDATORS` while
+    `export_bundle` still deliberately emits no Condition. Had the guard derived restorability from
+    `{"people", *FHIR_VALIDATORS}`, that single addition would have made it stop reporting
+    conditions as at risk -- and a full export re-imported with "clear existing" would have deleted
+    every tracked condition and restored none, silently reinstating the exact loss this guard exists
+    to prevent, with both branches' test suites green because neither contains both halves.
+
+    Deriving from the payload makes that impossible, and this test pins it by teaching the importer
+    the resource without teaching the exporter to emit it.
+    """
+    database = tmp_path / "fhir_guard.db"
+    db.init_db(database)
+    person_id = services.create_person({"name": "Test Person"}, db_path=database)
+    services.create_item("conditions", person_id, {"condition_name": "Hypertension"}, db_path=database)
+    services.create_item("medications", person_id, {"name": "Lisinopril", "start_date": "2025-02-10"}, db_path=database)
+
+    # The importer now understands conditions; the exporter still emits none.
+    monkeypatch.setitem(fhir.FHIR_VALIDATORS, "conditions", validation.validate_condition)
+    bundle = fhir.export_bundle("R4", db_path=database)
+    assert "Condition" not in {entry["resource"]["resourceType"] for entry in json.loads(bundle)["entry"]}
+
+    with pytest.raises(ValueError) as excinfo:
+        imports_exports.import_fhir_bundle(bundle, clear_existing=True, db_path=database)
+
+    assert "conditions" in str(excinfo.value)
+    assert [row["condition_name"] for row in services.tracked_conditions(person_id, db_path=database)] == ["Hypertension"]

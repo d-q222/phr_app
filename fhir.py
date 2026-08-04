@@ -96,21 +96,33 @@ _PERSON_LOSS_DESCRIPTIONS = {
 }
 
 
-def restorable_tables() -> set[str]:
-    """The tables a FHIR bundle can put back, derived rather than listed by hand.
+def tables_this_bundle_restores(resources: Sequence[dict]) -> set[str]:
+    """Which tables the resources in hand can actually repopulate.
 
-    ``FHIR_VALIDATORS`` is keyed by exactly the tables ``_local_record_from_resource`` can produce,
-    and ``people`` comes back from ``Patient``. Deriving the set from that mapping means a table
-    added to ``db.TABLES`` without a FHIR representation is caught automatically, which is how
-    ``conditions`` slipped through: before it existed, ``db.TABLES`` happened to equal this set, so
-    a clear-and-replace import was lossless by coincidence rather than by check.
+    Asked of the payload, not of the codebase's capabilities. The obvious version of this check --
+    "which tables can the importer populate in principle", i.e. ``{"people", *FHIR_VALIDATORS}`` --
+    is a trap, and a live one:
 
-    Table granularity is necessary but **not sufficient** -- see ``unrestorable_state``. ``people``
-    is in this set and still loses columns, which is precisely the trap: restorability is a property
-    of every column, not of the table.
+    ``FHIR_VALIDATORS`` is keyed by what the **importer** accepts. Restoring after a clear needs
+    what the **exporter** emits. Those two sets coincided only by accident, and the very next change
+    in this stack separates them: adding Condition *import* support puts ``conditions`` into
+    ``FHIR_VALIDATORS`` while ``export_bundle`` still deliberately emits no Condition. A
+    capability-derived guard would then stop reporting conditions as at risk, and a full export
+    re-imported with "clear existing" would delete every tracked condition and restore none --
+    reinstating, silently, the exact data loss this guard was written to prevent.
+
+    Deriving from the bundle is immune to that, because a bundle that carries no Condition resource
+    cannot restore the conditions table no matter what the importer is capable of.
     """
 
-    return {"people", *FHIR_VALIDATORS}
+    tables = {"people"} if any(r.get("resourceType") == "Patient" for r in resources) else set()
+    for resource in resources:
+        if resource.get("resourceType") == "Patient":
+            continue
+        table, _ = _local_record_from_resource(resource)
+        if table:
+            tables.add(table)
+    return tables
 
 
 def _lossy_person_columns(people: Sequence[dict]) -> set[str]:
@@ -161,12 +173,18 @@ def bundle_person_ids(resources: Sequence[dict]) -> set[str]:
     return found
 
 
-def unrestorable_state(db_path: Path | str | None = None, bundle_people: set[str] | None = None) -> list[str]:
+def unrestorable_state(
+    db_path: Path | str | None = None,
+    bundle_people: set[str] | None = None,
+    bundle_tables: set[str] | None = None,
+) -> list[str]:
     """What a clear-and-replace FHIR import would destroy, as descriptions in a stable order.
 
     Three levels, because each of the first two alone gave false assurance:
 
-    * whole tables no FHIR resource maps to -- ``conditions`` today;
+    * whole tables the **incoming bundle** carries no resource for -- see
+      ``tables_this_bundle_restores`` for why this is asked of the payload rather than of what the
+      importer is capable of;
     * columns of ``people`` a ``Patient`` cannot carry, measured by round-tripping each real row
       through both converters (see ``_lossy_person_columns``) -- a password-protected profile with
       no conditions passed the table-level check and came back with ``profile_password_enabled``
@@ -188,7 +206,9 @@ def unrestorable_state(db_path: Path | str | None = None, bundle_people: set[str
     """
 
     db_path = db.DB_PATH if db_path is None else db_path
-    restorable = restorable_tables()
+    # Falls back to "every table" only when no payload is supplied, i.e. a caller asking what is at
+    # risk in the abstract. The destructive path always supplies one.
+    restorable = db.TABLES if bundle_tables is None else bundle_tables
     losses = []
     for table in db.TABLES:
         if table in restorable:
@@ -218,7 +238,11 @@ def import_bundle(payload_text: str, clear_existing: bool = False, db_path: Path
         # indistinguishable from "the bundle had none". The rows cannot simply be spared either:
         # `import_all_tables` deletes in reverse table order precisely so children go before
         # `people`, and leaving conditions behind would fail the foreign key on the parent delete.
-        blocked = unrestorable_state(db_path, bundle_people=bundle_person_ids(resources))
+        blocked = unrestorable_state(
+            db_path,
+            bundle_people=bundle_person_ids(resources),
+            bundle_tables=tables_this_bundle_restores(resources),
+        )
         if blocked:
             # Categories are withheld entirely when any profile is password-protected: "a profile
             # here tracks conditions" is health data about someone who locked their record, and this
