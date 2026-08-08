@@ -135,9 +135,19 @@ this ladder in order and stop at the first step that satisfies the requirement:
 
 1. Does this need to exist at all? If the requirement is speculative or "for later," skip it (YAGNI).
 2. Does the codebase already do this? Reuse the existing `services.py`/`db.py`/helper.
-3. Does the standard library or an already-installed dependency cover it? Use it; add nothing.
-4. Is it a one-line or single-function change? Write that; do not scaffold around it.
-5. Only then write the minimum new code, in the module that already owns that responsibility (§3).
+3. Does the platform underneath already do it? Use its primitive instead of rebuilding it a layer up.
+4. Does the standard library or an already-installed dependency cover it? Use it; add nothing.
+5. Is it a one-line or single-function change? Write that; do not scaffold around it.
+6. Only then write the minimum new code, in the module that already owns that responsibility (§3).
+
+"Platform" in step 3 means any layer this code already runs on and did not choose per feature: the
+language runtime, the UI framework, the datastore engine, the OS, the CI system. Prefer a schema
+constraint, an index, a generated column, a built-in widget, a framework lifecycle hook, or a runtime
+feature over application code that reproduces it — the layer beneath you cannot be bypassed by a
+future caller that forgets to call your helper. For the current stack that means Streamlit (widgets,
+session state, caching) and SQLite (constraints, indexes, `PRAGMA`s); when the stack changes the
+examples change and the step does not. A platform primitive backs up boundary validation (§4), it
+never replaces it.
 
 Do not add a new class, module, config layer, dependency, table, or "future override" hook until a
 second concrete caller exists. Safety, validation, and profile isolation (§4, §5) are never what gets
