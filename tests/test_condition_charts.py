@@ -706,7 +706,10 @@ def test_the_trend_line_does_not_join_readings_stored_in_different_units():
 
     line = next(layer for layer in spec["layer"] if layer["mark"]["type"] == "line")
     detail_fields = {entry["field"] for entry in line["encoding"]["detail"]}
-    assert detail_fields == {"record", "unit"}
+    # `table` joined `record` and `unit` so that one name existing in two tables -- a clinic-measured
+    # and a wearable-estimated "Weight" -- also draws as two paths. The unit split this test guards is
+    # unchanged; the assertion stays exact so a field silently leaving the list still fails here.
+    assert detail_fields == {"record", "unit", "table"}
 
 
 def test_first_latest_applies_its_own_tie_breaker_on_a_hand_built_frame():

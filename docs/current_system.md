@@ -135,9 +135,23 @@ adding anything to the environment.
 
 `condition_charts.py` imports pandas and altair but **no Streamlit and no database**. Every function
 takes rows it was handed and returns a `pd.DataFrame` or an `alt.Chart`, so a test asserts on
-`chart.to_dict()` instead of driving a browser — something the four `st.line_chart` call sites
-elsewhere in the app cannot support. Retrieval for the cross-condition sparklines lives in
+`chart.to_dict()` instead of driving a browser. Retrieval for the cross-condition sparklines lives in
 `condition_services.get_primary_series`, not in the chart module, to keep that seam intact.
+
+Every trend in the app now goes through it. The Labs and Wearables record pages
+(`app.py::render_trend_chart`) and the body map's Trends tab (`body_map_ui::_render_trends`) hand
+their rows to `trend_frame` and render `build_trend_chart`; no `st.line_chart` call sites remain.
+That consolidation is what closes two defects the hand-rolled versions carried: the wearable page
+joined readings stored in two units into one falling line, and the lab page discarded the `flag`
+column it stores. The body map reaches `trend_frame` through `NormalizedBodyRecord.raw_record`, so no
+adapter sits between them.
+
+`trend_frame`'s `_NUMERIC_FIELDS` allowlist — `lab_results` and `wearable_records` only — is load
+bearing beyond tidiness. `NormalizedBodyRecord.status_flag` merges three vocabularies
+(`lab_results.flag`, `medications.status`, `appointments.status`) that overlap on the token
+`"Unknown"`, and a medication's charted value would be its unvalidated free-text `dose`. Routing the
+body map through the allowlist keeps a medication's adherence status out of a clinical-severity
+legend by construction rather than by a filter someone has to remember.
 
 Colour there is a medical-safety surface: it encodes a `flag` the source recorded and the app
 stored, never anything computed at render time. Three validated hues carry severity, mark **shape**

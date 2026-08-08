@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import date
+from math import isfinite
 
 from models import (
     APPOINTMENT_STATUSES,
@@ -43,6 +45,37 @@ def normalize_optional_number(value: object) -> float | None:
     if is_blank(value):
         return None
     return float(value)
+
+
+# An allowlist, not a blacklist. `float()` is far more permissive than it looks: it accepts fullwidth
+# digits ("５.６" -> 5.6), underscore digit separators ("1_000.5" -> 1000.5) and "Infinity" -> inf, so
+# a `try: float(...)` guarded by a few rejected characters silently lets all three through.
+#
+# `[0-9]` rather than `\d`: `\d` matches every Unicode decimal digit, so the fullwidth case survives
+# the regex too and reaches `float`, which happily converts it.
+_PLAIN_DECIMAL = re.compile(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)$")
+
+
+def parse_plain_decimal(value: object) -> float | None:
+    """A written result as a number, but only when the whole string is an unambiguous decimal.
+
+    Used to fill `lab_results.numeric_value` from a `result_value` the person typed as a number.
+    Returns None for anything that is not purely a finite decimal, which deliberately includes:
+
+    - censored results such as ``"<0.01"`` or ``">1000"``. Storing 0.01 would assert a precision the
+      lab explicitly refused to give, which is the kind of claim AGENTS.md section 5 forbids.
+    - ranges (``"5.6-7.2"``), values carrying a unit (``"5.6 mg/dL"``), and separator-ambiguous input
+      (``"5,6"`` is 5.6 in some locales and 56 in others).
+    - ``"nan"``/``"inf"``, which `float` accepts and which would poison every downstream comparison.
+    """
+
+    # No `None` guard: `str(None)` is "None", which the pattern rejects like any other word.
+    text = str(value).strip()
+    if not _PLAIN_DECIMAL.match(text):
+        return None
+    # Not redundant after the regex: 400 digits match it and still overflow to `inf` in `float`.
+    parsed = float(text)
+    return parsed if isfinite(parsed) else None
 
 
 def valid_severity(value: object) -> list[str]:

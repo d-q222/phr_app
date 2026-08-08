@@ -12,6 +12,7 @@ import services
 from validation import (
     is_blank,
     normalize_optional_number,
+    parse_plain_decimal,
     validate_allergy,
     validate_appointment,
     validate_condition,
@@ -63,6 +64,10 @@ def import_labs_csv(file_obj, person_id: int, db_path: Path | str | None = None)
                 skipped.append({"row": int(index) + 2, "errors": errors})
                 continue
             data["numeric_value"] = normalize_optional_number(data["numeric_value"])
+            if data["numeric_value"] is None:
+                # A CSV carrying only a written result still charts, provided that result is
+                # unambiguously a number. `is None` because a stored 0 is a real reading.
+                data["numeric_value"] = parse_plain_decimal(data["result_value"])
             data["reference_low"] = normalize_optional_number(data["reference_low"])
             data["reference_high"] = normalize_optional_number(data["reference_high"])
             services.create_item(

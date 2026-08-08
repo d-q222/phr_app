@@ -255,10 +255,7 @@ def _render_measurement_trends(
     spans = condition_charts.medication_spans(records_by_table.get("medications", []), date.today().isoformat())
     chart = condition_charts.build_trend_with_medications(trends[trends["record"].isin(selected)], spans)
     st.altair_chart(chart, width="stretch")
-    st.caption(
-        "Point colour and shape show the flag recorded by the source, not an assessment by this app. "
-        "Records with no flag are drawn hollow."
-    )
+    st.caption(condition_charts.FLAG_CAPTION)
     if not spans.empty:
         st.caption(
             "Timing only — records show when a medication was recorded, not whether it affected any result."
