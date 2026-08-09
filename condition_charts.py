@@ -65,6 +65,28 @@ FLAG_SHAPES = {
 FLAG_ORDER = list(FLAG_COLORS)
 NOT_FLAGGED = "Not flagged"
 
+# Lives beside the palette because it is what keeps that palette from reading as an assessment this
+# app made. Every surface that renders a flag-coloured chart shows it; a third call site is what moved
+# it out of `condition_ui` (AGENTS.md section 6.2, rule of three).
+FLAG_CAPTION = (
+    "Point colour and shape show the flag recorded by the source, not an assessment by this app. "
+    "Records with no flag are drawn hollow."
+)
+
+
+def missing_numeric_value_caption(count: int) -> str:
+    """Explain labs that carry a written result but no number, and name the field that fixes it.
+
+    `trend_frame` charts `numeric_value`; a lab whose result was only typed into the free-text
+    `result_value` box has nothing to plot. Saying so beats a series silently missing from the chart.
+    """
+
+    return (
+        f"Not charted: {count} lab records have no Numeric Result. "
+        "Add one where the source reported a number. Results such as 'Positive' or '<0.01' have no "
+        "number to chart, and entering an estimate would record a precision the source did not give."
+    )
+
 # `row_id` is the database row's own id, carried purely as an ordering tie-breaker. Two readings can
 # share a date, and `services.list_items` returns rows id-*descending*, so sorting on date alone let
 # the newer row land first and inverted "first" and "most recent" -- with the flag and the sign of
@@ -547,12 +569,12 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
         alt.Tooltip("unit:N", title="Unit"),
         alt.Tooltip("flag:N", title="Source flag"),
     ]
-    # Grouped by record *and* unit, so a series stored in two units draws two paths rather than one
-    # continuous line. `first_latest` refuses to subtract across units for the same reason; drawing
-    # 232 lb straight down to 93 kg showed a 60% fall the table beside it explicitly declines to
-    # state, which is the worse of the two surfaces to leave unguarded.
+    # A line joins only readings that are the same measurement, in the same units, from the same
+    # table. Unit for the reason `first_latest` withholds `change` across units (see its docstring);
+    # table because one name can live in two of them, and a path from a clinic-measured "Weight" to a
+    # wearable-estimated one implied the two instruments were a single continuous series.
     line = base.mark_line(color=ACCENT, strokeWidth=2, opacity=0.55).encode(
-        y=_value_axis(frame), detail=alt.Detail(["record:N", "unit:N"])
+        y=_value_axis(frame), detail=alt.Detail(["record:N", "unit:N", "table:N"])
     )
     flagged = (
         base.transform_filter(alt.datum.flag != NOT_FLAGGED)

@@ -140,7 +140,11 @@ how a user comes to believe something about their health that no clinician ever 
 - `tests/test_body_map_summary.py::test_uncertain_mappings_return_mapping_uncertain`
 - `tests/test_body_map_summary.py::test_mixed_mapping_confidence_keeps_reliable_status_and_surfaces_uncertainty`
 - `tests/test_body_map_config.py::test_ast_mapping_preserves_multisystem_uncertainty`
-- `tests/test_body_map_ui.py::test_numeric_trends_exclude_nonnumeric_and_undated_values_without_fabrication`
+- `tests/test_trend_charts.py::test_lab_trend_excludes_records_without_a_parseable_date_or_numeric_value`
+- `tests/test_condition_charts.py::test_trend_frame_skips_unusable_rows_without_raising`
+- `tests/test_condition_charts.py::test_trend_frame_rejects_booleans_rather_than_plotting_them_as_one`
+- `tests/test_trend_charts.py::test_only_allowlisted_tables_can_reach_a_flag_encoding`
+- `tests/test_trend_charts.py::test_workflow_status_vocabularies_cannot_be_mistaken_for_clinical_flags`
 
 ---
 

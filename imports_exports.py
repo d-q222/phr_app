@@ -12,6 +12,7 @@ import services
 from validation import (
     is_blank,
     normalize_optional_number,
+    parse_plain_decimal,
     validate_allergy,
     validate_appointment,
     validate_condition,
@@ -39,30 +40,110 @@ BACKUP_VALIDATORS = {
 SYSTEM_COLUMNS = {"id", "person_id", "created_at", "updated_at"}
 
 
+# Read as absent, the way pandas would normally read them. `import_labs_csv` turns pandas' own
+# handling off wholesale, so this restores it -- which means it must cover pandas' whole default
+# vocabulary, not the memorable half of it. Anything missing here is a token that used to import as
+# absent and would now reach `validate_lab` literally and be rejected.
+#
+# Spelled out rather than imported from `pandas._libs.parsers.STR_NA_VALUES`: that name is private,
+# and an import of it breaking on upgrade would take the app down at import time. Coverage is pinned
+# by `test_csv_na_tokens_still_cover_the_pandas_defaults` instead, so drift fails a test run rather
+# than a user's import.
+#
+# Matched case-sensitively, exactly as pandas matches them. Case-folding looks harmless and is not:
+# "Na" is sodium. Lowercasing turned a sodium panel's test name into an empty one, and `validate_lab`
+# then rejected the row for a missing test name. "None" is a pandas token; "none" and "NONE" are not.
+_CSV_NA_TOKENS = {
+    "",
+    "#N/A",
+    "#N/A N/A",
+    "#NA",
+    "-1.#IND",
+    "-1.#QNAN",
+    "-NaN",
+    "-nan",
+    "1.#IND",
+    "1.#QNAN",
+    "<NA>",
+    "N/A",
+    "NA",
+    "NULL",
+    "NaN",
+    "None",
+    "n/a",
+    "nan",
+    "null",
+}
+
+# The two free-text fields, where such a token is content rather than absence. A lab result really
+# can be written "NA" -- for an assay that does not apply -- and blanking it loses what the record
+# said. Every other column is coded, numeric or a date, where "NA" only ever means the exporter had
+# nothing to put there.
+_LITERAL_CSV_FIELDS = {"result_value", "notes"}
+
+
+def _csv_cell(row, column: str) -> str:
+    """One cell of a lab CSV, as text, with absence resolved per column.
+
+    Companion to the `keep_default_na=False` read in `import_labs_csv`: that keeps every token
+    literal so a written result survives, and this restores the ordinary reading everywhere a
+    literal "NA" would instead make `validate_lab` reject a row that used to import.
+    """
+
+    value = row.get(column, "")
+    text = "" if value is None else str(value)
+    if column in _LITERAL_CSV_FIELDS:
+        return text
+    # Exact, with no stripping: pandas does not strip before matching either, so a quoted " NA " is
+    # a two-space-padded literal to it and must stay one here. Stripping first looked like harmless
+    # tolerance and instead blanked a value the merge-base importer kept.
+    return "" if text in _CSV_NA_TOKENS else text
+
+
 def import_labs_csv(file_obj, person_id: int, db_path: Path | str | None = None) -> dict:
     db_path = db.DB_PATH if db_path is None else db_path
-    frame = pd.read_csv(file_obj)
+    # Both arguments stop pandas rewriting a value before any validation sees it.
+    #
+    # `dtype=str` disables column type inference. The C parser reads "0.000000000000000001" as 0.0,
+    # not 1e-18, so a result stored as a written string reached `parse_plain_decimal` already
+    # destroyed and the careful allowlist below charted the rounded number. Inference is also
+    # non-local: it applies per column, so one non-numeric row ("<0.01") keeps the whole column as
+    # text and the same file imports at full precision.
+    #
+    # `keep_default_na=False` stops the other rewrite. Pandas treats "NA", "NULL", "N/A" and friends
+    # as missing regardless of dtype, so `fillna("")` below blanked them -- and `validate_lab`
+    # returns no error for an empty `result_value`, so the row imported with the written result
+    # silently gone rather than being reported in `skipped`. `_csv_cell` then puts that reading back
+    # for every column except the free-text ones, because `result_value` and `flag` want opposite
+    # readings of the same token and one file-wide setting cannot serve both.
+    #
+    # Together these make the CSV path agree with the UI form, where the value is always a string.
+    frame = pd.read_csv(file_obj, dtype=str, keep_default_na=False)
     imported = 0
     skipped = []
     with db.write_transaction(db_path) as connection:
         for index, row in frame.fillna("").iterrows():
             data = {
-                "test_name": row.get("test_name", ""),
-                "result_value": row.get("result_value", ""),
-                "numeric_value": row.get("numeric_value", ""),
-                "unit": row.get("unit", ""),
-                "reference_low": row.get("reference_low", ""),
-                "reference_high": row.get("reference_high", ""),
+                "test_name": _csv_cell(row, "test_name"),
+                "result_value": _csv_cell(row, "result_value"),
+                "numeric_value": _csv_cell(row, "numeric_value"),
+                "unit": _csv_cell(row, "unit"),
+                "reference_low": _csv_cell(row, "reference_low"),
+                "reference_high": _csv_cell(row, "reference_high"),
                 # Absent, not "Unknown" -- that is a flag a source can actually record.
-                "flag": row.get("flag") or "",
-                "lab_date": row.get("lab_date", ""),
-                "notes": row.get("notes", ""),
+                "flag": _csv_cell(row, "flag"),
+                "lab_date": _csv_cell(row, "lab_date"),
+                "notes": _csv_cell(row, "notes"),
             }
             errors = validate_lab(data)
             if errors:
                 skipped.append({"row": int(index) + 2, "errors": errors})
                 continue
             data["numeric_value"] = normalize_optional_number(data["numeric_value"])
+            if data["numeric_value"] is None:
+                # A CSV carrying only a written result still charts, provided that result is
+                # unambiguously a number. `is None` because a stored 0 is a real reading.
+                data["numeric_value"] = parse_plain_decimal(data["result_value"])
             data["reference_low"] = normalize_optional_number(data["reference_low"])
             data["reference_high"] = normalize_optional_number(data["reference_high"])
             services.create_item(

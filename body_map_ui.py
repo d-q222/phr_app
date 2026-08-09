@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import MutableMapping, Sequence
-from math import isfinite
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import condition_charts
 import db
 from body_map_config import BODY_PART_IDS, BODY_PARTS, BODY_SYSTEMS
 from body_map_services import NormalizedBodyRecord, get_records_for_body_part
@@ -75,22 +75,22 @@ def group_records(records: Sequence[NormalizedBodyRecord]) -> dict[str, list[Nor
     return grouped
 
 
-def numeric_trends(records: Sequence[NormalizedBodyRecord]) -> pd.DataFrame:
-    """Return only source-provided numeric values with dates; never interpolate values."""
+def rows_by_source_table(records: Sequence[NormalizedBodyRecord]) -> dict[str, list[dict]]:
+    """Group the original database rows behind normalized records by their source table.
 
-    rows = []
+    Feeds `condition_charts.trend_frame`, which is keyed by table name and allowlists only
+    `lab_results` and `wearable_records` -- so medications, appointments and health entries are
+    excluded here by construction rather than by a filter anyone has to remember.
+
+    Unlike `group_records` above this needs no de-duplication: `get_records_for_body_part` yields at
+    most one normalized record per source row, and grouping by table cannot merge two record types
+    into one bucket the way the category mapping can.
+    """
+
+    grouped: dict[str, list[dict]] = {}
     for record in records:
-        if not record.date:
-            continue
-        try:
-            value = float(record.value)
-            date = pd.to_datetime(record.date, errors="raise")
-        except (TypeError, ValueError):
-            continue
-        if not isfinite(value):
-            continue
-        rows.append({"date": date, "value": value, "record": record.display_name})
-    return pd.DataFrame(rows, columns=["date", "value", "record"])
+        grouped.setdefault(record.source_table, []).append(record.raw_record)
+    return grouped
 
 
 def _record_rows(records: Sequence[NormalizedBodyRecord]) -> list[dict[str, object]]:
@@ -182,10 +182,30 @@ def render_body_map_page(person: dict | None, db_path: Path | str | None = None)
         with tab:
             _render_records(grouped[category], category)
     with tabs[7]:
-        trends = numeric_trends(records)
-        if trends.empty:
-            st.info("No dated numeric records are available for trends.")
-        else:
-            names = sorted(trends["record"].unique())
-            name = st.selectbox("Trend record", names, key=TREND_STATE_KEY)
-            st.line_chart(trends[trends["record"] == name].sort_values("date"), x="date", y="value")
+        _render_trends(records)
+
+
+def _render_trends(records: Sequence[NormalizedBodyRecord]) -> None:
+    """Chart the dated numeric records for one body area, then symptom severity separately."""
+
+    grouped = rows_by_source_table(records)
+    trends = condition_charts.trend_frame(grouped)
+    if trends.empty:
+        st.info("No dated numeric records are available for trends.")
+    else:
+        names = sorted(str(name) for name in trends["record"].dropna().unique())
+        name = st.selectbox("Trend record", names, key=TREND_STATE_KEY)
+        st.altair_chart(condition_charts.build_trend_chart(trends[trends["record"] == name]), width="stretch")
+        st.caption(condition_charts.FLAG_CAPTION)
+
+    # Labs with a written result but no number are named rather than silently missing from the chart.
+    missing = sum(1 for row in grouped.get("lab_results", []) if row.get("numeric_value") is None)
+    if missing:
+        st.caption(condition_charts.missing_numeric_value_caption(missing))
+
+    # Severity keeps its own chart rather than joining the trend above: a self-reported 1-10 scale
+    # does not belong on an axis of clinical measurements.
+    severity = condition_charts.severity_frame(grouped.get("health_entries", []))
+    if not severity.empty:
+        st.subheader("Symptom severity")
+        st.altair_chart(condition_charts.build_severity_chart(severity), width="stretch")

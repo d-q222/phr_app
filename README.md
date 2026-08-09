@@ -88,6 +88,17 @@ Hemoglobin A1c,5.6,5.6,%,4.0,5.6,Normal,2026-04-28,
 
 `test_name` and `lab_date` are required. `flag` must be one of `Normal`, `High`, `Low`, `Abnormal`, `Critical`, or `Unknown`.
 
+`result_value` is the result as reported and may be any text — `5.6`, `Positive`, `<0.01`.
+`numeric_value` is that same result as a number, and it is the only field charts read. A numeric
+result should fill both.
+
+If you leave `numeric_value` empty, the app fills it from `result_value` when — and only when — that
+value is unambiguously a plain decimal. `5.6` is copied across; `Positive`, `5.6-7.2`, `5.6 mg/dL`
+and `1,234.5` are not. Neither are censored results such as `<0.01`, because recording that as
+`0.01` would state a precision the lab explicitly declined to give. Anything left unfilled still
+appears in your records — it just cannot be charted, and the Labs page says so. This applies to new
+entries and imports only; existing records are never rewritten.
+
 ## Wearable CSV Import Format
 
 Required columns:

@@ -15,6 +15,7 @@ import streamlit as st
 import ai_chat
 import ai_config
 import body_map_ui
+import condition_charts
 import condition_ui
 import db
 import display_format
@@ -527,7 +528,12 @@ FIELD_CONFIGS = {
             ("unit", "text"),
             ("reference_low", "number_optional"),
             ("reference_high", "number_optional"),
-            ("flag", LAB_FLAGS),
+            # Blank first, as every other optional coded field here does (appointments `status`,
+            # conditions `source`, and the Labs flag *filter* below). Without it `input_field` falls
+            # to index 0 and stores "Normal" for a result nobody flagged -- the app stating a
+            # clinical assessment no source made, which is exactly what `FLAG_CAPTION` promises the
+            # charts never do. It also overwrote the blank flag of an imported record on any edit.
+            ("flag", ["", *LAB_FLAGS]),
             ("lab_date", "date_text"),
             ("notes", "textarea"),
         ],
@@ -817,7 +823,15 @@ def show_errors(errors: list[str]) -> None:
         st.error(error)
 
 
-def clean_payload(table: str, payload: dict) -> dict:
+def clean_payload(table: str, payload: dict, *, derive_numeric_value: bool = True) -> dict:
+    """Normalize a submitted form payload for storage.
+
+    `derive_numeric_value` is False on the edit path. Deriving there would rewrite a record that
+    already exists: opening a legacy lab to correct its notes would also fill in a `numeric_value`
+    the person never entered, which is the backfill README explicitly promises does not happen
+    ("existing records are never rewritten"). New entries and imports still derive it.
+    """
+
     cleaned = {}
     for key, value in payload.items():
         if value == "":
@@ -828,6 +842,10 @@ def clean_payload(table: str, payload: dict) -> dict:
         for key in ["numeric_value", "reference_low", "reference_high"]:
             if key in cleaned:
                 cleaned[key] = validation.normalize_optional_number(cleaned[key])
+        if derive_numeric_value and cleaned.get("numeric_value") is None:
+            # Only when the numeric field was left blank -- a stored 0 is a real reading, not an
+            # absence, so `is None` rather than a falsiness check.
+            cleaned["numeric_value"] = validation.parse_plain_decimal(cleaned.get("result_value"))
     if table == "wearable_records" and "value" in cleaned and not validation.is_blank(cleaned["value"]):
         cleaned["value"] = float(cleaned["value"])
     if table in {"allergies", "health_entries"} and "severity" in cleaned:
@@ -897,6 +915,28 @@ def dataframe(rows: list[dict]) -> None:
         st.dataframe(display_dataframe(rows), width="stretch", hide_index=True)
     else:
         st.info("No records yet.")
+
+
+def render_trend_chart(table: str, rows: list[dict], select_label: str) -> None:
+    """Chart one selected series from a record table, coloured by the flag the source recorded.
+
+    Delegates to `condition_charts` so this page draws the same tested chart as Tracked Conditions:
+    flag-aware, and split by unit so readings stored in two units never join into one false line.
+    Renders nothing when the table is empty -- the record table above already says so.
+    """
+
+    if not rows:
+        return
+    frame = condition_charts.trend_frame({table: rows})
+    if frame.empty:
+        st.info("No dated numeric records are available for trends.")
+        return
+    names = sorted(str(name) for name in frame["record"].dropna().unique())
+    # Deliberately keyless: a key would persist the selection across profile switches with nothing
+    # clearing it, so profile B would open showing profile A's chosen series.
+    selected = st.selectbox(select_label, names)
+    st.altair_chart(condition_charts.build_trend_chart(frame[frame["record"] == selected]), width="stretch")
+    st.caption(condition_charts.FLAG_CAPTION)
 
 
 def toggle_add_form(key: str) -> None:
@@ -1230,16 +1270,14 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
                         st.rerun()
 
     if table == "lab_results":
-        numeric_rows = [row for row in rows if row.get("numeric_value") is not None]
-        if numeric_rows:
-            trend = pd.DataFrame(numeric_rows)
-            selected_test = st.selectbox("Trend test", sorted(trend["test_name"].unique()))
-            chart_data = trend[trend["test_name"] == selected_test].sort_values("lab_date")
-            st.line_chart(chart_data, x="lab_date", y="numeric_value")
+        render_trend_chart("lab_results", rows, "Trend test")
+        missing_numeric = sum(1 for row in rows if row.get("numeric_value") is None)
+        if missing_numeric:
+            st.caption(condition_charts.missing_numeric_value_caption(missing_numeric))
     if table == "wearable_records" and rows:
-        chart_data = pd.DataFrame(rows).sort_values("timestamp")
-        metric = st.selectbox("Trend metric", sorted(chart_data["metric_type"].unique()))
-        st.line_chart(chart_data[chart_data["metric_type"] == metric], x="timestamp", y="value")
+        render_trend_chart("wearable_records", rows, "Trend metric")
+        # Outside the chart guard on purpose: the summary describes every wearable row, including
+        # rows that carry no chartable point, so it must not disappear with the chart.
         dataframe(services.wearable_summary(person_id, db_path=db_path))
 
     if not rows:
@@ -1310,7 +1348,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
             errors = config["validator"](data)
             if errors:
                 show_errors(errors)
-            elif apply_record_change(lambda: services.update_item(table, person_id=person_id, record_id=int(row["id"]), data=clean_payload(table, data), db_path=db_path)):
+            elif apply_record_change(lambda: services.update_item(table, person_id=person_id, record_id=int(row["id"]), data=clean_payload(table, data, derive_numeric_value=False), db_path=db_path)):
                 st.success("Record updated.")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()
