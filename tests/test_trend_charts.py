@@ -123,20 +123,36 @@ def test_wearable_summary_still_renders_when_no_wearable_row_is_chartable(app_db
     )
 
 
-def test_lab_trend_frame_carries_unit_through_from_the_record_page(app_db):
-    """The app page must hand `trend_frame` the unit column the mixed-unit split depends on.
+def test_lab_trend_frame_carries_unit_through_from_the_record_page(app_db, monkeypatch):
+    """The app page must hand `build_trend_chart` the unit column the mixed-unit split depends on.
 
-    The split itself is already covered by
-    `test_condition_charts.py::test_the_trend_line_does_not_join_readings_stored_in_different_units`;
-    this covers only that this call site supplies what that split needs.
+    The split itself is covered by
+    `test_condition_charts.py::test_the_trend_line_does_not_join_readings_stored_in_different_units`.
+    This has to prove the *page* supplies what that split needs, so it renders the real page and
+    captures the frame the renderer actually received. Rebuilding the frame from `filter_labs`
+    instead would pass even if `app.render_trend_chart` dropped the unit -- the failure it exists to
+    catch. The rendered Vega spec is no good for this: it refers to its data by name and Streamlit
+    ships the rows separately, so no unit is readable from the spec at all.
     """
     person_id = _person(app_db)
-    _lab(app_db, person_id, unit="mIU/L")
-    rows = services.filter_labs(person_id, db_path=app_db)
+    _lab(app_db, person_id, lab_date="2026-01-05", numeric_value=5.6, unit="mIU/L")
+    _lab(app_db, person_id, lab_date="2026-02-05", numeric_value=7.3, unit="pmol/L")
 
-    frame = condition_charts.trend_frame({"lab_results": rows})
+    received = []
+    original = condition_charts.build_trend_chart
+    monkeypatch.setattr(
+        condition_charts,
+        "build_trend_chart",
+        lambda frame, *args, **kwargs: (received.append(frame), original(frame, *args, **kwargs))[1],
+    )
 
-    assert frame["unit"].tolist() == ["mIU/L"]
+    test_app = _run_page("Labs")
+
+    assert not test_app.exception
+    assert received, "the Labs page rendered no trend chart"
+    assert sorted(received[0]["unit"]) == ["mIU/L", "pmol/L"], (
+        f"the page did not carry both units into the chart: {received[0].columns.tolist()}"
+    )
 
 
 def test_lab_trend_excludes_records_without_a_parseable_date_or_numeric_value(app_db):
@@ -332,6 +348,61 @@ def test_csv_import_leaves_a_written_result_unparsed(app_db):
     assert services.filter_labs(person_id, db_path=app_db)[0]["numeric_value"] is None
 
 
+def test_csv_import_does_not_let_pandas_round_a_result_before_the_parser_sees_it(app_db):
+    """The number that reaches `parse_plain_decimal` must be the one in the file.
+
+    `pd.read_csv` infers a dtype per column, and its C parser reads "0.000000000000000001" as 0.0.
+    A trace-level result would import, chart and export as zero -- a wrong reading, not a missing one.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    # Both rows numeric, so the column infers as float64. A single non-numeric row would keep it
+    # text and hide the bug, which is what makes this defect depend on the rest of the file.
+    csv = (
+        "test_name,result_value,numeric_value,unit,flag,lab_date\n"
+        "Trace,0.000000000000000001,,mg/dL,Normal,2026-01-05\n"
+        "TSH,5.6,,mIU/L,Normal,2026-01-06\n"
+    )
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["imported"] == 2
+    labs = {row["test_name"]: row for row in services.filter_labs(person_id, db_path=app_db)}
+    assert labs["Trace"]["numeric_value"] == 1e-18
+    # The written result is preserved verbatim too; inference rewrote this to "0.0".
+    assert labs["Trace"]["result_value"] == "0.000000000000000001"
+    assert labs["TSH"]["numeric_value"] == 5.6
+
+
+def test_csv_import_refuses_exponent_notation_exactly_as_the_form_does(app_db):
+    """Type inference made the CSV path more permissive than the UI form for the same string.
+
+    Inference turned "1e-3" into 0.001, which then satisfied the plain-decimal allowlist that the
+    form rejects. Two entry paths disagreeing about what a lab value is defeats the point of the
+    allowlist.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = (
+        "test_name,result_value,numeric_value,unit,flag,lab_date\n"
+        "Exp,1e-3,,mg/dL,Normal,2026-01-05\n"
+        "TSH,5.6,,mIU/L,Normal,2026-01-06\n"
+    )
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["imported"] == 2
+    labs = {row["test_name"]: row for row in services.filter_labs(person_id, db_path=app_db)}
+    assert labs["Exp"]["numeric_value"] is None
+    assert app.clean_payload("lab_results", {"result_value": "1e-3", "numeric_value": ""})["numeric_value"] is None
+
+
 # --- edge cases that actually bite ------------------------------------------------------------------
 
 
@@ -473,3 +544,402 @@ def test_workflow_status_vocabularies_cannot_be_mistaken_for_clinical_flags():
     }
 
     assert not misread, f"workflow status {sorted(misread)} is being read as a clinical flag"
+
+
+def test_only_the_selected_profile_reaches_the_body_map_trend_chart(app_db):
+    """Isolation must survive the whole path, not just the query.
+
+    `test_body_map_services.test_retrieval_returns_only_selected_person_records` pins the retrieval
+    query. This pins the stage this change added: real rows for two profiles, through real retrieval,
+    through `rows_by_source_table` into `trend_frame`. Every other body-map trend test monkeypatches
+    `get_records_for_body_part`, so a leak introduced between retrieval and the chart -- a helper that
+    re-queries unscoped, or a `raw_record` carrying the wrong row -- would not be caught by any of them.
+    """
+    import body_map_ui
+    from body_map_services import get_records_for_body_part
+
+    selected = _person(app_db, "Selected Person")
+    other = _person(app_db, "Other Person")
+    # "LDL" is a curated heart mapping, so both rows are genuinely retrievable for this body part.
+    _lab(app_db, selected, test_name="LDL", numeric_value=101.0, result_value="101", unit="mg/dL")
+    _lab(app_db, other, test_name="LDL", numeric_value=202.0, result_value="202", unit="mg/dL")
+
+    records = get_records_for_body_part(selected, "heart", app_db)
+    frame = condition_charts.trend_frame(body_map_ui.rows_by_source_table(records))
+
+    assert frame["value"].tolist() == [101.0]
+    assert 202.0 not in set(frame["value"]), "the other profile's reading reached the chart"
+
+
+def test_csv_import_keeps_a_written_result_that_pandas_reads_as_missing(app_db):
+    """"NA" and "NULL" are results a person can write; pandas treats them as absent.
+
+    Blanking them is silent loss rather than a reported skip: `validate_lab` requires `test_name` and
+    `lab_date` but returns no error for an empty `result_value`, so the row imports looking complete.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = (
+        "test_name,result_value,numeric_value,unit,flag,lab_date\n"
+        "NotApplicable,NA,,mg/dL,Normal,2026-01-05\n"
+        "NullResult,NULL,,mg/dL,Normal,2026-01-06\n"
+    )
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["imported"] == 2
+    labs = {row["test_name"]: row for row in services.filter_labs(person_id, db_path=app_db)}
+    assert labs["NotApplicable"]["result_value"] == "NA"
+    assert labs["NullResult"]["result_value"] == "NULL"
+    # Neither is a number, so the chart still has nothing to plot -- but the record kept what it said.
+    assert labs["NotApplicable"]["numeric_value"] is None
+    assert labs["NullResult"]["numeric_value"] is None
+
+
+def test_csv_import_still_accepts_na_in_the_coded_and_numeric_columns(app_db):
+    """`keep_default_na=False` must not turn a tolerant import into a rejecting one.
+
+    "NA"/"NULL" in a flag, unit or numeric column is how exported CSVs spell "nothing here". Reading
+    them literally makes `validate_lab` reject the row -- `valid_choice` on the flag, `valid_number`
+    on the value -- so a file that used to import would come back entirely as `skipped`.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = (
+        "test_name,result_value,numeric_value,unit,flag,lab_date\n"
+        "TSH,5.6,,mIU/L,NA,2026-01-05\n"
+        "LDL,120,NA,mg/dL,NULL,2026-01-06\n"
+    )
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["skipped"] == []
+    assert result["imported"] == 2
+    labs = {row["test_name"]: row for row in services.filter_labs(person_id, db_path=app_db)}
+    # Read as absent, not stored as the literal token.
+    assert not labs["TSH"]["flag"]
+    assert not labs["LDL"]["flag"]
+    # ...while the written result keeps its own reading, and still derives a number.
+    assert labs["TSH"]["result_value"] == "5.6"
+    assert labs["TSH"]["numeric_value"] == 5.6
+    assert labs["LDL"]["numeric_value"] == 120.0
+
+
+def test_csv_na_tokens_still_cover_the_pandas_defaults():
+    """`import_labs_csv` replaces pandas' NA handling, so its token set must not fall behind it.
+
+    Every token pandas would have read as missing has to still read as missing, or a file that
+    imported before this change comes back as `skipped`. Imports the private constant here rather
+    than in `imports_exports`, so a pandas upgrade that moves it fails a test run instead of taking
+    the app down at import time.
+    """
+    from pandas._libs.parsers import STR_NA_VALUES
+
+    import imports_exports
+
+    uncovered = {t for t in STR_NA_VALUES if t not in imports_exports._CSV_NA_TOKENS}
+    extra = {t for t in imports_exports._CSV_NA_TOKENS if t not in STR_NA_VALUES}
+
+    assert not uncovered, f"pandas reads these as missing and the lab import no longer does: {sorted(uncovered)}"
+    # Both directions: a token pandas would have kept literal must not be blanked here either.
+    assert not extra, f"the lab import blanks these and pandas would not: {sorted(extra)}"
+
+
+@pytest.mark.parametrize("token", ["<NA>", "#NA", "-NaN", "1.#IND", "#N/A N/A", "NULL", "n/a"])
+def test_every_pandas_na_token_still_imports_as_absent(app_db, token):
+    """One parametrized case per token, because the set is only correct if each member behaves."""
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = f"test_name,result_value,numeric_value,unit,flag,lab_date\nTSH,5.6,{token},mIU/L,,2026-01-05\n"
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["skipped"] == [], f"{token!r} in a numeric column now rejects the row"
+    # Absent, then derived from the written result -- not rejected, and not stored as the token.
+    assert services.filter_labs(person_id, db_path=app_db)[0]["numeric_value"] == 5.6
+
+
+def test_editing_an_existing_lab_does_not_backfill_its_numeric_value():
+    """README: "existing records are never rewritten."
+
+    `clean_payload` runs on the edit path too, so deriving there would mean opening a legacy lab to
+    fix a typo in its notes also invented a `numeric_value` the person never entered.
+    """
+    payload = {"result_value": "5.6", "numeric_value": "", "notes": "corrected"}
+
+    edited = app.clean_payload("lab_results", payload, derive_numeric_value=False)
+    created = app.clean_payload("lab_results", payload)
+
+    assert edited["numeric_value"] is None, "editing a record backfilled a value it did not have"
+    assert created["numeric_value"] == 5.6, "new entries must still derive it"
+
+
+@pytest.mark.parametrize("test_name", ["Na", "none", "NONE", "nA"])
+def test_a_lab_named_like_an_na_token_still_imports(app_db, test_name):
+    """"Na" is sodium. Case-folding the NA comparison silently deleted its test name.
+
+    `validate_lab` requires a test name, so the blanked row was rejected outright: a sodium panel
+    would not import at all. Pandas matches its missing-value tokens case-sensitively and "Na",
+    "none" and "NONE" are not among them.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = f"test_name,result_value,numeric_value,unit,flag,lab_date\n{test_name},140,,mmol/L,Normal,2026-01-05\n"
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["skipped"] == [], f"a lab named {test_name!r} no longer imports"
+    stored = services.filter_labs(person_id, db_path=app_db)[0]
+    assert stored["test_name"] == test_name
+    assert stored["numeric_value"] == 140.0
+
+
+def test_a_boolean_numeric_cell_is_reported_rather_than_stored_as_one(app_db):
+    """Deliberate behavior change, pinned so it is a decision rather than an accident.
+
+    The merge-base importer let pandas infer `True` as a boolean and stored the lab reading `1.0`.
+    That is a fabricated measurement. Reading the column as text means it now fails `valid_number`
+    and the row is reported in `skipped`, which is the visible outcome rather than the silent one.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    csv = "test_name,result_value,numeric_value,unit,flag,lab_date\nX,5.6,True,mg/dL,Normal,2026-01-05\n"
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["imported"] == 0
+    assert len(result["skipped"]) == 1
+    assert "Numeric value" in result["skipped"][0]["errors"][0]
+    assert services.filter_labs(person_id, db_path=app_db) == []
+
+
+def test_saving_the_edit_form_does_not_backfill_a_legacy_lab(app_db):
+    """Drives the real edit form, because the call site is what has to pass the flag.
+
+    Asserting on `clean_payload(derive_numeric_value=False)` directly proves only that the parameter
+    works -- deleting the argument at the `services.update_item` call site would leave that green.
+    This opens a legacy row in the Labs edit form and saves it unchanged.
+    """
+    person_id = _person(app_db)
+    # Written through `db` directly: a row from before derivation existed, so no number was stored.
+    db.create_record(
+        "lab_results",
+        {"person_id": person_id, "test_name": "TSH", "result_value": "5.6", "unit": "mIU/L", "lab_date": "2026-01-05"},
+        db_path=app_db,
+    )
+    record_id = services.filter_labs(person_id, db_path=app_db)[0]["id"]
+
+    test_app = _run_page("Labs")
+    selector = next(box for box in test_app.get("selectbox") if ":edit:selection:" in (box.key or ""))
+    selector.select(str(record_id)).run(timeout=60)
+    save = next(button for button in test_app.get("button") if "Save changes" in (button.label or ""))
+    save.click().run(timeout=60)
+
+    assert not test_app.exception
+    stored = services.filter_labs(person_id, db_path=app_db)[0]
+    assert stored["numeric_value"] is None, "saving the edit form backfilled a stored record"
+    assert stored["result_value"] == "5.6"
+
+
+def _fill(test_app, suffix, value):
+    """Set an add-form field by its key suffix; the full key carries the db path and profile id."""
+
+    widget = next(item for item in test_app.get("text_input") if (item.key or "").endswith(f":add:{suffix}"))
+    widget.set_value(value)
+
+
+@pytest.mark.parametrize(
+    "written, expected",
+    [("5.6", 5.6), ("Positive", None), ("<0.01", None), ("0", 0.0)],
+)
+def test_the_add_form_derives_a_number_only_from_an_unambiguous_result(app_db, written, expected):
+    """Drives the real Labs add form, because the call site is what has to derive.
+
+    `clean_payload` is also tested directly, but that proves the helper works -- disabling
+    derivation at the `services.create_item` call site would leave that green.
+    """
+    _person(app_db)
+
+    test_app = _run_page("Labs")
+    next(b for b in test_app.get("button") if "Add Lab" in (b.label or "")).click().run(timeout=60)
+    _fill(test_app, "test_name", "TSH")
+    _fill(test_app, "result_value", written)
+    _fill(test_app, "lab_date", "2026-01-05")
+    next(b for b in test_app.get("button") if "Add record" in (b.label or "")).click().run(timeout=60)
+
+    assert not test_app.exception
+    stored = services.filter_labs(1, db_path=app_db)
+    assert len(stored) == 1, f"the add form did not store the record: {stored}"
+    assert stored[0]["numeric_value"] == expected
+    assert stored[0]["result_value"] == written
+
+
+def test_a_fhir_boolean_quantity_does_not_become_a_lab_reading(app_db):
+    """`float(True)` is 1.0. The CSV path already refuses "True"; FHIR must not disagree.
+
+    `fhir._lab_from_observation` normalizes before validation, so the boolean was already the number
+    1.0 by the time `validate_lab` saw it -- and the body map now charts `numeric_value`.
+    """
+    import fhir
+
+    person_id = _person(app_db)
+    observation = {
+        "resourceType": "Observation",
+        "category": [{"coding": [{"code": "laboratory"}]}],
+        "code": {"text": "TSH"},
+        "valueQuantity": {"value": True, "unit": "mIU/L"},
+        "effectiveDateTime": "2026-01-05",
+    }
+
+    _table, data = fhir._local_record_from_resource(observation)
+
+    assert data["numeric_value"] is None, "a boolean quantity was recorded as a measurement"
+    # The record still keeps what the source said; only the invented number is refused.
+    assert data["result_value"] == "True"
+    assert services.filter_labs(person_id, db_path=app_db) == []
+
+
+@pytest.mark.parametrize("field", ["test_name", "unit"])
+def test_a_whitespace_padded_na_token_is_kept_verbatim(app_db, field):
+    """Pandas does not strip before matching its NA tokens, so neither may this.
+
+    Stripping first looked like harmless tolerance and blanked a value the merge-base importer kept.
+    """
+    import io
+
+    import imports_exports
+
+    person_id = _person(app_db)
+    columns = {"test_name": "TSH", "result_value": "5.6", "numeric_value": "", "unit": "mIU/L",
+               "flag": "Normal", "lab_date": "2026-01-05"}
+    columns[field] = " NA "
+    header = ",".join(columns)
+    csv = f"{header}\n" + ",".join(f'"{value}"' for value in columns.values()) + "\n"
+
+    result = imports_exports.import_labs_csv(io.StringIO(csv), person_id, db_path=app_db)
+
+    assert result["skipped"] == []
+    assert services.filter_labs(person_id, db_path=app_db)[0][field] == " NA "
+
+
+def test_the_add_form_does_not_invent_a_normal_flag(app_db):
+    """The app must never state a clinical assessment no source made.
+
+    The flag select had no blank option, so `input_field` fell to index 0 and stored "Normal" for a
+    result nobody flagged. `FLAG_CAPTION` tells the reader that point colour is "the flag recorded
+    by the source, not an assessment by this app" -- which was untrue for every form-entered record.
+    A fabricated "Normal" is the more dangerous direction: it reads as reassurance.
+    """
+    _person(app_db)
+
+    test_app = _run_page("Labs")
+    next(b for b in test_app.get("button") if "Add Lab" in (b.label or "")).click().run(timeout=60)
+    _fill(test_app, "test_name", "TSH")
+    _fill(test_app, "result_value", "5.6")
+    _fill(test_app, "lab_date", "2026-01-05")
+    next(b for b in test_app.get("button") if "Add record" in (b.label or "")).click().run(timeout=60)
+
+    assert not test_app.exception
+    stored = services.filter_labs(1, db_path=app_db)[0]
+    assert not stored["flag"], f"the form invented the source flag {stored['flag']!r}"
+
+
+def test_editing_an_unflagged_lab_does_not_stamp_it_normal(app_db):
+    """The same default also rewrote an imported record: opening it to edit stored "Normal"."""
+    person_id = _person(app_db)
+    db.create_record(
+        "lab_results",
+        {"person_id": person_id, "test_name": "TSH", "result_value": "5.6", "numeric_value": 5.6,
+         "unit": "mIU/L", "lab_date": "2026-01-05"},
+        db_path=app_db,
+    )
+    record_id = services.filter_labs(person_id, db_path=app_db)[0]["id"]
+
+    test_app = _run_page("Labs")
+    selector = next(box for box in test_app.get("selectbox") if ":edit:selection:" in (box.key or ""))
+    selector.select(str(record_id)).run(timeout=60)
+    next(b for b in test_app.get("button") if "Save changes" in (b.label or "")).click().run(timeout=60)
+
+    assert not test_app.exception
+    assert not services.filter_labs(person_id, db_path=app_db)[0]["flag"]
+
+
+def test_the_missing_number_caption_does_not_ask_for_a_number_that_does_not_exist():
+    """The caption used to instruct the reader to defeat the parser's own protection.
+
+    "Enter the number in 'Numeric Result'" applied to every uncharted lab, including `Positive` and
+    `<0.01` -- so following it meant recording a precision the source explicitly withheld, which is
+    the fabrication `parse_plain_decimal` exists to prevent.
+    """
+    caption = condition_charts.missing_numeric_value_caption(3)
+
+    assert "where the source reported a number" in caption
+    assert "<0.01" in caption, "the caption must name a censored result as having no number to chart"
+
+
+def test_the_wearables_page_renders_a_chartable_series_through_the_shared_renderer(app_db, monkeypatch):
+    """The positive counterpart to the unchartable-row test, which alone would stay green if the
+    page were reverted to `st.line_chart` or stopped passing units."""
+    person_id = _person(app_db)
+    _wearable(app_db, person_id, timestamp="2026-01-05", value=232.0, unit="lb")
+    _wearable(app_db, person_id, timestamp="2026-02-05", value=93.0, unit="kg")
+
+    received = []
+    original = condition_charts.build_trend_chart
+    monkeypatch.setattr(
+        condition_charts,
+        "build_trend_chart",
+        lambda frame, *args, **kwargs: (received.append(frame), original(frame, *args, **kwargs))[1],
+    )
+
+    test_app = _run_page("Wearables")
+
+    assert not test_app.exception
+    assert received, "the Wearables page did not render through the shared trend renderer"
+    # The defect that motivated this change: one series in two units must not become one line.
+    assert sorted(received[0]["unit"]) == ["kg", "lb"]
+
+
+def test_only_the_selected_profile_reaches_the_wearables_chart(app_db, monkeypatch):
+    """AGENTS.md section 10: any profile-scoped feature needs a second-profile test.
+
+    The body-map trend path has one; the Wearables page is the other surface this change rewired,
+    and its readings are as identifying as any lab.
+    """
+    selected = _person(app_db, "Selected Person")
+    other = _person(app_db, "Other Person")
+    _wearable(app_db, selected, timestamp="2026-01-05", value=180.0, unit="lb")
+    _wearable(app_db, other, timestamp="2026-01-05", value=999.0, unit="lb")
+
+    received = []
+    original = condition_charts.build_trend_chart
+    monkeypatch.setattr(
+        condition_charts,
+        "build_trend_chart",
+        lambda frame, *args, **kwargs: (received.append(frame), original(frame, *args, **kwargs))[1],
+    )
+
+    # The sidebar selectbox is keyed by profile *label*, not id: setting it to "1" selects nothing
+    # and the page falls back to whichever profile sorts first, which is the other one here.
+    label = app.profile_selection_label(services.get_person(selected, db_path=app_db), app_db)
+    test_app = _run_page("Wearables", selected_profile=label)
+
+    assert not test_app.exception
+    assert received, "the Wearables page rendered no trend chart"
+    assert received[0]["value"].tolist() == [180.0]
+    assert 999.0 not in set(received[0]["value"]), "the other profile's reading reached the chart"

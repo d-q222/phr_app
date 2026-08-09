@@ -14,6 +14,7 @@ import services
 from body_map_config import BODY_PART_IDS
 from body_map_services import NormalizedBodyRecord
 from body_map_summary import summarize_body_part_health
+from models import LAB_FLAGS
 
 _render_page = body_map_ui.render_body_map_page.__wrapped__
 
@@ -67,6 +68,10 @@ def _record(
     date: str | None = "2026-01-01",
     value: object = 5.0,
     unit: str | None = "mg/dL",
+    # Lowercase, so *not* a `models.LAB_FLAGS` member -- every write path validates against that
+    # list, so this default is a value no stored record can hold. Harmless for tests that assert on
+    # frame contents, but `build_trend_chart` omits the flagged point layer when no recognized flag
+    # is present: a test asserting a mark is drawn must pass a real flag.
     flag: str | None = "high",
     raw_record: dict[str, object] | None = None,
 ) -> NormalizedBodyRecord:
@@ -446,7 +451,14 @@ def test_body_map_trends_exclude_medication_dose_from_the_chart(monkeypatch):
 
 
 def test_body_map_trends_use_numeric_value_and_ignore_a_written_result(monkeypatch):
-    """Pins the accepted semantic change: `numeric_value` is canonical, `result_value` is not parsed."""
+    """Pins the accepted semantic change: `numeric_value` is canonical, `result_value` is not parsed.
+
+    Renders the page and captures what the chart was actually given, rather than composing
+    `trend_frame(rows_by_source_table(...))` here. Composing the helpers proves the helpers agree;
+    it stays green if the page is rewired to chart `NormalizedBodyRecord.value` instead, which is
+    the regression this pins. `result_value` and `numeric_value` disagree deliberately, so a frame
+    built from the wrong field is visible in the value itself.
+    """
     written_only = _record(
         1,
         name="Written only",
@@ -458,10 +470,18 @@ def test_body_map_trends_use_numeric_value_and_ignore_a_written_result(monkeypat
         raw_record={"id": 2, "test_name": "Both", "lab_date": "2026-01-06", "result_value": "9.9", "numeric_value": 4.2, "unit": "x", "flag": None},
     )
 
-    frame = condition_charts.trend_frame(body_map_ui.rows_by_source_table([written_only, both]))
+    received = []
+    original = condition_charts.build_trend_chart
+    monkeypatch.setattr(
+        condition_charts,
+        "build_trend_chart",
+        lambda frame, *args, **kwargs: (received.append(frame), original(frame, *args, **kwargs))[1],
+    )
+    _render_with([written_only, both], monkeypatch)
 
-    assert set(frame["record"]) == {"Both"}
-    assert frame["value"].tolist() == [4.2]
+    assert received, "the Trends tab rendered no chart"
+    assert set(received[0]["record"]) == {"Both"}, "a lab with no Numeric Result was charted anyway"
+    assert received[0]["value"].tolist() == [4.2], "the chart used result_value rather than numeric_value"
 
 
 def test_body_map_trends_chart_symptom_severity_separately(monkeypatch):
@@ -517,14 +537,49 @@ def test_the_trends_tab_says_so_when_nothing_is_chartable(monkeypatch):
     assert not fake.charts
 
 
+def _admits(layer: dict, flag: str | None) -> bool:
+    """Whether a chart layer's Vega filter lets a row carrying this flag through.
+
+    Asserting that a point layer *exists* is not enough: flipping the flagged layer's predicate from
+    `!==` to `===` leaves the layer in place while excluding the only datum. This evaluates the
+    predicate instead, and raises on any shape it does not recognize -- a filter this helper cannot
+    read must not be silently reported as admitting the row.
+    """
+
+    transforms = layer.get("transform") or []
+    if not transforms:
+        return True
+    predicate = transforms[0].get("filter", "")
+    if condition_charts.NOT_FLAGGED not in predicate:
+        raise AssertionError(f"unrecognized layer filter, cannot evaluate admission: {predicate!r}")
+    if "!==" in predicate:
+        return flag != condition_charts.NOT_FLAGGED
+    if "===" in predicate:
+        return flag == condition_charts.NOT_FLAGGED
+    raise AssertionError(f"unrecognized layer filter, cannot evaluate admission: {predicate!r}")
+
+
 def test_a_single_reading_still_renders_a_visible_point(monkeypatch):
-    """`st.line_chart` drew nothing for one row; the layered chart marks it."""
-    records = [_record(1, value=5.0, date="2026-01-05")]
+    """`st.line_chart` drew nothing for one row; the layered chart must actually mark it.
+
+    Asserting that `spec["layer"]` is non-empty proves nothing: a line layer draws no path for a
+    single datum, and each point layer carries a filter that can exclude the row. The reading has to
+    be admitted by a point layer, so this asserts on the layer that draws a source-flagged one --
+    with a flag that is really in `LAB_FLAGS`, since `build_trend_chart` omits the flagged layer
+    entirely when no recognized flag is present.
+    """
+    records = [_record(1, value=5.0, date="2026-01-05", flag="High")]
+    assert records[0].status_flag in LAB_FLAGS, "fixture flag must be one a source can actually record"
 
     fake = _render_with(records, monkeypatch)
     spec = fake.charts[0].to_dict()
 
-    assert spec["layer"], "a single reading produced no chart layers"
+    drawn = [
+        layer
+        for layer in spec["layer"]
+        if layer.get("mark", {}).get("type") == "point" and _admits(layer, records[0].status_flag)
+    ]
+    assert drawn, f"no point layer draws the flagged reading; layers were {[m.get('mark') for m in spec['layer']]}"
 
 
 def test_trends_are_not_default_and_fallback_selector_is_available():

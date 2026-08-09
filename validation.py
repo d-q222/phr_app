@@ -34,6 +34,11 @@ def valid_date(value: str | None, label: str, required: bool = False) -> list[st
 def valid_number(value: object, label: str, required: bool = False) -> list[str]:
     if is_blank(value):
         return [f"{label} is required."] if required else []
+    # `float(True)` is 1.0, so a boolean sails through the conversion below and is recorded as the
+    # reading 1.0 -- a measurement no source stated. Reachable from a FHIR `valueQuantity` and from
+    # a JSON backup, both of which hand raw decoded values straight to this validator.
+    if isinstance(value, bool):
+        return [f"{label} must be numeric."]
     try:
         float(value)
     except (TypeError, ValueError):
@@ -43,6 +48,11 @@ def valid_number(value: object, label: str, required: bool = False) -> list[str]
 
 def normalize_optional_number(value: object) -> float | None:
     if is_blank(value):
+        return None
+    # Also guarded here, not only in `valid_number`: `fhir._lab_from_observation` normalizes before
+    # validation ever sees the raw value, so a boolean quantity would already be 1.0 by then.
+    # Returning None keeps the record and its written result while refusing to invent a reading.
+    if isinstance(value, bool):
         return None
     return float(value)
 

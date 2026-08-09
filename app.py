@@ -528,7 +528,12 @@ FIELD_CONFIGS = {
             ("unit", "text"),
             ("reference_low", "number_optional"),
             ("reference_high", "number_optional"),
-            ("flag", LAB_FLAGS),
+            # Blank first, as every other optional coded field here does (appointments `status`,
+            # conditions `source`, and the Labs flag *filter* below). Without it `input_field` falls
+            # to index 0 and stores "Normal" for a result nobody flagged -- the app stating a
+            # clinical assessment no source made, which is exactly what `FLAG_CAPTION` promises the
+            # charts never do. It also overwrote the blank flag of an imported record on any edit.
+            ("flag", ["", *LAB_FLAGS]),
             ("lab_date", "date_text"),
             ("notes", "textarea"),
         ],
@@ -818,7 +823,15 @@ def show_errors(errors: list[str]) -> None:
         st.error(error)
 
 
-def clean_payload(table: str, payload: dict) -> dict:
+def clean_payload(table: str, payload: dict, *, derive_numeric_value: bool = True) -> dict:
+    """Normalize a submitted form payload for storage.
+
+    `derive_numeric_value` is False on the edit path. Deriving there would rewrite a record that
+    already exists: opening a legacy lab to correct its notes would also fill in a `numeric_value`
+    the person never entered, which is the backfill README explicitly promises does not happen
+    ("existing records are never rewritten"). New entries and imports still derive it.
+    """
+
     cleaned = {}
     for key, value in payload.items():
         if value == "":
@@ -829,7 +842,7 @@ def clean_payload(table: str, payload: dict) -> dict:
         for key in ["numeric_value", "reference_low", "reference_high"]:
             if key in cleaned:
                 cleaned[key] = validation.normalize_optional_number(cleaned[key])
-        if cleaned.get("numeric_value") is None:
+        if derive_numeric_value and cleaned.get("numeric_value") is None:
             # Only when the numeric field was left blank -- a stored 0 is a real reading, not an
             # absence, so `is None` rather than a falsiness check.
             cleaned["numeric_value"] = validation.parse_plain_decimal(cleaned.get("result_value"))
@@ -1335,7 +1348,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
             errors = config["validator"](data)
             if errors:
                 show_errors(errors)
-            elif apply_record_change(lambda: services.update_item(table, person_id=person_id, record_id=int(row["id"]), data=clean_payload(table, data), db_path=db_path)):
+            elif apply_record_change(lambda: services.update_item(table, person_id=person_id, record_id=int(row["id"]), data=clean_payload(table, data, derive_numeric_value=False), db_path=db_path)):
                 st.success("Record updated.")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()

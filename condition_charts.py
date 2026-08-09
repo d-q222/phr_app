@@ -83,7 +83,8 @@ def missing_numeric_value_caption(count: int) -> str:
 
     return (
         f"Not charted: {count} lab records have no Numeric Result. "
-        "Enter the number in 'Numeric Result' as well as 'Result' to chart them."
+        "Add one where the source reported a number. Results such as 'Positive' or '<0.01' have no "
+        "number to chart, and entering an estimate would record a precision the source did not give."
     )
 
 # `row_id` is the database row's own id, carried purely as an ordering tie-breaker. Two readings can
