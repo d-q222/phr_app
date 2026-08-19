@@ -17,6 +17,18 @@ DISCLAIMER = (
     "Please discuss important findings, symptoms, medication questions, or abnormal results with a qualified healthcare professional."
 )
 
+REPLAY_INSIGHT_RESPONSE = (
+    "Records show three blood pressure readings in the last 60 days, the most recent on 12 March. "
+    "Two of the three were entered without a source flag, so they are shown here as recorded rather "
+    "than interpreted.\n\n"
+    "Two medications are listed as active, and the record for one of them has no prescriber noted. "
+    "Confirming that detail may be worth doing before the next appointment.\n\n"
+    "Points that may be worth raising with a clinician:\n"
+    "- The gap between the February and March readings, and whether home readings should be logged\n"
+    "- Whether the missing prescriber detail should be filled in from a pharmacy record\n"
+    "- Any symptoms noticed around the dates of those readings"
+)
+
 URGENT_WARNING = (
     "Some symptoms may require urgent medical attention. If these symptoms are current, severe, or worsening, "
     "seek emergency care or call emergency services."
@@ -530,6 +542,10 @@ def build_ai_insight_prompt(context: dict, focus_area: str | None = None) -> str
     return json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))
 
 
+def _with_disclaimer(text: str) -> str:
+    return text if DISCLAIMER in text else f"{text}\n\n{DISCLAIMER}"
+
+
 def generate_ai_insight_result(context: dict, focus_area: str | None = None) -> dict:
     if ai_config.AI_PROVIDER == "none":
         return {
@@ -537,6 +553,11 @@ def generate_ai_insight_result(context: dict, focus_area: str | None = None) -> 
             "used_fallback": True,
             "warning": "AI safety-checked insights are disabled by AI_PROVIDER=none. Showing rule-based report instead.",
         }
+    if ai_config.replay_enabled():
+        # Demo replay. This is the one place the real provider path is bypassed: no API key is
+        # required, which is the entire point, because the hosted demo has none. The response is
+        # recorded, not generated, and the UI labels it as such before displaying it.
+        return {"report": _with_disclaimer(REPLAY_INSIGHT_RESPONSE), "used_fallback": False, "warning": None}
     if ai_config.AI_PROVIDER != "zhipu":
         return {
             "report": generate_rule_based_insights(context, focus_area),
@@ -588,8 +609,7 @@ def generate_ai_insight_result(context: dict, focus_area: str | None = None) -> 
             "warning": "AI safety-checked insights unavailable because the provider request failed. Showing rule-based report instead.",
             "provider_details": str(exc),
         }
-    if DISCLAIMER not in text:
-        text = f"{text}\n\n{DISCLAIMER}"
+    text = _with_disclaimer(text)
     warning = None
     if model != ai_config.ZHIPU_MODEL:
         warning = f"BigModel was busy for {ai_config.ZHIPU_MODEL}, so the app used fallback model {model}."

@@ -104,7 +104,12 @@ Do not lose these known gaps when planning related changes:
 
 - Add medical post-validation for AI provider output before display, with a safe local/chat or
   rule-based fallback for diagnosis, medication-change, prognosis, urgent-care, and unsupported
-  raw-lab claims.
+  raw-lab claims. Treat this as the highest-priority open item. Beyond safety, it is the feature
+  that distinguishes this app from exporting records into a general chatbot: scoping, minimization
+  and enforced output constraints are what a user cannot reproduce by pasting their data elsewhere.
+  This work owns authoring the unsafe provider strings for all five prohibited categories as its
+  regression inputs; the demo replay path (`AI_REPLAY`) deliberately ships only safe sample text,
+  because rendering an unvalidated unsafe response would demonstrate the gap rather than the guard.
 - Enforce locked-profile authorization at reusable context/export boundaries before adding any
   HTTP, background-job, or other non-Streamlit caller; a supplied `person_id` is not authorization.
 
