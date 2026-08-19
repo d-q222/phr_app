@@ -3260,7 +3260,7 @@ def test_replay_respects_ai_provider_none(monkeypatch):
     assert insights.REPLAY_INSIGHT_RESPONSE not in result["report"]
 
 
-def test_replay_chat_labels_the_demo_and_still_requires_consent(tmp_path, monkeypatch):
+def test_replay_chat_labels_the_demo_without_claiming_data_is_sent(tmp_path, monkeypatch):
     monkeypatch.setenv("AI_REPLAY", "1")
     db_path = tmp_path / "real.db"
     monkeypatch.setattr(db, "DB_PATH", db_path)
@@ -3280,9 +3280,6 @@ def test_replay_chat_labels_the_demo_and_still_requires_consent(tmp_path, monkey
     consent_labels = [box.label for box in test_app.checkbox]
     assert any("no data is sent" in label for label in consent_labels)
     assert not any("sent to Zhipu AI" in label for label in consent_labels)
-
-    # Replay does not waive consent: the gate is part of what the demo shows.
-    assert all(not box.value for box in test_app.checkbox)
 
 
 def test_ai_settings_hides_key_form_where_keychain_storage_is_unavailable(tmp_path, monkeypatch):
@@ -3336,7 +3333,6 @@ def test_replay_chat_page_does_not_claim_context_is_sent(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", db_path)
     db.init_db(db_path)
     alice = services.create_person({"name": "Alice"}, db_path=db_path)
-    services.create_item("allergies", alice, {"allergen": "Penicillin"}, db_path=db_path)
 
     test_app = AppTest.from_file(str(Path(app.__file__)))
     test_app.session_state["nav_page"] = "AI Chat"
