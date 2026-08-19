@@ -950,6 +950,99 @@ def test_demo_database_loads_sample_data_without_touching_real_profiles(tmp_path
     assert services.list_items("lab_results", real_person_id, db_path=real_db_path) == []
 
 
+def test_demo_only_mode_never_opens_the_real_database(tmp_path, monkeypatch):
+    """A hosted deployment must not create, read, or write the shared real database.
+
+    One process serves every visitor there, so `db.DB_PATH` is not one person's private
+    file but a directory all visitors would share. Asserting on the file rather than on
+    the guard's internals proves the property directly.
+    """
+    real_db_path = tmp_path / "never_created" / "phr.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db_path)
+    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    # `init_db` creates parent directories, so an absent parent proves nothing tried.
+    assert not real_db_path.exists()
+    assert not real_db_path.parent.exists()
+
+
+def test_demo_only_mode_lands_on_populated_demo_data(tmp_path, monkeypatch):
+    """The demo starts itself, so a first-time visitor never sees an empty app."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "never_created" / "phr.db")
+    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.run(timeout=60)
+
+    profile_picker = test_app.selectbox(key="demo_selected_profile")
+    assert profile_picker.value == "Alex Rivera (ID 1)"
+    # The second profile proves the demo database loaded fully, not just its first row.
+    assert profile_picker.options == ["Alex Rivera (ID 1)", "Maya Rivera (ID 2)"]
+    assert app.DEMO_FICTIONAL_NOTICE in [info.value for info in test_app.info]
+
+
+def test_demo_only_mode_offers_no_way_back_to_the_real_database(tmp_path, monkeypatch):
+    """Exiting demo mode would drop the visitor onto the shared file the flag protects."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "never_created" / "phr.db")
+    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.run(timeout=60)
+
+    assert "exit_demo_mode" not in [button.key for button in test_app.button]
+    assert "start_demo_mode" not in [button.key for button in test_app.button]
+
+
+def test_demo_only_mode_is_off_unless_configured(tmp_path, monkeypatch):
+    """`streamlit run app.py` is unchanged: the real database is still created locally."""
+    real_db_path = tmp_path / "real" / "phr.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db_path)
+    monkeypatch.delenv("PHR_DEMO_ONLY", raising=False)
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    assert real_db_path.exists()
+    assert "start_demo_mode" in [button.key for button in test_app.button]
+
+
+@pytest.mark.parametrize("supplied_path", [None, "explicit"])
+def test_resolving_the_real_database_is_blocked_in_demo_only_mode(tmp_path, monkeypatch, supplied_path):
+    """The guard sits at the resolver, so an explicit path is refused like an omitted one.
+
+    `app.py` resolves `db.DB_PATH` into a concrete value in roughly two dozen call sites
+    before calling down, so a check that only caught `db_path is None` would miss the
+    leak entirely.
+    """
+    real_db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", real_db_path)
+    db.init_db(real_db_path)
+    services.create_person({"name": "Real Person"}, db_path=real_db_path)
+    monkeypatch.setattr(db, "DEMO_ONLY_MODE", True)
+
+    requested = None if supplied_path is None else real_db_path
+    with pytest.raises(db.RealDatabaseBlockedError):
+        services.list_people(db_path=requested)
+
+
+def test_demo_only_mode_still_allows_the_session_demo_database(tmp_path, monkeypatch):
+    """The guard blocks only the shared real file, not the per-session demo database."""
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "real.db")
+    demo_db_path = tmp_path / "demo.db"
+    app.create_demo_database(demo_db_path)
+    monkeypatch.setattr(db, "DEMO_ONLY_MODE", True)
+
+    assert [person["name"] for person in services.list_people(db_path=demo_db_path)] == [
+        "Alex Rivera",
+        "Maya Rivera",
+    ]
+
+
 def test_fhir_r4_and_r5_export_and_import_round_trip(tmp_path):
     source_db_path = tmp_path / "source.db"
     target_db_path = tmp_path / "target.db"

@@ -8,6 +8,23 @@ This app is intended for local personal use during MVP development. It is not a 
 
 The local SQLite database can contain sensitive health information. Keep the project folder and exported backups protected on your device.
 
+To keep your own records, clone this repository and run the app locally, as described under
+[Run The App](#run-the-app). Your database is then a file on your own machine that nothing uploads.
+
+## Hosted Demo
+
+A hosted instance may be published so the interface can be tried without installing anything. That
+instance is a demo of the software, not a place to store health information, and it is the one
+context where "local-first" does not describe where the data lives.
+
+Hosted Streamlit serves every visitor from a single process, so a database file on that server is
+shared by everyone who opens the link rather than private to one person. A deployment therefore sets
+`PHR_DEMO_ONLY` (see [Demo-Only Deployments](#demo-only-deployments)), which starts each visitor in
+demo mode on a throwaway per-session database and makes the real database file unopenable.
+
+Every profile, record, date, and value in the demo is invented sample data from
+`sample_test_data.json`. No demo profile describes a real person.
+
 ## Medical Disclaimer
 
 This application is for personal organization and education only. It is not a medical device, does not diagnose disease, does not replace professional medical care, and should not be used for emergencies. For urgent symptoms or medical emergencies, seek emergency care or call emergency services.
@@ -31,7 +48,8 @@ This application is for personal organization and education only. It is not a me
 - Rule-based Health Insights report with safety language.
 - Optional Zhipu AI safety-checked insights only when a Zhipu AI API key is configured and the user clicks the AI button.
 - Optional AI Health Assistant chat for the currently selected profile only, using concise selected-patient context.
-- Demo mode with sample family data in a temporary session database.
+- Demo mode with fictional sample family data in a temporary session database.
+- Optional demo-only deployment mode (`PHR_DEMO_ONLY`) for publishing a hosted demo without exposing a database.
 
 ## Installation
 
@@ -51,6 +69,30 @@ streamlit run app.py
 ```
 
 The app initializes `data/phr.db` automatically from `schema.sql`.
+
+### Demo-Only Deployments
+
+`PHR_DEMO_ONLY` is unset by default, so a local run behaves exactly as described above. Setting it to
+`1`, `true`, `yes`, or `on` — in Streamlit secrets, or in the environment — converts the deployment
+into a demo:
+
+- The real `data/phr.db` is never created, read, or written. Any code path that asks for it fails
+  rather than falling back to it.
+- Each visitor is placed in demo mode automatically on a private temporary database seeded from
+  `sample_test_data.json`, so the first screen shows populated sample records.
+- There is no control to leave demo mode, because there is no private database to return to.
+- A notice states that the demo data is fictional.
+
+Set it on hosted Streamlit through the app's secrets editor, which is the channel hosted Streamlit
+provides (it has no environment-variable field):
+
+```toml
+PHR_DEMO_ONLY = "1"
+```
+
+Do not use this flag as a substitute for authentication on a deployment intended to hold real
+records; it removes the shared-database exposure by removing the real database, not by
+authenticating anyone.
 
 SQLite writes use one native busy wait capped at one second. If another process still
 holds the write lock, the app reports a retryable database-busy message; it does not
@@ -246,7 +288,8 @@ instead of restarting the full timeout for every model.
 
 ## Current Limitations
 
-- Local prototype only.
+- Local prototype only. A hosted instance is limited to fictional demo data by `PHR_DEMO_ONLY`; it is
+  not a way to use the app for real records.
 - No production authentication.
 - No encryption at rest.
 - No audit logs.

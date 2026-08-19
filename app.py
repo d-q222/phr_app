@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import uuid
@@ -37,6 +38,11 @@ from models import (
 SAMPLE_DATA_PATH = Path(__file__).resolve().parent / "sample_test_data.json"
 DEMO_MODE_KEY = "demo_mode_enabled"
 DEMO_DB_PATH_KEY = "demo_db_path"
+DEMO_ONLY_SETTING = "PHR_DEMO_ONLY"
+DEMO_FICTIONAL_NOTICE = (
+    "Every person, record, date, and value in this demo is invented sample data. "
+    "No profile here describes a real patient."
+)
 
 
 PAGES = [
@@ -771,6 +777,29 @@ def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str 
     return int(people[0]["id"]) if people else None
 
 
+def demo_only_mode() -> bool:
+    """True when this deployment may serve only the demo, never the real database.
+
+    Set on a hosted deployment, where one process serves every visitor: without it a
+    visitor who never presses "Demo mode" reads and writes the same `db.DB_PATH` file as
+    every other visitor. Off by default, so `streamlit run app.py` is unchanged.
+
+    Checks Streamlit secrets before the environment, the same precedence as
+    `ai_config.get_zhipu_api_key`: hosted Streamlit has a secrets editor but no
+    environment-variable field, so secrets is the channel that actually reaches a
+    deployment. Resolved on every call rather than frozen into a module constant, which
+    would be captured at first import and left unsettable by a test that imports this
+    module before setting the flag -- the same failure mode `db._resolve_db_path`
+    documents for the database path.
+    """
+    try:
+        secret = st.secrets.get(DEMO_ONLY_SETTING)
+    except Exception:
+        secret = None
+    value = str(secret) if secret else os.getenv(DEMO_ONLY_SETTING, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_demo_mode() -> bool:
     return bool(st.session_state.get(DEMO_MODE_KEY) and st.session_state.get(DEMO_DB_PATH_KEY))
 
@@ -799,10 +828,19 @@ def exit_demo_mode() -> None:
             pass
 
 
-def demo_mode_controls() -> None:
+def demo_mode_controls(demo_only: bool = False) -> None:
     if is_demo_mode():
         st.success("Demo mode active")
         st.caption("Using session-only sample data.")
+        st.caption(DEMO_FICTIONAL_NOTICE)
+        if demo_only:
+            # No exit control: on a shared deployment there is no private database to
+            # return to, and offering one would hand every visitor the same file.
+            st.caption(
+                "This hosted demo runs on sample data only. To keep your own records, clone "
+                "the repository and run the app locally, where the database stays on your machine."
+            )
+            return
         if st.button(action_button_label("Exit demo mode"), key="exit_demo_mode"):
             exit_demo_mode()
             st.rerun()
@@ -1778,19 +1816,31 @@ def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff
-    try:
-        # Pass the module attribute explicitly: the keyword default was bound at import
-        # time, and tests repoint db.DB_PATH at temporary databases.
-        db.init_db(db.DB_PATH)
-    except db.DatabaseBusyError as exc:
-        st.error(str(exc))
-        st.stop()
+    # Set before the first database call of the run, so no path below can reach the real
+    # file. Assigned every rerun rather than at import: the value is identical for every
+    # session in this process, so concurrent sessions cannot race to different databases.
+    demo_only = demo_only_mode()
+    db.DEMO_ONLY_MODE = demo_only
+    if demo_only:
+        # Deliberately no `init_db(db.DB_PATH)`: the real database is never created here,
+        # and `db._resolve_db_path` now refuses to open it. Starting the demo immediately
+        # also means a first-time visitor lands on populated sample data, not an empty app.
+        if not is_demo_mode():
+            start_demo_mode()
+    else:
+        try:
+            # Pass the module attribute explicitly: the keyword default was bound at import
+            # time, and tests repoint db.DB_PATH at temporary databases.
+            db.init_db(db.DB_PATH)
+        except db.DatabaseBusyError as exc:
+            st.error(str(exc))
+            st.stop()
 
     with st.sidebar:
         st.markdown("### Family PHR")
-        st.caption("Local-first private prototype")
+        st.caption("Hosted sample demo" if demo_only else "Local-first private prototype")
         st.divider()
-        demo_mode_controls()
+        demo_mode_controls(demo_only=demo_only)
         st.divider()
         # Created here so navigation keeps its position in the sidebar, but filled below: which
         # pages are visible depends on the selected profile, which is not resolved until after.
@@ -1817,6 +1867,12 @@ def main() -> None:  # noqa: C901, PLR0915
     # hits the lock gate, and returns -- the page never renders and the user sees no confirmation
     # that a whole-database restore just happened. The outcome describes the file the user supplied,
     # not stored records, so it is safe ahead of the gate.
+    if demo_only:
+        # Repeated in the main area rather than left to the sidebar alone: the sidebar
+        # collapses by default on narrow screens, and this is the one claim a visitor must
+        # not miss about health records they are about to read.
+        st.info(DEMO_FICTIONAL_NOTICE)
+
     render_import_outcome()
 
     if page == "Profiles":

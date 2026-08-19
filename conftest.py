@@ -58,6 +58,11 @@ def guard_real_database(tmp_path, monkeypatch, request):
     failure at the end of the session.
     """
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "phr.db")
+    # Reset per test, because `app.main` assigns this module global on every run: an
+    # AppTest that exercises demo-only mode would otherwise leave it set to True and make
+    # the next test's real-database access raise `RealDatabaseBlockedError`. Setting it
+    # through monkeypatch is what undoes that assignment at teardown.
+    monkeypatch.setattr(db, "DEMO_ONLY_MODE", False)
 
     real_connect = sqlite3.connect
 
