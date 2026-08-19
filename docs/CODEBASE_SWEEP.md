@@ -520,12 +520,6 @@ tests pass.
   require source flags for abnormal-lab claims, confirm safe output still passes, and
   make no real provider calls. Do not weaken the existing prompts or treat a disclaimer
   appended to unsafe content as sufficient mitigation.
-  Priority raised 2026-08-18: this is load-bearing for product value, not only safety. If a user
-  must supply their own key, the AI feature is a worse version of exporting records into a general
-  chatbot; the assembly layer plus enforced output constraints are the differentiation. This item
-  owns authoring the unsafe provider strings for all five categories as its regression inputs. The
-  demo replay path added the same day (`ai_config.replay_enabled`, `AI_REPLAY`) ships only safe
-  sample text for exactly this reason, and does not close this entry.
 - **Open P1 — locked-profile authorization is not enforced by direct context/export
   helpers.** Recorded during the PR #3 security audit on 2026-08-01. Normal Streamlit
   routing checks `security.health_data_visible`, but direct calls to helpers such as
