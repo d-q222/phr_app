@@ -22,6 +22,19 @@ PRIVACY_NOTICE = (
     "Do not include information you do not want sent to the API."
 )
 
+REPLAY_CHAT_RESPONSE = (
+    "Based on the records in this profile, here is what I can see.\n\n"
+    "Two medications are listed as active. One lab result from 12 March carries a source flag from "
+    "the lab itself; the others are recorded without one, so I am showing them as entered rather "
+    "than interpreting them.\n\n"
+    "A few things you may want to raise with a clinician:\n"
+    "- What the flagged result from 12 March means in the context of your history\n"
+    "- Whether the two active medications should still both be listed\n"
+    "- Whether any of the undated entries need a date filled in\n\n"
+    "I cannot tell you whether any of these values are normal for you, and I cannot suggest changes "
+    "to medication. Those are questions for a qualified healthcare professional."
+)
+
 EXAMPLE_QUESTIONS = [
     "Summarize my recent labs.",
     "What medications am I currently taking?",
@@ -328,6 +341,12 @@ def call_zhipu_chat(
     temperature: float = DEFAULT_CHAT_TEMPERATURE,
     max_tokens: int = DEFAULT_CHAT_MAX_TOKENS,
 ) -> str:
+    if ai_config.replay_enabled():
+        # Demo replay. This is the one place the real provider path is bypassed: no API key is
+        # required, which is the entire point, because the hosted demo has none. The response is
+        # recorded, not generated, and render_ai_chatbot labels it as such before displaying it.
+        return REPLAY_CHAT_RESPONSE
+
     api_key = get_zhipu_api_key()
     if not api_key:
         raise MissingAPIKeyError("Zhipu AI API key is not configured.")
@@ -466,9 +485,18 @@ def render_ai_chatbot(person_id: int, db_path: Path | str | None = None) -> None
     st.session_state.setdefault(history_key, [])
     st.session_state.setdefault(draft_key, "")
 
-    st.warning(f"⚠️ {PRIVACY_NOTICE}")
+    replay = ai_config.replay_enabled()
+    if replay:
+        st.info("Demo mode: replies below are recorded sample text. No AI provider is called and no data leaves this app.")
+    else:
+        st.warning(f"⚠️ {PRIVACY_NOTICE}")
     consent_key = f"{history_key}_ai_consent"
-    ai_consent = st.checkbox("I understand selected profile context will be sent to Zhipu AI.", key=consent_key)
+    consent_label = (
+        "I understand this is a recorded demo reply and no data is sent."
+        if replay
+        else "I understand selected profile context will be sent to Zhipu AI."
+    )
+    ai_consent = st.checkbox(consent_label, key=consent_key)
     _example_questions(draft_key)
 
     if st.button("🧹 Clear chat", key=f"clear_{history_key}"):

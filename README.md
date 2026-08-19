@@ -227,7 +227,25 @@ export ZHIPU_CHAT_FALLBACK_MODELS="glm-4.7-flash"
 
 The default model is the free low-power text model `glm-4.5-flash`, with `glm-4.7-flash` configured as a fallback. You can override either with `ZHIPU_MODEL` and `ZHIPU_FALLBACK_MODELS`, but larger models may use more quota.
 
-On macOS, you can also enter the key in the app under Settings. The app stores it in macOS Keychain under the `phr_app.zhipu_ai` service instead of writing it into the project folder. The Settings page also includes a `Test BigModel API key` button that sends a tiny request to confirm the key and selected model work.
+On macOS, you can also enter the key in the app under Settings. The app stores it in macOS Keychain under the `phr_app.zhipu_ai` service instead of writing it into the project folder. The Settings page also includes a `Test BigModel API key` button that sends a tiny request to confirm the key and selected model work. On other platforms that form is hidden, because Keychain storage is the only local-storage backend implemented; use Streamlit secrets or the environment variables above instead.
+
+### Demo replay mode
+
+`AI_REPLAY` makes the two AI surfaces serve a short recorded response instead of calling a provider:
+
+```bash
+export AI_REPLAY="1"   # also accepts true/yes/on
+```
+
+On a hosted deployment with a secrets editor rather than an environment-variable field, set it there instead; the flag is read from Streamlit secrets first, then the environment, matching how the API key is resolved:
+
+```toml
+AI_REPLAY = "1"
+```
+
+This exists for hosted demo deployments, which have no API key. No key is required, no network request is made, and no health data leaves the app. Both surfaces label the response as recorded before displaying it, and the consent checkboxes change wording to match. Replay takes precedence over a configured key, so leave it unset for normal use; `AI_PROVIDER=none` still disables AI output entirely.
+
+The recorded text is fixed sample content, not a generated answer, and it does not demonstrate provider-output safety validation -- see the `Open P1` note in `AGENTS.md` for that work.
 
 Health data is not sent automatically. The AI request runs only after clicking `Generate AI safety-checked insights`.
 

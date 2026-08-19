@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -1034,16 +1035,22 @@ def ai_settings() -> None:
     st.caption(f"Max response tokens: {ai_config.ZHIPU_MAX_TOKENS}")
     st.caption(f"Max AI context bytes: {ai_config.ZHIPU_CONTEXT_BYTE_LIMIT}")
     st.caption("Default setup uses BigModel's free low-power text model with a compact patient-data packet.")
-    with st.form("zhipu_api_key_form"):
-        api_key = st.text_input("Zhipu AI API key", type="password")
-        submitted = st.form_submit_button(action_button_label("Save API key"))
-        if submitted:
-            ok, message = ai_config.store_zhipu_api_key(api_key)
-            if ok:
-                st.success(message)
-            else:
-                st.error(message)
-                st.rerun()
+    if sys.platform == "darwin":
+        with st.form("zhipu_api_key_form"):
+            api_key = st.text_input("Zhipu AI API key", type="password")
+            submitted = st.form_submit_button(action_button_label("Save API key"))
+            if submitted:
+                ok, message = ai_config.store_zhipu_api_key(api_key)
+                if ok:
+                    st.success(message)
+                else:
+                    st.error(message)
+                    st.rerun()
+    else:
+        st.caption(
+            "Saving a key from this screen needs the macOS Keychain and is unavailable on this platform. "
+            "Configure ZAI_API_KEY (or ZHIPU_API_KEY) in Streamlit secrets or the environment instead."
+        )
     if st.button(action_button_label("Test BigModel API key")):
         ok, message, detail = insights.validate_zhipu_connection()
         if ok:
@@ -1790,9 +1797,12 @@ def page_insights(person: dict, db_path: Path | str | None = None) -> None:
     if st.button(action_button_label("Generate rule-based report")):
         st.markdown(insights.generate_rule_based_insights(context, focus_area))
     consent_key = f"{record_page_scope('insights', person_id, db_path)}:ai_consent"
-    ai_consent = st.checkbox(
-        "I understand selected profile context will be sent to Zhipu AI.", key=consent_key
-    )
+    if ai_config.replay_enabled():
+        st.info("Demo mode: the AI report below is recorded sample text. No AI provider is called and no data leaves this app.")
+        consent_label = "I understand this is a recorded demo report and no data is sent."
+    else:
+        consent_label = "I understand selected profile context will be sent to Zhipu AI."
+    ai_consent = st.checkbox(consent_label, key=consent_key)
     if st.button(action_button_label("Generate AI safety-checked insights")):
         if not ai_consent:
             st.error("Confirm AI context sharing before generating AI insights.")
@@ -1808,7 +1818,14 @@ def page_insights(person: dict, db_path: Path | str | None = None) -> None:
 
 def page_ai_chat(person: dict, db_path: Path | str | None = None) -> None:
     db_path = db.DB_PATH if db_path is None else db_path
-    page_header("AI Health Assistant", PAGE_DESCRIPTIONS["AI Chat"])
+    # The stock description promises the context is sent to Zhipu AI, which is untrue under
+    # replay. Same correction as the consent labels: never state a transfer that does not happen.
+    description = (
+        "Ask selected-profile questions and see a recorded sample reply. Nothing is sent to an AI provider."
+        if ai_config.replay_enabled()
+        else PAGE_DESCRIPTIONS["AI Chat"]
+    )
+    page_header("AI Health Assistant", description)
     ai_chat.render_ai_chatbot(int(person["id"]), db_path=db_path)
 
 

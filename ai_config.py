@@ -107,6 +107,26 @@ def zhipu_key_configured() -> bool:
     return bool(get_zhipu_api_key())
 
 
+def replay_enabled() -> bool:
+    """True when demo replay mode is on, so AI surfaces serve a recorded response.
+
+    Checks Streamlit secrets before the environment, the same precedence as
+    `get_zhipu_api_key`. Hosted Streamlit has a secrets editor but no environment-variable
+    field, and while Streamlit promotes top-level secrets into `os.environ`, it does so
+    lazily inside its own secrets parse -- which has not necessarily run when a replay
+    check fires, because these checks deliberately precede the key lookup that would
+    trigger it. Reading the secret directly removes that ordering dependency.
+
+    Resolved on every call rather than frozen into a module constant like the flags at the
+    top of this module. A constant is captured at first import, which would make the flag
+    unsettable from a test that imports this module before setting it -- the same
+    frozen-default failure mode as the database-path default previously fixed in
+    insights.py. Replay is demo-only and takes precedence over a configured API key.
+    """
+    value = _get_streamlit_secret("AI_REPLAY") or os.getenv("AI_REPLAY", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def store_zhipu_api_key(api_key: str) -> tuple[bool, str]:
     if sys.platform != "darwin":
         return False, "Secure local key storage is only implemented for macOS Keychain. Use ZAI_API_KEY or Streamlit secrets on this platform."

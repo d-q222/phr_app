@@ -3162,3 +3162,182 @@ def test_two_threads_importing_get_a_retryable_failure_not_a_traceback(tmp_path)
         with pytest.raises(RuntimeError, match="already open"):
             with db.write_transaction(database):
                 pass
+
+
+# --- Demo replay mode -------------------------------------------------------------
+#
+# The hosted demo has no API key, so AI_REPLAY serves a recorded response instead of
+# calling a provider. These tests patch urlopen to raise, which proves the network is
+# never touched rather than merely that a response came back.
+
+
+def _explode_urlopen(*_args, **_kwargs):
+    raise AssertionError("replay mode must not call the provider")
+
+
+def test_replay_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("AI_REPLAY", raising=False)
+
+    assert ai_config.replay_enabled() is False
+
+
+def test_replay_flag_is_read_after_ai_config_import(monkeypatch):
+    # ai_config's other flags are module constants frozen at import time. replay_enabled()
+    # deliberately is not: this module has long been imported by the time a test runs, so a
+    # constant would make setenv a no-op and silently void the replay tests below.
+    monkeypatch.setenv("AI_REPLAY", "1")
+    assert ai_config.replay_enabled() is True
+
+    monkeypatch.setenv("AI_REPLAY", "0")
+    assert ai_config.replay_enabled() is False
+
+
+def test_replay_insights_returns_recorded_report_without_calling_provider(monkeypatch):
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
+    monkeypatch.setattr(insights.urllib.request, "urlopen", _explode_urlopen)
+
+    result = insights.generate_ai_insight_result({"person": {"relationship": "Self"}}, "General overview")
+
+    assert insights.REPLAY_INSIGHT_RESPONSE in result["report"]
+    assert result["used_fallback"] is False
+    assert result["warning"] is None
+
+
+def test_replay_chat_returns_recorded_answer_without_calling_provider(monkeypatch):
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", _explode_urlopen)
+
+    answer = ai_chat.call_zhipu_chat([{"role": "user", "content": "Summarize my recent labs."}])
+
+    assert answer == ai_chat.REPLAY_CHAT_RESPONSE
+
+
+def test_replay_works_with_no_api_key_configured(monkeypatch):
+    # The load-bearing case: the hosted demo has no key at all.
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
+    monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda: None)
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: None)
+
+    result = insights.generate_ai_insight_result({"person": {"relationship": "Self"}}, None)
+    answer = ai_chat.call_zhipu_chat([{"role": "user", "content": "Hello."}])
+
+    assert result["used_fallback"] is False
+    assert answer == ai_chat.REPLAY_CHAT_RESPONSE
+
+
+def test_replay_takes_precedence_over_a_configured_key(monkeypatch):
+    # A developer machine has a Keychain entry; an AI_REPLAY in the environment still wins.
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
+    monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda: "real-key")
+    monkeypatch.setattr(ai_chat, "get_zhipu_api_key", lambda: "real-key")
+    monkeypatch.setattr(insights.urllib.request, "urlopen", _explode_urlopen)
+    monkeypatch.setattr(ai_chat.urllib.request, "urlopen", _explode_urlopen)
+
+    assert insights.REPLAY_INSIGHT_RESPONSE in insights.generate_ai_insight_result({}, None)["report"]
+    assert ai_chat.call_zhipu_chat([{"role": "user", "content": "Hi."}]) == ai_chat.REPLAY_CHAT_RESPONSE
+
+
+def test_replay_insight_report_still_carries_the_disclaimer(monkeypatch):
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_config, "AI_PROVIDER", "zhipu")
+
+    report = insights.generate_ai_insight_result({}, None)["report"]
+
+    assert insights.DISCLAIMER in report
+
+
+def test_replay_respects_ai_provider_none(monkeypatch):
+    # An explicit disable outranks the demo flag.
+    monkeypatch.setenv("AI_REPLAY", "1")
+    monkeypatch.setattr(ai_config, "AI_PROVIDER", "none")
+
+    result = insights.generate_ai_insight_result({}, None)
+
+    assert result["used_fallback"] is True
+    assert insights.REPLAY_INSIGHT_RESPONSE not in result["report"]
+
+
+def test_replay_chat_labels_the_demo_without_claiming_data_is_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_REPLAY", "1")
+    db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    services.create_item("allergies", alice, {"allergen": "Penicillin"}, db_path=db_path)
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "AI Chat"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+
+    # The recorded-response banner must be present, and the consent copy must not claim
+    # data is sent to a provider when replay means nothing leaves the app.
+    banners = [element.value for element in test_app.info]
+    assert any("recorded sample text" in text for text in banners)
+    consent_labels = [box.label for box in test_app.checkbox]
+    assert any("no data is sent" in label for label in consent_labels)
+    assert not any("sent to Zhipu AI" in label for label in consent_labels)
+
+
+def test_ai_settings_hides_key_form_where_keychain_storage_is_unavailable(tmp_path, monkeypatch):
+    db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    monkeypatch.setattr(app.sys, "platform", "linux")
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Settings"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+
+    # store_zhipu_api_key can only succeed on macOS, so off-platform the form would invite a
+    # paste that always fails. Point at the channels that do work instead.
+    assert "Zhipu AI API key" not in [field.label for field in test_app.text_input]
+    assert any("ZAI_API_KEY" in element.value for element in test_app.caption)
+
+
+def test_ai_settings_keeps_key_form_on_macos(tmp_path, monkeypatch):
+    db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+    monkeypatch.setattr(app.sys, "platform", "darwin")
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Settings"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+
+    assert "Zhipu AI API key" in [field.label for field in test_app.text_input]
+
+
+def test_replay_activates_from_streamlit_secrets_without_an_env_var(monkeypatch):
+    # Hosted Streamlit offers a secrets editor, not an environment-variable field. Streamlit
+    # does promote top-level secrets into os.environ, but only inside its own lazy secrets
+    # parse, which the replay checks deliberately run ahead of.
+    monkeypatch.delenv("AI_REPLAY", raising=False)
+    monkeypatch.setattr(
+        ai_config, "_get_streamlit_secret", lambda name: "1" if name == "AI_REPLAY" else None
+    )
+
+    assert ai_config.replay_enabled() is True
+
+
+def test_replay_chat_page_does_not_claim_context_is_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AI_REPLAY", "1")
+    db_path = tmp_path / "real.db"
+    monkeypatch.setattr(db, "DB_PATH", db_path)
+    db.init_db(db_path)
+    alice = services.create_person({"name": "Alice"}, db_path=db_path)
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "AI Chat"
+    test_app.session_state["selected_profile"] = f"Alice (ID {alice})"
+    test_app.run()
+
+    page_text = " ".join(element.value for element in test_app.markdown)
+    assert "sent to Zhipu AI" not in page_text
