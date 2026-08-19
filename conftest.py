@@ -58,6 +58,8 @@ def guard_real_database(tmp_path, monkeypatch, request):
     failure at the end of the session.
     """
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "phr.db")
+    # `app.main` assigns this module global, so an AppTest run leaks it into the next test.
+    monkeypatch.setattr(db, "DEMO_ONLY_MODE", False)
 
     real_connect = sqlite3.connect
 

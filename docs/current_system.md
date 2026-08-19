@@ -17,6 +17,12 @@ Companion documents: `docs/domain_invariants.md` (what must always hold),
 A local-first family personal health record. One user runs it on their own machine; the SQLite file
 holds every family member's records. Selecting a profile in the sidebar scopes everything on screen.
 
+One deployment shape breaks that single-user assumption: hosted Streamlit serves every visitor from a
+single process, so `db.DB_PATH` there is a file all visitors share rather than one person's private
+record. `app.demo_only_mode()` (set via the `PHR_DEMO_ONLY` secret or environment variable, off by
+default) is the answer — it starts every visitor in demo mode on a per-session temporary database and
+makes the real file unopenable at `db._resolve_db_path`. See §8.
+
 17 pages, grouped in four sidebar sections (`app.NAV_SECTIONS`):
 
 - **Overview** — Dashboard, Body Map, Health Insights, AI Chat
@@ -336,7 +342,8 @@ own both halves; resolving this is a decision in `target_architecture.md`.
 
 ## 8. Security and privacy posture
 
-**Implemented:** local SQLite, local-first default, optional per-profile passwords (PBKDF2-HMAC-SHA256,
+**Implemented:** local SQLite, local-first default, demo-only deployment mode (§1) enforced at the
+database resolver rather than per call site, optional per-profile passwords (PBKDF2-HMAC-SHA256,
 260k iterations, per-password random salt), Keychain storage for the optional Zhipu key, no automatic
 external AI send, selected-profile-only AI context with byte budgeting, no persisted chat history,
 medical disclaimer and urgent-warning language, and — as of PR #3 — person-scoped record writes.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -39,6 +40,10 @@ from models import (
 SAMPLE_DATA_PATH = Path(__file__).resolve().parent / "sample_test_data.json"
 DEMO_MODE_KEY = "demo_mode_enabled"
 DEMO_DB_PATH_KEY = "demo_db_path"
+DEMO_FICTIONAL_NOTICE = (
+    "Every person, record, date, and value in this demo is invented sample data. "
+    "No profile here describes a real patient."
+)
 
 
 PAGES = [
@@ -778,6 +783,20 @@ def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str 
     return int(people[0]["id"]) if people else None
 
 
+def demo_only_mode() -> bool:
+    """True when this deployment may serve only the demo, never the real database.
+
+    Off by default, so a local run is unchanged. Secrets before environment: hosted
+    Streamlit has a secrets editor but no environment-variable field.
+    """
+    try:
+        secret = st.secrets.get("PHR_DEMO_ONLY")
+    except Exception:
+        secret = None
+    value = str(secret) if secret else os.getenv("PHR_DEMO_ONLY", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_demo_mode() -> bool:
     return bool(st.session_state.get(DEMO_MODE_KEY) and st.session_state.get(DEMO_DB_PATH_KEY))
 
@@ -806,10 +825,19 @@ def exit_demo_mode() -> None:
             pass
 
 
-def demo_mode_controls() -> None:
+def demo_mode_controls(demo_only: bool = False) -> None:
     if is_demo_mode():
         st.success("Demo mode active")
         st.caption("Using session-only sample data.")
+        st.caption(DEMO_FICTIONAL_NOTICE)
+        if demo_only:
+            # No exit control: on a shared deployment there is no private database to
+            # return to, and offering one would hand every visitor the same file.
+            st.caption(
+                "This hosted demo runs on sample data only. To keep your own records, clone "
+                "the repository and run the app locally, where the database stays on your machine."
+            )
+            return
         if st.button(action_button_label("Exit demo mode"), key="exit_demo_mode"):
             exit_demo_mode()
             st.rerun()
@@ -1833,19 +1861,28 @@ def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff
-    try:
-        # Pass the module attribute explicitly: the keyword default was bound at import
-        # time, and tests repoint db.DB_PATH at temporary databases.
-        db.init_db(db.DB_PATH)
-    except db.DatabaseBusyError as exc:
-        st.error(str(exc))
-        st.stop()
+    # Before the first database call of the run, so nothing below can reach the real file.
+    demo_only = demo_only_mode()
+    db.DEMO_ONLY_MODE = demo_only
+    if demo_only:
+        # No `init_db`: the real database is never created, and starting the demo here is
+        # what puts a first-time visitor on populated sample data instead of an empty app.
+        if not is_demo_mode():
+            start_demo_mode()
+    else:
+        try:
+            # Pass the module attribute explicitly: the keyword default was bound at import
+            # time, and tests repoint db.DB_PATH at temporary databases.
+            db.init_db(db.DB_PATH)
+        except db.DatabaseBusyError as exc:
+            st.error(str(exc))
+            st.stop()
 
     with st.sidebar:
         st.markdown("### Family PHR")
-        st.caption("Local-first private prototype")
+        st.caption("Hosted sample demo" if demo_only else "Local-first private prototype")
         st.divider()
-        demo_mode_controls()
+        demo_mode_controls(demo_only=demo_only)
         st.divider()
         # Created here so navigation keeps its position in the sidebar, but filled below: which
         # pages are visible depends on the selected profile, which is not resolved until after.
@@ -1872,6 +1909,10 @@ def main() -> None:  # noqa: C901, PLR0915
     # hits the lock gate, and returns -- the page never renders and the user sees no confirmation
     # that a whole-database restore just happened. The outcome describes the file the user supplied,
     # not stored records, so it is safe ahead of the gate.
+    if demo_only:
+        # Repeated outside the sidebar, which collapses by default on narrow screens.
+        st.info(DEMO_FICTIONAL_NOTICE)
+
     render_import_outcome()
 
     if page == "Profiles":

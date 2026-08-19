@@ -12,6 +12,10 @@ DB_PATH = DATA_DIR / "phr.db"
 SCHEMA_PATH = APP_DIR / "schema.sql"
 DATABASE_BUSY_TIMEOUT_MS = 1_000
 
+# Set by `app.main`; enforced in `_resolve_db_path`. One process serves every visitor on a
+# hosted deployment, so `DB_PATH` there is shared rather than private.
+DEMO_ONLY_MODE = False
+
 
 class RecordNotFound(LookupError):
     """A record id does not exist, or does not belong to the requesting person.
@@ -118,8 +122,19 @@ def _resolve_db_path(db_path: Path | str | None) -> Path | str:
     Every public helper in this module forwards ``db_path`` untouched, so a
     ``None`` sentinel travels down and resolves exactly once -- here, at the two
     places that actually touch the filesystem.
+
+    Every connection, transaction and schema init funnels through here, so this is also
+    where ``DEMO_ONLY_MODE`` is enforced -- on the resolved path rather than on
+    ``db_path is None``, because callers resolve the default before calling down.
     """
-    return DB_PATH if db_path is None else db_path
+    resolved = DB_PATH if db_path is None else db_path
+    if DEMO_ONLY_MODE and Path(resolved).expanduser().resolve() == Path(DB_PATH).expanduser().resolve():
+        raise RuntimeError(
+            "This deployment runs in demo-only mode, so the real database is not available. "
+            "Health records live only in the per-session demo database. Clone the repository "
+            "and run the app locally to keep your own records."
+        )
+    return resolved
 
 
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
