@@ -13,17 +13,11 @@ To keep your own records, clone this repository and run the app locally, as desc
 
 ## Hosted Demo
 
-A hosted instance may be published so the interface can be tried without installing anything. That
-instance is a demo of the software, not a place to store health information, and it is the one
-context where "local-first" does not describe where the data lives.
-
-Hosted Streamlit serves every visitor from a single process, so a database file on that server is
-shared by everyone who opens the link rather than private to one person. A deployment therefore sets
-`PHR_DEMO_ONLY` (see [Demo-Only Deployments](#demo-only-deployments)), which starts each visitor in
-demo mode on a throwaway per-session database and makes the real database file unopenable.
-
-Every profile, record, date, and value in the demo is invented sample data from
-`sample_test_data.json`. No demo profile describes a real person.
+A hosted instance is a demo of the software, not a place to store health information, and it is the
+one context where "local-first" does not describe where the data lives: hosted Streamlit serves every
+visitor from a single process, so a database file there is shared by everyone who opens the link
+rather than private to one person. Such a deployment runs in
+[demo-only mode](#demo-only-deployments), on invented sample data from `sample_test_data.json`.
 
 ## Medical Disclaimer
 

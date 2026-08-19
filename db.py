@@ -12,10 +12,8 @@ DB_PATH = DATA_DIR / "phr.db"
 SCHEMA_PATH = APP_DIR / "schema.sql"
 DATABASE_BUSY_TIMEOUT_MS = 1_000
 
-# Set once per process by the entrypoint (see `app.demo_only_mode`), never per session.
-# A hosted deployment serves every visitor from one process, so `DB_PATH` there is not one
-# person's private file but a directory all visitors would share. This flag makes that file
-# unopenable rather than merely unused: see `_resolve_db_path`.
+# Set by `app.main`; enforced in `_resolve_db_path`. One process serves every visitor on a
+# hosted deployment, so `DB_PATH` there is shared rather than private.
 DEMO_ONLY_MODE = False
 
 
@@ -30,15 +28,6 @@ class RecordNotFound(LookupError):
 
 class DatabaseBusyError(RuntimeError):
     """SQLite could not acquire its write lock within the bounded wait."""
-
-
-class RealDatabaseBlockedError(RuntimeError):
-    """A demo-only process tried to open the real database.
-
-    Raised rather than silently redirected: a caller that reaches here has lost track of
-    which database it is addressing, and quietly handing back a different one would hide
-    that bug behind plausible-looking data. Failing closed leaks nothing.
-    """
 
 TABLES = [
     "people",
@@ -134,16 +123,13 @@ def _resolve_db_path(db_path: Path | str | None) -> Path | str:
     ``None`` sentinel travels down and resolves exactly once -- here, at the two
     places that actually touch the filesystem.
 
-    Because every connection, transaction, and schema init funnels through here, this is
-    also where ``DEMO_ONLY_MODE`` is enforced. Placing the check at this choke point rather
-    than at each caller is deliberate: `app.py` alone resolves ``db.DB_PATH`` in roughly two
-    dozen ``db_path or db.DB_PATH`` defaults, and a future caller that forgets the demo flag
-    would otherwise reopen the shared file. The comparison is on the resolved path, not on
-    ``db_path is None``, because callers usually resolve the default before calling down.
+    Every connection, transaction and schema init funnels through here, so this is also
+    where ``DEMO_ONLY_MODE`` is enforced -- on the resolved path rather than on
+    ``db_path is None``, because callers resolve the default before calling down.
     """
     resolved = DB_PATH if db_path is None else db_path
     if DEMO_ONLY_MODE and Path(resolved).expanduser().resolve() == Path(DB_PATH).expanduser().resolve():
-        raise RealDatabaseBlockedError(
+        raise RuntimeError(
             "This deployment runs in demo-only mode, so the real database is not available. "
             "Health records live only in the per-session demo database. Clone the repository "
             "and run the app locally to keep your own records."

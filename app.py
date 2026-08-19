@@ -38,7 +38,6 @@ from models import (
 SAMPLE_DATA_PATH = Path(__file__).resolve().parent / "sample_test_data.json"
 DEMO_MODE_KEY = "demo_mode_enabled"
 DEMO_DB_PATH_KEY = "demo_db_path"
-DEMO_ONLY_SETTING = "PHR_DEMO_ONLY"
 DEMO_FICTIONAL_NOTICE = (
     "Every person, record, date, and value in this demo is invented sample data. "
     "No profile here describes a real patient."
@@ -780,23 +779,14 @@ def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str 
 def demo_only_mode() -> bool:
     """True when this deployment may serve only the demo, never the real database.
 
-    Set on a hosted deployment, where one process serves every visitor: without it a
-    visitor who never presses "Demo mode" reads and writes the same `db.DB_PATH` file as
-    every other visitor. Off by default, so `streamlit run app.py` is unchanged.
-
-    Checks Streamlit secrets before the environment, the same precedence as
-    `ai_config.get_zhipu_api_key`: hosted Streamlit has a secrets editor but no
-    environment-variable field, so secrets is the channel that actually reaches a
-    deployment. Resolved on every call rather than frozen into a module constant, which
-    would be captured at first import and left unsettable by a test that imports this
-    module before setting the flag -- the same failure mode `db._resolve_db_path`
-    documents for the database path.
+    Off by default, so a local run is unchanged. Secrets before environment: hosted
+    Streamlit has a secrets editor but no environment-variable field.
     """
     try:
-        secret = st.secrets.get(DEMO_ONLY_SETTING)
+        secret = st.secrets.get("PHR_DEMO_ONLY")
     except Exception:
         secret = None
-    value = str(secret) if secret else os.getenv(DEMO_ONLY_SETTING, "")
+    value = str(secret) if secret else os.getenv("PHR_DEMO_ONLY", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -1816,15 +1806,12 @@ def main() -> None:  # noqa: C901, PLR0915
     st.set_page_config(page_title="Family Personal Health Record", page_icon="PHR", layout="wide")
     apply_global_styles()
     st.write("")  # Top spacer to prevent Streamlit UI cutoff
-    # Set before the first database call of the run, so no path below can reach the real
-    # file. Assigned every rerun rather than at import: the value is identical for every
-    # session in this process, so concurrent sessions cannot race to different databases.
+    # Before the first database call of the run, so nothing below can reach the real file.
     demo_only = demo_only_mode()
     db.DEMO_ONLY_MODE = demo_only
     if demo_only:
-        # Deliberately no `init_db(db.DB_PATH)`: the real database is never created here,
-        # and `db._resolve_db_path` now refuses to open it. Starting the demo immediately
-        # also means a first-time visitor lands on populated sample data, not an empty app.
+        # No `init_db`: the real database is never created, and starting the demo here is
+        # what puts a first-time visitor on populated sample data instead of an empty app.
         if not is_demo_mode():
             start_demo_mode()
     else:
@@ -1868,9 +1855,7 @@ def main() -> None:  # noqa: C901, PLR0915
     # that a whole-database restore just happened. The outcome describes the file the user supplied,
     # not stored records, so it is safe ahead of the gate.
     if demo_only:
-        # Repeated in the main area rather than left to the sidebar alone: the sidebar
-        # collapses by default on narrow screens, and this is the one claim a visitor must
-        # not miss about health records they are about to read.
+        # Repeated outside the sidebar, which collapses by default on narrow screens.
         st.info(DEMO_FICTIONAL_NOTICE)
 
     render_import_outcome()

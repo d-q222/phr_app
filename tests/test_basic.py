@@ -950,12 +950,11 @@ def test_demo_database_loads_sample_data_without_touching_real_profiles(tmp_path
     assert services.list_items("lab_results", real_person_id, db_path=real_db_path) == []
 
 
-def test_demo_only_mode_never_opens_the_real_database(tmp_path, monkeypatch):
-    """A hosted deployment must not create, read, or write the shared real database.
+def test_demo_only_mode_serves_only_the_demo(tmp_path, monkeypatch):
+    """A hosted deployment must not create, read or write the shared real database.
 
     One process serves every visitor there, so `db.DB_PATH` is not one person's private
-    file but a directory all visitors would share. Asserting on the file rather than on
-    the guard's internals proves the property directly.
+    file but a database all visitors would share.
     """
     real_db_path = tmp_path / "never_created" / "phr.db"
     monkeypatch.setattr(db, "DB_PATH", real_db_path)
@@ -968,31 +967,13 @@ def test_demo_only_mode_never_opens_the_real_database(tmp_path, monkeypatch):
     # `init_db` creates parent directories, so an absent parent proves nothing tried.
     assert not real_db_path.exists()
     assert not real_db_path.parent.exists()
-
-
-def test_demo_only_mode_lands_on_populated_demo_data(tmp_path, monkeypatch):
-    """The demo starts itself, so a first-time visitor never sees an empty app."""
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "never_created" / "phr.db")
-    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
-
-    test_app = AppTest.from_file(str(Path(app.__file__)))
-    test_app.run(timeout=60)
-
+    # The demo starts itself, so a first-time visitor never sees an empty app. The second
+    # profile proves the demo database loaded fully, not just its first row.
     profile_picker = test_app.selectbox(key="demo_selected_profile")
     assert profile_picker.value == "Alex Rivera (ID 1)"
-    # The second profile proves the demo database loaded fully, not just its first row.
     assert profile_picker.options == ["Alex Rivera (ID 1)", "Maya Rivera (ID 2)"]
     assert app.DEMO_FICTIONAL_NOTICE in [info.value for info in test_app.info]
-
-
-def test_demo_only_mode_offers_no_way_back_to_the_real_database(tmp_path, monkeypatch):
-    """Exiting demo mode would drop the visitor onto the shared file the flag protects."""
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "never_created" / "phr.db")
-    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
-
-    test_app = AppTest.from_file(str(Path(app.__file__)))
-    test_app.run(timeout=60)
-
+    # Exiting demo mode would drop the visitor onto the shared file the flag protects.
     assert "exit_demo_mode" not in [button.key for button in test_app.button]
     assert "start_demo_mode" not in [button.key for button in test_app.button]
 
@@ -1026,7 +1007,7 @@ def test_resolving_the_real_database_is_blocked_in_demo_only_mode(tmp_path, monk
     monkeypatch.setattr(db, "DEMO_ONLY_MODE", True)
 
     requested = None if supplied_path is None else real_db_path
-    with pytest.raises(db.RealDatabaseBlockedError):
+    with pytest.raises(RuntimeError, match="demo-only mode"):
         services.list_people(db_path=requested)
 
 
