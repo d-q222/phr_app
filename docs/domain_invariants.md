@@ -1,6 +1,7 @@
 # PHR Domain Invariants
 
-**Status:** authoritative. **Last verified against the repository:** 2026-08-02 (commit `cb7e055`, 206 tests passing).
+**Status:** authoritative. **Last verified against the repository:** 2026-08-02 (commit `cb7e055`,
+206 tests passing). The AI-fallback and person-scoped-table claims were re-verified 2026-08-24.
 
 This is the single file the full-stack migration is graded against. It consolidates invariants
 previously scattered across `PHR_LEARNING_PROTOCOL_2026-07-28.md` ("PHR invariants"),
@@ -52,7 +53,7 @@ This maps onto a single 404 in the future HTTP API — never a 403.
 
 - `tests/test_basic.py::test_update_item_rejects_a_record_owned_by_another_profile`
 - `tests/test_basic.py::test_delete_item_rejects_a_record_owned_by_another_profile`
-- `tests/test_basic.py::test_person_scoped_write_guard_covers_every_child_table` — all seven person-scoped tables
+- `tests/test_basic.py::test_person_scoped_write_guard_covers_every_child_table` — all eight person-scoped tables
 - `tests/test_basic.py::test_person_and_record_ids_are_keyword_only_on_scoped_writes` — pins the API shape
 - `tests/test_basic.py::test_selected_json_backup_excludes_other_profiles`
 - `tests/test_basic.py::test_ai_chat_context_is_scoped_to_selected_person`
@@ -208,11 +209,12 @@ model to show a user their own records.
 (`ZhipuAPIError`, `ZhipuRetryableError`, `AIChatError` and subclasses) and degrade to rule-based output
 or a clear message rather than an empty screen.
 
-Fallback is **capacity-shaped, not blanket retry**. A 429 or a missing resource package is a property
-of the model, so the next candidate is tried. A transport timeout is a property of the request, so it
+Fallback is **capacity-shaped, not blanket retry**. A 429 is a property of the model, so the next
+candidate is tried. A missing resource package (`1113`) is a property of the *account*: chat still
+tries the next candidate, `insights` stops immediately. A transport timeout is a property of the request, so it
 is *not* retried across models — retrying would multiply the user's wait by the candidate count while
-the original cause persists. Account-level errors are not retried at all. Total AI latency is bounded
-regardless of how many fallback models are configured.
+the original cause persists. Total AI latency is bounded regardless of how many fallback models are
+configured.
 
 ### Proven by
 
