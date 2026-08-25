@@ -52,7 +52,7 @@ Every slice must traverse this whole path. A slice that stops at the service lay
 | Module | Becomes |
 |---|---|
 | `db.py` | SQLAlchemy models + repository classes. The hand-rolled f-string query builder in `db.list_records` is retired. |
-| `app.py` (1,516 lines) | Split: routes (FastAPI) + components (React). `FIELD_CONFIGS` is the seam — see §5. |
+| `app.py` | Split: routes (FastAPI) + components (React). `FIELD_CONFIGS` is the seam — see §5. |
 | `body_map_ui.py`, `components/body_map/index.html` | A first-class React component. |
 | `ai_chat.py` | Split three ways: context assembly (service), transport (provider adapter), rendering (React). |
 
@@ -158,8 +158,10 @@ session scope — the rest of the system never learns about it.
 **Schema coupling.** `imports_exports.py` and `fhir.py` read `db.TABLES`/`db.TABLE_COLUMNS` directly. They
 move to the ORM metadata or an explicit export schema.
 
-**The AI provider port.** `ai_config.AI_PROVIDER` is read once and never branched on; key lookup, HTTP
-error parsing, and model fallback are each implemented twice (`current_system.md` §9). Target: one
+**The AI provider port.** `ai_config.AI_PROVIDER` is only ever compared against `"zhipu"`/`"none"` to refuse
+or downgrade, never to select an implementation; HTTP error parsing
+and model fallback are each implemented twice (`current_system.md` §9). Key lookup and request building
+were on that list too and are now single, in `ai_config`. Target: one
 `LLMProvider` interface —
 
 ```python

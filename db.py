@@ -169,7 +169,7 @@ def _write_connection(db_path: Path | str | None):
 # SQLite's busy timeout already handles. A module-level set conflated the two: two browser tabs
 # importing at once raised a bare RuntimeError that `app.IMPORT_FAILURES` does not catch, so
 # Streamlit rendered a traceback (printing the database path) instead of the retryable failure
-# dialog -- reintroducing the no-feedback bug this branch exists to remove.
+# panel -- reintroducing the no-feedback bug this branch exists to remove.
 _open_write_transactions = threading.local()
 
 

@@ -1,10 +1,17 @@
-# Streamlit's default primaryColor is its own brand red (#FF4B4B). APP_CSS in app.py hand-overrides
-# buttons, metrics and nav to the app's teal, but it does not reach widgets whose accent Streamlit
-# draws internally -- notably the selected st.pills option and the active st.tabs indicator, both of
-# which are prominent on the Condition Details page. Setting primaryColor here is what keeps those
-# consistent with the rest of the UI.
-#
-# Only primaryColor is set on purpose. APP_CSS already forces backgrounds and text colours
-# explicitly, so declaring backgroundColor/textColor here would fight it for no gain.
+# The app's visual identity lives here, not in a stylesheet: Streamlit exposes these as first-class
+# theme tokens, so restyling its internals through private selectors (`.stApp`, BaseWeb popovers)
+# is both unnecessary and fragile -- those selectors change between releases. See `APP_CSS` in
+# app.py for what still has to be CSS, and why.
 [theme]
-primaryColor = "#16705c"  # --phr-accent in APP_CSS
+primaryColor = "#16705c"          # buttons, focus rings, selected st.pills, active st.tabs indicator
+backgroundColor = "#f6f8f7"
+# Not widget fills -- measured, the select wrapper resolves to backgroundColor. Streamlit documents
+# this as the fill for interactive widgets, and dataframe headers use a mix of it and backgroundColor.
+secondaryBackgroundColor = "#ffffff"
+textColor = "#17211d"
+borderColor = "#d9e1dd"           # expanders, widget borders; dataframes inherit this
+baseRadius = "8px"
+showWidgetBorder = true
+
+[theme.sidebar]
+backgroundColor = "#eef4f1"

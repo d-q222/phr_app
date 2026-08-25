@@ -1,3 +1,4 @@
+import ast
 import http.client
 import inspect
 import json
@@ -6,6 +7,7 @@ import sys
 import threading
 import time
 import urllib.error
+from datetime import date
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -85,17 +87,121 @@ def test_default_zhipu_setup_uses_compact_free_model():
 
 
 def test_zhipu_api_key_prefers_streamlit_secret_then_env_then_keychain(monkeypatch):
-    monkeypatch.setattr(ai_config, "_get_streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
     monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: "keychain-key")
     monkeypatch.setenv("ZAI_API_KEY", "env-key")
 
     assert ai_config.get_zhipu_api_key() == "secret-key"
 
-    monkeypatch.setattr(ai_config, "_get_streamlit_secret", lambda name: None)
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: None)
     assert ai_config.get_zhipu_api_key() == "env-key"
 
     monkeypatch.delenv("ZAI_API_KEY")
     assert ai_config.get_zhipu_api_key() == "keychain-key"
+
+
+def test_a_blank_env_key_falls_through_to_the_remaining_tiers(monkeypatch):
+    """A whitespace-only value is not a configured key, so it must not end the search.
+
+    The truthiness test ran before the strip, so `ZAI_API_KEY="   "` returned `""` and abandoned
+    the remaining tiers: chat reported no key and insights fell back to rule-based output while a
+    valid `ZHIPU_API_KEY` or Keychain entry sat unread.
+    """
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: None)
+    monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: "keychain-key")
+    monkeypatch.setenv("ZAI_API_KEY", "   ")
+    monkeypatch.setenv("ZHIPU_API_KEY", "real-key")
+
+    assert ai_config.get_zhipu_api_key() == "real-key"
+    assert ai_config.zhipu_key_configured() is True
+
+    monkeypatch.delenv("ZHIPU_API_KEY")
+    assert ai_config.get_zhipu_api_key() == "keychain-key"
+
+    monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: None)
+    assert ai_config.get_zhipu_api_key() is None
+
+
+def test_every_navigable_page_has_a_dispatch_branch():
+    """A nav entry with no branch in `main` renders an empty content area.
+
+    `PAGES` derives from `NAV_SECTIONS`, so a new section entry is routable the moment it is added --
+    where the old hand-written list would have bounced an unregistered page to the Dashboard
+    fallback in `page_navigation`. This walks `main`'s own source for the names it dispatches on
+    rather than restating them, which would reintroduce the second list the derivation removed.
+    """
+    dispatched = set()
+    for node in ast.walk(ast.parse(inspect.getsource(app.main))):
+        if not (isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "page"):
+            continue
+        # strict=True is safe: ast.Compare always carries one comparator per operator.
+        for operator, comparator in zip(node.ops, node.comparators, strict=True):
+            if isinstance(operator, ast.Eq) and isinstance(comparator, ast.Constant):
+                dispatched.add(comparator.value)
+            elif isinstance(operator, ast.In) and isinstance(comparator, ast.Name):
+                dispatched.update(getattr(app, comparator.id))
+
+    assert app.PAGES <= dispatched, f"navigable but never dispatched: {sorted(app.PAGES - dispatched)}"
+    # The other direction: a record page configured but never linked from a section is unreachable
+    # rather than blank, and a subset check only ever catches one of those two.
+    # Also covers `RECORD_PAGE_TABLES`, whose keys are folded into `dispatched` above.
+    assert dispatched <= app.PAGES, f"dispatched but not navigable: {sorted(dispatched - app.PAGES)}"
+    # `RECORD_PAGE_TABLES` inverts `FIELD_CONFIGS`, so two configs sharing a title would silently
+    # collapse into one route and leave the earlier table unreachable with every assertion above green.
+    assert len(app.RECORD_PAGE_TABLES) == len(app.FIELD_CONFIGS), "two FIELD_CONFIGS share a title"
+
+
+def test_export_scope_options_refuses_all_profile_export_while_a_profile_is_locked():
+    """The refusal is unreachable through `main` today and still has to hold.
+
+    `person` is None only when there are no profiles, and then none can be locked, so no amount of
+    driving the app produces the empty case. It is what stops an all-profile export carrying locked
+    records if a future caller ever pairs "no profile selected" with one locked.
+    """
+    person = {"id": 1, "name": "Fictional Person"}
+
+    assert app.export_scope_options(person, True) == ["Selected profile", "All profiles"]
+    assert app.export_scope_options(person, False) == ["Selected profile"]
+    assert app.export_scope_options(None, True) == ["All profiles"]
+    assert app.export_scope_options(None, False) == []
+
+
+def test_clean_payload_passes_non_string_values_through_untouched():
+    """`value == ""` is a no-op for a date or a number, and must not raise on the way past.
+
+    Every existing call site passes strings, so nothing pinned what happens when a widget hands back
+    a `datetime.date` or an int. `severity` is 0 deliberately: it is falsy but not blank, so a
+    comprehension written `if not value` would erase it, and a recorded 0 is a real reading rather
+    than an absence -- the same distinction `clean_payload` already draws for `numeric_value`.
+    """
+    cleaned = app.clean_payload(
+        "health_entries",
+        {"entry_date": date(2026, 1, 2), "severity": 0, "title": "", "notes": None},
+    )
+
+    assert cleaned["entry_date"] == date(2026, 1, 2)
+    assert cleaned["severity"] == 0
+    assert cleaned["title"] is None
+    assert cleaned["notes"] is None
+
+
+def test_column_headers_the_label_map_no_longer_lists_are_still_derived_correctly():
+    """`DISPLAY_COLUMN_LABELS` holds only the headers `format_label` cannot derive.
+
+    These names were spelled out in the map until they were found to be byte-identical to the
+    derived result. Nothing else pins them, so a change to `format_label` -- dropping the ` Id` ->
+    ` ID` fixup, say -- would silently reword real table headers.
+    """
+    assert app.display_column_label("lab_date") == "Lab Date"
+    assert app.display_column_label("body_system") == "Body System"
+    assert app.display_column_label("reference_low") == "Reference Low"
+    assert app.display_column_label("latest_timestamp") == "Latest Timestamp"
+    assert app.display_column_label("emergency_contact") == "Emergency Contact"
+    # Still an exception: `.title()` would give "Date Of Birth" and "Person Id".
+    assert app.display_column_label("date_of_birth") == "Date of Birth"
+    assert app.display_column_label("person_id") == "Profile ID"
+    # An unlisted, unseen column derives rather than rendering the raw name.
+    assert app.display_column_label("some_new_id") == "Some New ID"
 
 
 def test_display_dataframe_uses_readable_column_titles_and_hides_internal_fields():
@@ -978,6 +1084,26 @@ def test_demo_only_mode_serves_only_the_demo(tmp_path, monkeypatch):
     assert "start_demo_mode" not in [button.key for button in test_app.button]
 
 
+def test_demo_only_mode_reads_the_secret_before_the_environment(monkeypatch):
+    """A whitespace-only secret is the deployment's answer, not an absence.
+
+    `ai_config.streamlit_secret` strips, so `PHR_DEMO_ONLY = "  "` reaches the caller as `""`, and
+    falling through on that would let a stray environment variable decide instead. The claim is only
+    that narrow: a secret set to the empty string, `false` or `0` is falsy *inside* the helper, which
+    returns None, and there the environment does win -- unchanged by sharing the helper.
+    """
+    monkeypatch.setenv("PHR_DEMO_ONLY", "1")
+
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: "" if name == "PHR_DEMO_ONLY" else None)
+    assert app.demo_only_mode() is False
+
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: "yes" if name == "PHR_DEMO_ONLY" else None)
+    assert app.demo_only_mode() is True
+
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: None)
+    assert app.demo_only_mode() is True
+
+
 def test_demo_only_mode_is_off_unless_configured(tmp_path, monkeypatch):
     """`streamlit run app.py` is unchanged: the real database is still created locally."""
     real_db_path = tmp_path / "real" / "phr.db"
@@ -1571,6 +1697,41 @@ def _import_export_app(tmp_path, monkeypatch, name="import-export.db"):
     return app_db_path, test_app
 
 
+def test_a_locked_profile_removes_the_all_profile_export_scope(tmp_path, monkeypatch):
+    """The lock gate itself, not just the pure helper that formats its answer.
+
+    `export_scope_options` is handed a bool, so its unit test cannot catch the wiring that produces
+    that bool. Setting `all_profile_export_available = True` in `page_import_export` leaves every
+    assertion in that unit test passing while a locked profile's records leave in the all-profile
+    FHIR bundle and JSON backup -- the export leak AGENTS.md section 4 exists to prevent.
+
+    Two profiles are needed: the locked one cannot be the selected one, because a locked selection
+    is stopped by the unlock gate long before this page renders.
+    """
+    monkeypatch.delenv("PHR_DEMO_ONLY", raising=False)
+    app_db_path = tmp_path / "locked-export.db"
+    monkeypatch.setattr(db, "DB_PATH", app_db_path)
+    db.init_db(app_db_path)
+    visible = services.create_person({"name": "Visible Person"}, db_path=app_db_path)
+    protected = services.create_person({"name": "Protected Person"}, db_path=app_db_path)
+    db.update_record(
+        "people",
+        protected,
+        {"profile_password_enabled": 1, "profile_password_hash": security.hash_password("correct horse")},
+        db_path=app_db_path,
+    )
+
+    test_app = AppTest.from_file(str(Path(app.__file__)))
+    test_app.session_state["nav_page"] = "Import/Export"
+    test_app.session_state["selected_profile"] = f"Visible Person (ID {visible})"
+    test_app.run(timeout=60)
+
+    assert not test_app.exception
+    for key in ("fhir_export_scope", "json_backup_scope"):
+        scope = next(widget for widget in test_app.selectbox if widget.key == key)
+        assert list(scope.options) == ["Selected profile"], f"{key} still offers an all-profile export"
+
+
 def _fhir_uploader(test_app):
     return next(widget for widget in test_app.file_uploader if widget.label == "Import FHIR Bundle")
 
@@ -1610,11 +1771,10 @@ def test_successful_import_reports_what_landed(tmp_path, monkeypatch):
 
     next(button for button in test_app.button if "Import FHIR Bundle" in str(button.label)).click().run(timeout=60)
 
-    # `any` over both surfaces on purpose. AppTest walks the dialog body as well as the inline
-    # panel on the pinned Streamlit, so the message appears twice; the assertion below pins that
-    # both are present, because an `any` alone would pass with either one deleted.
+    # Exactly one, not `any`: the result is rendered by a single inline panel now, and an `any`
+    # would keep passing if a second surface were reintroduced and started duplicating every message.
     landed = [message for message in test_app.success if "Imported 2 record(s)" in message.value]
-    assert len(landed) == 2, f"expected the dialog and the inline panel, got {len(landed)}"
+    assert len(landed) == 1, f"expected one inline panel, got {len(landed)}"
 
 
 def test_a_failed_import_keeps_the_file_queued_and_says_nothing_was_imported(tmp_path, monkeypatch):
@@ -1690,7 +1850,7 @@ def test_import_failures_the_ui_must_catch_are_all_in_the_caught_tuple(tmp_path,
 
     Neither is a `ValueError`: the first raises AttributeError inside the bundle parser, the second
     sqlite3.IntegrityError inside the write. Enumerating only the obvious exception types is how the
-    friendly failure dialog gets bypassed.
+    friendly failure message gets bypassed.
     """
     db_path = tmp_path / "phr.db"
     db.init_db(db_path)
@@ -1959,6 +2119,21 @@ def test_ai_chat_context_is_byte_limited(tmp_path, monkeypatch):
     assert "Selected Person" in context_text
 
 
+def test_chat_model_candidates_drop_a_blank_primary_model(monkeypatch):
+    """A blank `model` argument must not survive into the list the caller then tries to call.
+
+    `ai_config.zhipu_model_candidates` needs no such filter because its inputs are already non-blank,
+    which is why the two dedup expressions are deliberately not the same.
+    """
+    monkeypatch.delenv("ZHIPU_CHAT_MODEL", raising=False)
+    monkeypatch.delenv("ZHIPU_CHAT_FALLBACK_MODELS", raising=False)
+
+    candidates = ai_chat.chat_model_candidates("")
+
+    assert "" not in candidates
+    assert candidates == ai_config.zhipu_model_candidates()
+
+
 def test_zhipu_model_candidates_ignore_blank_primary(monkeypatch):
     monkeypatch.setattr(ai_config, "ZHIPU_MODEL", "")
     monkeypatch.setattr(ai_config, "ZHIPU_FALLBACK_MODELS", "fallback-a, fallback-b")
@@ -1966,13 +2141,53 @@ def test_zhipu_model_candidates_ignore_blank_primary(monkeypatch):
     assert ai_config.zhipu_model_candidates() == ["fallback-a", "fallback-b"]
 
 
-def test_ai_chat_api_key_prefers_streamlit_secret_then_env(monkeypatch):
-    monkeypatch.setattr(ai_chat, "_streamlit_secret", lambda name: "secret-key" if name == "ZAI_API_KEY" else None)
-    monkeypatch.setenv("ZAI_API_KEY", "env-key")
-    assert ai_chat.get_zhipu_api_key() == "secret-key"
+def test_insight_request_body_matches_the_configured_model_and_limits(monkeypatch):
+    """The insight path's half of `ai_config.build_zhipu_request`, which nothing else pins.
 
-    monkeypatch.setattr(ai_chat, "_streamlit_secret", lambda name: None)
-    assert ai_chat.get_zhipu_api_key() == "env-key"
+    Both callers pass five positional arguments into one shared builder, so swapping `max_tokens`
+    and `temperature` at either call site is a silent change. The chat side is covered by
+    `test_ai_chat_prompt_and_call_defaults`; this is the other side.
+    """
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, amt=None):
+            return json.dumps({"choices": [{"message": {"content": "Insight text"}}]}).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        captured["body"] = json.loads(request.data.decode("utf-8"))
+        captured["headers"] = dict(request.header_items())
+        return FakeResponse()
+
+    monkeypatch.setattr(insights.urllib.request, "urlopen", fake_urlopen)
+
+    insights._call_zhipu_with_model_fallback("insight-key", [{"role": "user", "content": "Hi."}], 220, 0.2)
+
+    assert captured["body"]["model"] == ai_config.zhipu_model_candidates()[0]
+    assert captured["body"]["max_tokens"] == 220
+    assert captured["body"]["temperature"] == 0.2
+    assert captured["body"]["thinking"] == {"type": "disabled"}
+    assert captured["headers"]["Authorization"] == "Bearer insight-key"
+
+
+def test_ai_chat_api_key_has_no_precedence_of_its_own(monkeypatch):
+    """`ai_chat.get_zhipu_api_key` must return whatever `ai_config` resolves, and nothing else.
+
+    It used to run the secret and environment tiers itself before delegating, so the delegation
+    branch and the Keychain tier behind it were never reached from here. Precedence between the
+    three sources stays pinned by `test_zhipu_api_key_prefers_streamlit_secret_then_env_then_keychain`;
+    duplicating it here would be a second copy that can drift.
+    """
+    monkeypatch.setenv("ZAI_API_KEY", "env-key-that-must-be-ignored")
+    for resolved in ("secret-key", "keychain-key", None):
+        monkeypatch.setattr(ai_config, "get_zhipu_api_key", lambda value=resolved: value)
+        assert ai_chat.get_zhipu_api_key() == resolved
 
 
 def test_ai_chat_prompt_and_call_defaults(monkeypatch):
@@ -3204,7 +3419,7 @@ def test_two_threads_importing_get_a_retryable_failure_not_a_traceback(tmp_path)
     Nesting is a `with` inside a `with` -- same thread by definition. Two browser tabs importing at
     once is concurrency SQLite's busy timeout already handles, and a module-level guard turned it
     into a bare RuntimeError that `IMPORT_FAILURES` does not catch, so Streamlit rendered a
-    traceback (printing the database path) instead of the retryable failure dialog.
+    traceback (printing the database path) instead of the retryable failure message.
     """
     database = tmp_path / "concurrent.db"
     db.init_db(database)
@@ -3395,7 +3610,7 @@ def test_replay_activates_from_streamlit_secrets_without_an_env_var(monkeypatch)
     # parse, which the replay checks deliberately run ahead of.
     monkeypatch.delenv("AI_REPLAY", raising=False)
     monkeypatch.setattr(
-        ai_config, "_get_streamlit_secret", lambda name: "1" if name == "AI_REPLAY" else None
+        ai_config, "streamlit_secret", lambda name: "1" if name == "AI_REPLAY" else None
     )
 
     assert ai_config.replay_enabled() is True

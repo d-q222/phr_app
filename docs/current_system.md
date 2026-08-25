@@ -127,8 +127,10 @@ blank content area with no button marked current and no way back.
 renders the page header, then `condition_ui.render_tracked_conditions_detail(person, rows, db_path)`,
 then the existing CRUD block inside an expander via
 `generic_record_page("conditions", ..., render_header=False)`. That parameter exists only for this
-page; it defaults to `True`, so the eight other callers are unchanged. The condition rows are fetched
-once in `page_tracked_conditions` and passed down, rather than queried by each layer.
+page; it defaults to `True`, so the one other caller -- the derived `RECORD_PAGE_TABLES` dispatch in
+`main` -- is unchanged. The condition rows for the *detail* view are fetched once in
+`page_tracked_conditions` and passed down rather than re-queried by each layer beneath it; the CRUD
+block below still runs its own `services.list_items`, so the page does read conditions twice.
 
 `Tracked Conditions` is never hidden — it is where a condition is created, so hiding it from a
 profile with none would leave no way to record a first one.
@@ -198,11 +200,11 @@ whole-bundle import calls `sqlite3.connect` exactly once, which catches any path
 Atomicity is what makes the Import/Export page's behaviour honest: a successful import clears the
 uploader (a nonce in the widget key remounts it empty, the same idiom `generic_record_page` uses for
 its edit selector), a failed one keeps the file queued, and the failure message can truthfully say
-nothing was written. The outcome is stashed in session state and rendered on the *next* run — both
-as an `st.dialog` and as an inline panel — because anything written immediately before `st.rerun()`
-is discarded before the browser sees it, which is why a successful import used to display nothing at
-all. The dialog is read-and-clear so dismissing it with the X cannot reopen it; `AppTest` cannot see
-dialogs, so the inline panel is what the tests assert on.
+nothing was written. The outcome is stashed in session state and rendered on the *next* run, because
+anything written immediately before `st.rerun()` is discarded before the browser sees it, which is
+why a successful import used to display nothing at all. It is read-and-clear, so an outcome cannot
+resurface on a later rerun. A modal used to carry the same body alongside the inline panel and was
+dropped; the tests assert one message rather than two.
 
 ### Layering is cleaner than it looks
 
@@ -363,14 +365,19 @@ See `docs/domain_invariants.md` §8 for the full list of stated-but-unenforced p
 
 ## 9. The AI layer is duplication, not abstraction
 
-`ai_config.AI_PROVIDER` is read once (`ai_config.AI_PROVIDER`) and **never branched on**. There is no provider
-interface, registry, or strategy. Three concerns are each implemented twice:
+`ai_config.AI_PROVIDER` gates the insight path (`insights.py` refuses a non-`zhipu` provider and falls back to
+the rule-based report when it is `none`), but there is no provider
+interface, registry, or strategy. Two concerns are still implemented twice:
 
 | Concern | Implementation A | Implementation B |
 |---|---|---|
-| API key lookup | `ai_config.get_zhipu_api_key` | `ai_chat.get_zhipu_api_key` |
 | HTTP error parsing | `ai_chat._parse_http_error` | `insights._parse_http_error` |
-| Request build + model fallback | `ai_chat._call_zhipu_chat_model` | `insights._build_zhipu_request` / `_call_zhipu_with_model_fallback` |
+| Model fallback + retry policy | `ai_chat.call_zhipu_chat` (next model, no sleep) | `insights._call_zhipu_with_model_fallback` walks candidates; `_call_zhipu_chat_completion` holds the `(0, 3, 8)` retry |
+
+Key lookup and request building used to be on this list. Both are single now: `ai_chat.get_zhipu_api_key`
+delegates to `ai_config`, and both paths build through `ai_config.build_zhipu_request`. Of the two
+rows left, the error parsers really are near-copies; the fallback policies are not, and differ on
+purpose -- so collapsing those is a design decision rather than a cleanup.
 
 The source-of-truth requirement to "preserve AI-provider abstraction" is therefore a requirement to
 **build** one, not to keep one. Target: a single `LLMProvider` port plus a shared error taxonomy,
@@ -403,11 +410,14 @@ silent argument swap is impossible rather than merely untested
 - `db_path` is threaded manually through nearly every signature in every module — the connection/tenant
   concern is a parameter instead of injected context. This is the largest mechanical change any
   migration faces.
-- Streamlit leaks into library modules: `security.py` (session state), `ai_config._get_streamlit_secret`,
+- Streamlit leaks into library modules: `security.py` (session state), `ai_config.streamlit_secret`,
   `ai_chat.py` (mixes context building, transport, and rendering), `body_map_ui.py` (rendering + state sync).
 - `imports_exports.py` and `fhir.py` read `db.TABLES` / `db.TABLE_COLUMNS` directly, coupling I/O modules
   to the physical schema dict.
-- `app.py` at 1,516 lines mixes routing, CSS (~260 lines), form plumbing, presentation, and demo mode.
+- `app.py` at ~1,830 lines mixes routing, CSS (~170 lines), form plumbing, presentation, and demo mode.
+  Palette, borders and radii are `[theme]` tokens in `.streamlit/config.toml`; the CSS that remains is
+  this app's own `.phr-*` components, the sidebar nav, the content-width cap, and the button and
+  metric rules, whose token equivalents are per-call-site flags a new call site can omit.
 - `generic_record_page` carries `# noqa: C901, PLR0915` — already over the complexity gate.
 
 ---

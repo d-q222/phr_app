@@ -193,7 +193,7 @@ allowed to read as "never leaves the device."
 - `tests/test_basic.py::test_ai_chat_context_is_scoped_to_selected_person`
 - `tests/test_basic.py::test_ai_chat_context_is_byte_limited`
 - `tests/test_basic.py::test_zhipu_api_key_prefers_streamlit_secret_then_env_then_keychain`
-- `tests/test_basic.py::test_ai_chat_api_key_prefers_streamlit_secret_then_env`
+- `tests/test_basic.py::test_ai_chat_api_key_has_no_precedence_of_its_own`
 
 ---
 
