@@ -46,26 +46,6 @@ DEMO_FICTIONAL_NOTICE = (
 )
 
 
-PAGES = [
-    "Dashboard",
-    "Body Map",
-    "Profiles",
-    "Health Timeline",
-    "Medications",
-    "Allergies",
-    "Labs",
-    "Appointments",
-    "Reminders",
-    "Wearables",
-    "Tracked Conditions",
-    "Provider Summary",
-    "Emergency Snapshot",
-    "Health Insights",
-    "AI Chat",
-    "Import/Export",
-    "Settings",
-]
-
 NAV_SECTIONS = {
     "Overview": ["Dashboard", "Body Map", "Health Insights", "AI Chat"],
     "Records": [
@@ -81,6 +61,11 @@ NAV_SECTIONS = {
     "Documents": ["Provider Summary", "Emergency Snapshot", "Import/Export"],
     "Admin": ["Profiles", "Settings"],
 }
+
+# The sections are the only statement of which pages exist. `page_navigation` asks nothing of this
+# but membership, so it derives instead of repeating all seventeen names: a page added to a section
+# is routable immediately, and there is no second list that can silently fall out of step.
+PAGES = frozenset(page for pages in NAV_SECTIONS.values() for page in pages)
 
 PAGE_EMOJIS = {
     "Dashboard": "📊",
@@ -168,58 +153,25 @@ SINGULAR_TITLES = {
     "Tracked Conditions": "Condition",
 }
 
+# Only the columns whose header `display_column_label` cannot derive. Everything absent falls
+# through to `format_label`, so a column earns a row here when title-casing its name would be
+# wrong: an initialism (`id`), a lowercase particle (`date_of_birth`), or a name deliberately
+# shortened for a table header (`test_name` -> `Test`). A row that merely restates the derived
+# label is not documentation -- it is a second copy that can drift from the first.
 DISPLAY_COLUMN_LABELS = {
     "id": "ID",
     "person_id": "Profile ID",
-    "name": "Name",
     "date_of_birth": "Date of Birth",
-    "sex": "Sex",
-    "relationship": "Relationship",
-    "emergency_contact": "Emergency Contact",
-    "notes": "Notes",
-    "note": "Note",
     "profile_password_enabled": "Password Protected",
     "profile_password_hint": "Password Hint",
     "created_at": "Created",
     "updated_at": "Updated",
-    "allergen": "Allergen",
-    "reaction": "Reaction",
-    "severity": "Severity",
-    "dose": "Dose",
-    "frequency": "Frequency",
-    "start_date": "Start Date",
-    "end_date": "End Date",
-    "status": "Status",
-    "reason": "Reason",
     "test_name": "Test",
     "result_value": "Result",
     "numeric_value": "Numeric Result",
-    "unit": "Unit",
-    "reference_low": "Reference Low",
-    "reference_high": "Reference High",
-    "flag": "Flag",
-    "lab_date": "Lab Date",
-    "entry_date": "Entry Date",
-    "title": "Title",
-    "body_system": "Body System",
-    "body_part": "Body Part",
-    "appointment_date": "Appointment Date",
-    "provider": "Provider",
-    "location": "Location",
-    "reminder_type": "Reminder Type",
-    "due_date": "Due Date",
     "metric_type": "Metric",
     "condition_name": "Condition",
     "noted_date": "Noted",
-    "value": "Value",
-    "timestamp": "Timestamp",
-    "source": "Source",
-    "latest": "Latest",
-    "latest_timestamp": "Latest Timestamp",
-    "average": "Average",
-    "minimum": "Minimum",
-    "maximum": "Maximum",
-    "count": "Count",
 }
 
 HIDDEN_DISPLAY_COLUMNS = {"person_id", "profile_password_hash"}
@@ -242,52 +194,27 @@ DATETIME_DISPLAY_COLUMNS = {
     "latest_timestamp",
 }
 
+# Only what `.streamlit/config.toml` cannot express. Palette, backgrounds, text, borders and radii
+# are [theme] tokens now. What stays: the `.phr-*` components this app draws itself, the flat sidebar
+# nav, the content-width cap, the button and metric rules -- deliberately kept as CSS because their
+# token equivalents (`type="primary"`, `st.metric(border=True)`) are per-call-site flags a new call
+# site can silently omit -- and a few small rules with no token at all. Deliberately not an
+# exhaustive list: read the sheet. Two attempts to enumerate it here were both incomplete.
+#
+# No heading *sizes*, and no `headingFontSizes` token either, though `h1, h2, h3 { letter-spacing }`
+# stays. This sheet used to set h1/h2/h3 font-size and it never applied: Streamlit styles headings
+# through an Emotion class (`.css-hash h1`, specificity 0-1-1) that outranks a bare `h1` selector
+# (0-0-1) whatever the source order, and `page_header` injects its `<h1>` inside that same container.
+# That argument is per-property, so the surviving `letter-spacing` rule is not covered by it.
 APP_CSS = """
 <style>
 :root {
-    --phr-bg: #f6f8f7;
     --phr-panel: #ffffff;
     --phr-border: #d9e1dd;
     --phr-text: #17211d;
     --phr-muted: #5f6f68;
     --phr-accent: #16705c;
     --phr-accent-soft: #e4f2ed;
-    --phr-warn: #a86112;
-    --phr-danger: #b42318;
-}
-
-.stApp {
-    background: var(--phr-bg);
-    color: var(--phr-text);
-}
-
-[data-testid="stAppViewContainer"],
-[data-testid="stHeader"],
-[data-testid="stToolbar"],
-[data-testid="stDecoration"] {
-    background: var(--phr-bg);
-    color: var(--phr-text);
-}
-
-[data-testid="stSidebar"],
-[data-testid="stSidebarContent"] {
-    background: #eef4f1;
-    color: var(--phr-text);
-}
-
-.stMarkdown,
-.stMarkdown p,
-.stMarkdown li,
-.stMarkdown span,
-[data-testid="stMarkdownContainer"],
-[data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] li,
-[data-testid="stMarkdownContainer"] span,
-[data-testid="stWidgetLabel"],
-[data-testid="stWidgetLabel"] p,
-label,
-p {
-    color: var(--phr-text);
 }
 
 .block-container {
@@ -298,19 +225,6 @@ p {
 
 h1, h2, h3 {
     letter-spacing: 0;
-}
-
-h1 {
-    font-size: 2rem;
-    line-height: 1.15;
-}
-
-h2 {
-    font-size: 1.35rem;
-}
-
-h3 {
-    font-size: 1.05rem;
 }
 
 .phr-topbar {
@@ -449,57 +363,16 @@ h3 {
     color: inherit;
 }
 
-[data-testid="stExpander"] {
-    background: var(--phr-panel);
-    color: var(--phr-text);
-    border: 1px solid var(--phr-border);
-    border-radius: 8px;
-}
-
-[data-testid="stDataFrame"] {
-    border: 1px solid var(--phr-border);
-    border-radius: 8px;
-}
-
-input,
-textarea,
-[data-baseweb="input"],
-[data-baseweb="textarea"],
-[data-baseweb="select"],
-[data-baseweb="select"] > div {
-    background: var(--phr-panel);
-    color: var(--phr-text);
-    border-color: var(--phr-border);
-    border-radius: 8px;
-}
-
 input::placeholder,
 textarea::placeholder {
     color: var(--phr-muted);
     opacity: 1;
 }
 
-[data-baseweb="select"] *,
-[data-baseweb="popover"] *,
-[role="listbox"] *,
-[role="option"] * {
-    color: var(--phr-text);
-}
-
-[data-baseweb="popover"],
-[role="listbox"],
-[role="option"] {
-    background: var(--phr-panel);
-    color: var(--phr-text);
-}
-
 [role="option"]:hover {
     background: var(--phr-accent-soft);
 }
 
-small, .caption {
-    color: var(--phr-muted);
-}
 </style>
 """
 
@@ -613,6 +486,12 @@ FIELD_CONFIGS = {
 }
 
 
+# Page name -> table, for the pages `generic_record_page` renders. Derived because every
+# `FIELD_CONFIGS` title is already the navigation entry's name: a record page routes as soon as it
+# has a config and a nav entry, with no third place to register it.
+RECORD_PAGE_TABLES = {config["title"]: table for table, config in FIELD_CONFIGS.items()}
+
+
 def format_label(name: str) -> str:
     return name.replace("_", " ").title()
 
@@ -678,6 +557,17 @@ def display_safe_people(people: list[dict], db_path: Path | str | None = None) -
             }
         )
     return rows
+
+
+def export_scope_options(person: dict | None, all_profiles_available: bool) -> list[str]:
+    """Which export scopes may be offered. Empty means none may be.
+
+    Empty means no profile is selected while a locked one exists, so an all-profile export would
+    carry records the lock exists to withhold (AGENTS.md section 4). `main` cannot reach that state
+    today; the refusal is what keeps it safe if a future caller can.
+    """
+    scopes = ["Selected profile"] if person else []
+    return scopes + ["All profiles"] if all_profiles_available else scopes
 
 
 def locked_profiles(db_path: Path | str | None = None) -> list[dict]:
@@ -756,22 +646,23 @@ def page_navigation(container=None) -> str:
     return current_page
 
 
+# EN SPACE, not a plain space: colour-emoji glyphs fill their em box, so one ordinary space reads as
+# no gap at all, and markdown collapses a second one. This is the separator for every emoji label.
+EMOJI_GAP = "\u2002"
+
+
 def page_button_label(page: str) -> str:
-    return f"{PAGE_EMOJIS.get(page, '•')} {page}"
+    return f"{PAGE_EMOJIS.get(page, '•')}{EMOJI_GAP}{page}"
 
 
 def action_button_label(label: str) -> str:
     emoji = ACTION_EMOJIS.get(label)
     if emoji:
-        return f"{emoji} {label}"
+        return f"{emoji}{EMOJI_GAP}{label}"
     for prefix, prefix_emoji in ACTION_PREFIX_EMOJIS.items():
         if label.startswith(prefix):
-            return f"{prefix_emoji} {label}"
+            return f"{prefix_emoji}{EMOJI_GAP}{label}"
     return label
-
-
-def warning_label(message: str) -> str:
-    return f"⚠️ {message}"
 
 
 def create_demo_database(demo_db_path: Path | str, sample_data_path: Path | str = SAMPLE_DATA_PATH) -> int | None:
@@ -789,11 +680,12 @@ def demo_only_mode() -> bool:
     Off by default, so a local run is unchanged. Secrets before environment: hosted
     Streamlit has a secrets editor but no environment-variable field.
     """
-    try:
-        secret = st.secrets.get("PHR_DEMO_ONLY")
-    except Exception:
-        secret = None
-    value = str(secret) if secret else os.getenv("PHR_DEMO_ONLY", "")
+    # `is None`, not `or`: `streamlit_secret` strips, so a whitespace-only secret arrives as "".
+    # Falling through on that would let a stray environment variable override what the deployment
+    # actually configured. Honouring the secret is what this read did before the helper was shared:
+    # base and head return the same answer for every input, whitespace-only included.
+    secret = ai_config.streamlit_secret("PHR_DEMO_ONLY")
+    value = secret if secret is not None else os.getenv("PHR_DEMO_ONLY", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -861,12 +753,7 @@ def clean_payload(table: str, payload: dict, *, derive_numeric_value: bool = Tru
     ("existing records are never rewritten"). New entries and imports still derive it.
     """
 
-    cleaned = {}
-    for key, value in payload.items():
-        if value == "":
-            cleaned[key] = None
-        else:
-            cleaned[key] = value
+    cleaned = {key: None if value == "" else value for key, value in payload.items()}
     if table == "lab_results":
         for key in ["numeric_value", "reference_low", "reference_high"]:
             if key in cleaned:
@@ -921,7 +808,7 @@ def selected_profile_sidebar(db_path: Path | str | None = None, demo_mode: bool 
 
 def unlock_screen(person: dict, db_path: Path | str | None = None) -> None:
     db_path = db.DB_PATH if db_path is None else db_path
-    st.warning(warning_label("This profile is password-protected."))
+    st.warning("This profile is password-protected.", icon="⚠️")
     if person.get("profile_password_hint"):
         st.caption(f"Password hint: {person['profile_password_hint']}")
     password = st.text_input("Password", type="password")
@@ -1056,7 +943,7 @@ def ai_settings() -> None:
     if ai_config.zhipu_key_configured():
         st.success("Zhipu AI API key is configured.")
     else:
-        st.warning(warning_label("Zhipu AI API key is not configured. AI safety-checked insights will not run."))
+        st.warning("Zhipu AI API key is not configured. AI safety-checked insights will not run.", icon="⚠️")
     st.caption(f"AI provider: {ai_config.AI_PROVIDER}")
     st.caption(f"Model: {ai_config.ZHIPU_MODEL}")
     st.caption(f"AI Chat model candidates: {', '.join(ai_chat.chat_model_candidates())}")
@@ -1103,8 +990,7 @@ def page_profiles(person: dict | None, db_path: Path | str | None = None, demo_m
     if add_profile_key not in st.session_state:
         st.session_state[add_profile_key] = False
 
-    if st.button(action_button_label("Add profile"), key="toggle_add_profile", on_click=toggle_add_form, args=(add_profile_key,)):
-        pass
+    st.button(action_button_label("Add profile"), key="toggle_add_profile", on_click=toggle_add_form, args=(add_profile_key,))
 
     if st.session_state[add_profile_key]:
         with st.form("add_profile"):
@@ -1179,7 +1065,7 @@ def page_profiles(person: dict | None, db_path: Path | str | None = None, demo_m
                 st.error("Confirm profile delete before continuing.")
                 return
             if apply_record_change(lambda: services.delete_person(int(row["id"]), db_path=db_path)):
-                st.warning(warning_label("Profile deleted."))
+                st.warning("Profile deleted.", icon="⚠️")
                 st.session_state[profile_edit_reset_key] += 1
                 st.rerun()
         if submitted:
@@ -1244,8 +1130,6 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
     if demo_mode:
         st.caption("Demo changes stay in this Streamlit session and do not affect saved profiles.")
 
-    filters = {}
-    start = end = None
     if table == "health_entries":
         start, end = date_range_controls("timeline")
         body_system = st.selectbox("Body system", ["", *BODY_SYSTEMS])
@@ -1264,7 +1148,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
         status = st.selectbox("Reminder status", ["", *REMINDER_STATUSES])
         rows = services.reminder_filters(person_id, status or None, db_path=db_path)
     else:
-        rows = services.list_items(table, person_id, filters, config["order_by"], descending=table not in {"allergies", "medications", "conditions"}, db_path=db_path)
+        rows = services.list_items(table, person_id, {}, config["order_by"], descending=table not in {"allergies", "medications", "conditions"}, db_path=db_path)
 
     dataframe(rows)
 
@@ -1273,8 +1157,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
     if add_form_key not in st.session_state:
         st.session_state[add_form_key] = False
 
-    if st.button(action_button_label(f"Add {singular_title}"), key=f"{state_scope}:add:toggle", on_click=toggle_add_form, args=(add_form_key,)):
-        pass
+    st.button(action_button_label(f"Add {singular_title}"), key=f"{state_scope}:add:toggle", on_click=toggle_add_form, args=(add_form_key,))
 
     if st.session_state[add_form_key]:
         with st.form(f"{state_scope}:add:form"):
@@ -1376,7 +1259,7 @@ def generic_record_page(table: str, person: dict, db_path: Path | str | None = N
                 st.error("Confirm record delete before continuing.")
                 return
             if apply_record_change(lambda: services.delete_item(table, person_id=person_id, record_id=int(row["id"]), db_path=db_path)):
-                st.warning(warning_label("Record deleted."))
+                st.warning("Record deleted.", icon="⚠️")
                 st.session_state[edit_reset_key] += 1
                 st.rerun()
         if submitted:
@@ -1514,7 +1397,7 @@ NO_RECORDS_IMPORTED = "__none__"
 # Broad on purpose. This is the boundary that turns *any* failure while parsing a user-supplied file
 # into a message, and the importers reach code that raises well outside `ValueError`: a bundle that
 # is `[]` raises AttributeError, and a backup naming a missing parent row raises sqlite3
-# IntegrityError. Letting either escape replaces the failure dialog with a raw traceback, which is
+# IntegrityError. Letting either escape replaces the failure message with a raw traceback, which is
 # the same "no feedback" bug this page was fixed for. `json.JSONDecodeError` subclasses ValueError.
 IMPORT_FAILURES = (ValueError, TypeError, AttributeError, LookupError, sqlite3.Error, db.DatabaseBusyError)
 
@@ -1613,7 +1496,7 @@ def import_outcome_summary(outcome: dict) -> str:
 
 
 def render_import_outcome_body(outcome: dict) -> None:
-    """The shared body of both renderings of an import result."""
+    """Render one import result: headline, per-table counts, and any skipped entries."""
     if outcome["succeeded"]:
         st.success(f"{outcome['title']}: {import_outcome_summary(outcome)}")
         rows = [
@@ -1630,33 +1513,22 @@ def render_import_outcome_body(outcome: dict) -> None:
         st.error(f"{outcome['title']}: {outcome['message']}")
 
 
-@st.dialog("Import result")
-def import_outcome_dialog(outcome: dict) -> None:
-    render_import_outcome_body(outcome)
-
-
 def render_import_outcome() -> None:
     """Show the result of the last import exactly once.
 
-    Read-and-clear rather than clear-on-dismiss: an outcome left in session state reopens the dialog
-    on the next rerun, including when it is dismissed with the X instead of the button, which traps
-    the user in a modal that keeps coming back.
+    Read-and-clear, not read-and-leave: an outcome left in session state renders again on every
+    following rerun, so it is popped as it is read.
 
-    Deliberately rendered twice -- as the dialog and as an inline panel below it. The dialog forces
-    acknowledgement; the panel guarantees the information is on screen even if the dialog lifecycle
-    misbehaves, whose failure mode would be no feedback at all, which is the bug being fixed.
-
-    (An earlier version of this docstring justified the pair by claiming AppTest cannot see dialogs.
-    On the pinned Streamlit it can -- it walks the dialog body too, which is why the assertions in
-    `tests/test_basic.py` see each message twice. The redundancy is still wanted; the reason given
-    for it was wrong.)
+    One inline panel. This used to also open a modal carrying the same body -- the dialog to force
+    acknowledgement, the panel to guarantee the message was on screen if the dialog lifecycle
+    misbehaved. That second surface guarded a failure never actually observed, and its visible cost
+    was every import message appearing twice.
     """
     outcome = st.session_state.pop(IMPORT_OUTCOME_KEY, None)
     if not outcome:
         return
     if outcome.get("db_path") and outcome["db_path"] != str(Path(active_db_path()).resolve()):
         return
-    import_outcome_dialog(outcome)
     render_import_outcome_body(outcome)
 
 
@@ -1719,15 +1591,14 @@ def page_import_export(person: dict | None, db_path: Path | str | None = None, d
     fhir_version = st.selectbox("FHIR version", fhir.SUPPORTED_FHIR_VERSIONS, key="fhir_version")
     protected_locked = locked_profiles(db_path)
     all_profile_export_available = not protected_locked
-    export_scope = "All profiles" if not person else "Selected profile"
-    if person:
-        options = ["Selected profile"]
-        if all_profile_export_available:
-            options.append("All profiles")
-        export_scope = st.selectbox("FHIR export scope", options, key="fhir_export_scope")
-    elif not all_profile_export_available:
-        st.warning(warning_label("Unlock protected profiles before exporting all-profile FHIR data."))
+    options = export_scope_options(person, all_profile_export_available)
+    if not options:
+        st.warning("Unlock protected profiles before exporting all-profile FHIR data.", icon="⚠️")
         export_scope = None
+    elif person:
+        export_scope = st.selectbox("FHIR export scope", options, key="fhir_export_scope")
+    else:
+        export_scope = options[0]
     export_person_id = int(person["id"]) if person and export_scope == "Selected profile" else None
     if export_scope:
         fhir_bundle = imports_exports.export_fhir_bundle(fhir_version, person_id=export_person_id, db_path=db_path)
@@ -1756,15 +1627,14 @@ def page_import_export(person: dict | None, db_path: Path | str | None = None, d
             )
 
     st.subheader("JSON Backup")
-    backup_scope = "All profiles" if not person else "Selected profile"
-    if person:
-        options = ["Selected profile"]
-        if all_profile_export_available:
-            options.append("All profiles")
-        backup_scope = st.selectbox("JSON backup export scope", options, key="json_backup_scope")
-    elif not all_profile_export_available:
-        st.warning(warning_label("Unlock protected profiles before exporting all-profile JSON backup data."))
+    options = export_scope_options(person, all_profile_export_available)
+    if not options:
+        st.warning("Unlock protected profiles before exporting all-profile JSON backup data.", icon="⚠️")
         backup_scope = None
+    elif person:
+        backup_scope = st.selectbox("JSON backup export scope", options, key="json_backup_scope")
+    else:
+        backup_scope = options[0]
     if backup_scope:
         backup_person_id = int(person["id"]) if person and backup_scope == "Selected profile" else None
         backup = imports_exports.export_json_backup(db_path=db_path, person_id=backup_person_id)
@@ -1837,7 +1707,7 @@ def page_insights(person: dict, db_path: Path | str | None = None) -> None:
         else:
             result = insights.generate_ai_insight_result(context, focus_area)
             if result.get("warning"):
-                st.warning(warning_label(result["warning"]))
+                st.warning(result["warning"], icon="⚠️")
                 if result.get("provider_details"):
                     with st.expander("Provider details"):
                         st.code(result["provider_details"])
@@ -1934,11 +1804,6 @@ def main() -> None:  # noqa: C901, PLR0915
         else:
             password_settings(person, db_path=current_db_path)
         ai_settings()
-        st.info(
-            "Future TODO: encryption at rest, audit logging, stronger authentication, family sharing permissions, "
-            "provider sharing, consent tracking, SMART-on-FHIR authorization, provider-connected EHR workflows, "
-            "production FHIR profiles, PDF export, and mobile interface."
-        )
         return
     if not security.health_data_visible(person, db_path=current_db_path):
         unlock_screen(person, db_path=current_db_path)
@@ -1953,22 +1818,12 @@ def main() -> None:  # noqa: C901, PLR0915
         body_map_ui.render_body_map_page(person, db_path=current_db_path)
     elif page == "Import/Export":
         page_import_export(person, current_db_path, demo_mode=demo_mode)
-    elif page == "Health Timeline":
-        generic_record_page("health_entries", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Medications":
-        generic_record_page("medications", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Allergies":
-        generic_record_page("allergies", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Labs":
-        generic_record_page("lab_results", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Appointments":
-        generic_record_page("appointments", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Reminders":
-        generic_record_page("reminders", person, current_db_path, demo_mode=demo_mode)
-    elif page == "Wearables":
-        generic_record_page("wearable_records", person, current_db_path, demo_mode=demo_mode)
     elif page == "Tracked Conditions":
+        # Before the generic branch: it has a `FIELD_CONFIGS` entry, but its own page nests that
+        # CRUD block under a detail view rather than rendering it alone.
         page_tracked_conditions(person, current_db_path, demo_mode=demo_mode)
+    elif page in RECORD_PAGE_TABLES:
+        generic_record_page(RECORD_PAGE_TABLES[page], person, current_db_path, demo_mode=demo_mode)
     elif page == "Provider Summary":
         page_provider_summary(person, db_path=current_db_path)
     elif page == "Emergency Snapshot":

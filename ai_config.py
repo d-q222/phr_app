@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+import urllib.request
 
 try:
     from dotenv import load_dotenv
@@ -45,14 +47,14 @@ ZHIPU_CONTEXT_BYTE_LIMIT = _env_int("ZHIPU_CONTEXT_BYTE_LIMIT", DEFAULT_ZHIPU_CO
 def zhipu_model_candidates() -> list[str]:
     candidates = [ZHIPU_MODEL] if ZHIPU_MODEL else []
     candidates.extend(model.strip() for model in ZHIPU_FALLBACK_MODELS.split(",") if model.strip())
-    deduped = []
-    for model in candidates:
-        if model not in deduped:
-            deduped.append(model)
-    return deduped
+    return list(dict.fromkeys(candidates))
 
 
-def _get_streamlit_secret(name: str) -> str | None:
+def streamlit_secret(name: str) -> str | None:
+    """Read one Streamlit secret, returning None if secrets are unavailable or unset.
+
+    Imports Streamlit lazily so this module stays importable outside a Streamlit process.
+    """
     try:
         import streamlit as st
 
@@ -90,17 +92,42 @@ def _get_keychain_password() -> str | None:
 
 def get_zhipu_api_key() -> str | None:
     for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = _get_streamlit_secret(name)
+        value = streamlit_secret(name)
         if value:
             return value.strip()
     for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = os.getenv(name)
+        # Strip before the truthiness test, not after. `ZAI_API_KEY="   "` is truthy but strips to
+        # "", and returning that abandoned the remaining tiers: a valid `ZHIPU_API_KEY` or Keychain
+        # entry went unread while the UI reported no key configured.
+        value = (os.getenv(name) or "").strip()
         if value:
-            return value.strip()
+            return value
     keychain_value = _get_keychain_password()
     if keychain_value:
         return keychain_value
     return None
+
+
+def build_zhipu_request(api_key: str, model: str, messages: list[dict], max_tokens: int, temperature: float) -> urllib.request.Request:
+    """One Zhipu chat-completion request, shared by the chat and insight paths.
+
+    Deliberately carries no timeout: the two callers allow different budgets (45s for chat, 30s for
+    an insight) and apply them at `urlopen`, along with their own retry policies.
+    """
+    return urllib.request.Request(
+        ZHIPU_API_URL,
+        data=json.dumps(
+            {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "thinking": {"type": "disabled"},
+            }
+        ).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
 
 
 def zhipu_key_configured() -> bool:
@@ -123,7 +150,7 @@ def replay_enabled() -> bool:
     frozen-default failure mode as the database-path default previously fixed in
     insights.py. Replay is demo-only and takes precedence over a configured API key.
     """
-    value = _get_streamlit_secret("AI_REPLAY") or os.getenv("AI_REPLAY", "")
+    value = streamlit_secret("AI_REPLAY") or os.getenv("AI_REPLAY", "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 

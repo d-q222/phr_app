@@ -362,23 +362,6 @@ def _call_zhipu_chat_completion(
     raise last_error or ZhipuRetryableError("Zhipu AI request deadline expired")
 
 
-def _build_zhipu_request(api_key: str, model: str, messages: list[dict], max_tokens: int, temperature: float) -> urllib.request.Request:
-    return urllib.request.Request(
-        ai_config.ZHIPU_API_URL,
-        data=json.dumps(
-            {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "thinking": {"type": "disabled"},
-            }
-        ).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
-
-
 def _call_zhipu_with_model_fallback(
     api_key: str,
     messages: list[dict],
@@ -388,7 +371,7 @@ def _call_zhipu_with_model_fallback(
     last_error = None
     deadline = time.monotonic() + INSIGHT_TIMEOUT_SECONDS
     for model in ai_config.zhipu_model_candidates():
-        request = _build_zhipu_request(api_key, model, messages, max_tokens, temperature)
+        request = ai_config.build_zhipu_request(api_key, model, messages, max_tokens, temperature)
         try:
             return _call_zhipu_chat_completion(request, deadline=deadline), model
         except ZhipuAPIError as exc:
