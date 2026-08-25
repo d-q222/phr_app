@@ -93,7 +93,7 @@ def test_trend_frame_rejects_booleans_rather_than_plotting_them_as_one():
     [
         (lambda: condition_charts.trend_frame({}), condition_charts.TREND_COLUMNS),
         (lambda: condition_charts.medication_spans([], "2026-08-01"), condition_charts.MEDICATION_COLUMNS),
-        (lambda: condition_charts.flag_history([]), condition_charts.FLAG_HISTORY_COLUMNS),
+        (lambda: condition_charts.flag_history({}), condition_charts.FLAG_HISTORY_COLUMNS),
         (lambda: condition_charts.monthly_counts({}), condition_charts.MONTHLY_COUNT_COLUMNS),
         (lambda: condition_charts.value_ranges(pd.DataFrame(), "TSH"), condition_charts.RANGE_COLUMNS),
         (lambda: condition_charts.severity_frame([]), condition_charts.SEVERITY_COLUMNS),
@@ -320,19 +320,34 @@ def test_trend_with_medications_shares_one_time_axis_and_never_a_second_y_scale(
         "2026-08-01",
     )
 
-    spec = condition_charts.build_trend_with_medications(frame, spans).to_dict()
+    domain = condition_charts.date_domain(frame, spans)
+    trend = condition_charts.build_trend_chart(frame, x_domain=domain).to_dict()
+    meds = condition_charts.build_medication_timeline(spans, x_domain=domain).to_dict()
 
-    assert "vconcat" in spec
-    assert spec["resolve"]["scale"]["x"] == "shared"
-    assert "y" not in spec.get("resolve", {}).get("scale", {})
+    # Siblings pinned to one domain, not a concatenated spec: Vega-Lite refuses to autosize concat,
+    # so the old vconcat overflowed its column instead of stretching to it.
+    assert "vconcat" not in trend and "vconcat" not in meds
+    assert trend["layer"][0]["encoding"]["x"]["scale"]["domain"] == domain
+    assert meds["layer"][0]["encoding"]["x"]["scale"]["domain"] == domain
+    # Still never a second y scale implying a relationship between dose and measurement.
+    assert "y" not in trend.get("resolve", {}).get("scale", {})
 
 
-def test_trend_with_medications_falls_back_to_the_bare_trend_when_none_are_recorded():
+def test_series_in_different_units_are_charted_separately():
+    """One linear y scale across two units destroys the smaller series.
+
+    LDL around 130 mg/dL beside a step count around 9,000 renders the cholesterol line flat on the
+    axis, which reads as missing data rather than as a scale problem.
+    """
     frame = condition_charts.trend_frame(SAMPLE_RECORDS)
 
-    spec = condition_charts.build_trend_with_medications(frame, condition_charts.medication_spans([], "2026-08-01")).to_dict()
+    units = condition_charts.units_in(frame)
 
-    assert "vconcat" not in spec
+    assert len(units) == len(set(units)) and units == sorted(units)
+    for unit in units:
+        subset = frame[frame["unit"].fillna("").astype(str) == unit]
+        assert not subset.empty
+        assert set(subset["unit"].fillna("").astype(str)) == {unit}
 
 
 def test_trend_axis_is_not_forced_to_zero():
@@ -349,7 +364,7 @@ def test_trend_axis_is_not_forced_to_zero():
 def test_every_flag_bearing_chart_puts_the_flag_in_its_tooltip():
     """Colour alone is never the carrier: the flag is readable as text on hover too."""
     frame = condition_charts.trend_frame(SAMPLE_RECORDS)
-    history = condition_charts.flag_history(SAMPLE_LABS)
+    history = condition_charts.flag_history({"lab_results": SAMPLE_LABS})
 
     for spec in (condition_charts.build_trend_chart(frame).to_dict(), condition_charts.build_flag_strip(history).to_dict()):
         titles = [tip.get("title") for tip in _tooltips(spec)]
@@ -388,7 +403,7 @@ def test_sparklines_give_each_condition_its_own_y_scale():
 @pytest.mark.parametrize(
     "builder",
     [
-        lambda: condition_charts.build_flag_strip(condition_charts.flag_history(SAMPLE_LABS)),
+        lambda: condition_charts.build_flag_strip(condition_charts.flag_history({"lab_results": SAMPLE_LABS})),
         lambda: condition_charts.build_density_chart(condition_charts.monthly_counts(SAMPLE_RECORDS)),
         lambda: condition_charts.build_severity_chart(
             condition_charts.severity_frame([{"entry_date": "2025-01-05", "title": "Gout flare", "severity": 8}])
@@ -560,11 +575,13 @@ def test_a_lab_with_no_stored_flag_is_an_absence_not_the_unknown_flag():
     explicitly flagged Unknown, under a caption promising "the flag the source recorded".
     """
     history = condition_charts.flag_history(
-        [
-            {"lab_date": "2026-01-01", "test_name": "A1c", "flag": None},
-            {"lab_date": "2026-02-01", "test_name": "A1c", "flag": ""},
-            {"lab_date": "2026-03-01", "test_name": "A1c", "flag": "Unknown"},
-        ]
+        {
+            "lab_results": [
+                {"lab_date": "2026-01-01", "test_name": "A1c", "flag": None},
+                {"lab_date": "2026-02-01", "test_name": "A1c", "flag": ""},
+                {"lab_date": "2026-03-01", "test_name": "A1c", "flag": "Unknown"},
+            ]
+        }
     )
 
     assert list(history["flag"]) == [
@@ -732,3 +749,72 @@ def test_first_latest_applies_its_own_tie_breaker_on_a_hand_built_frame():
 
     assert (row["first_value"], row["first_flag"]) == (1.1, "Normal")
     assert (row["latest_value"], row["latest_flag"]) == (1.9, "High")
+
+
+# --- regressions from the 2026-08-25 PR review -------------------------------------------------
+
+
+def test_a_zoned_wearable_timestamp_does_not_crash_the_flag_strip():
+    """The twin of `test_a_wearable_timestamp_with_a_zone_does_not_crash_the_page`.
+
+    `flag_history` spans every dated table, so it mixes the same zoned wearable timestamps with
+    bare lab dates that `_coerce_point` already had to reduce. Without the same reduction the sort
+    compared tz-aware against tz-naive and raised, taking the page out from this strip down.
+    """
+    history = condition_charts.flag_history(
+        {
+            "lab_results": _labs([("2026-01-01", 5.5, "Hemoglobin A1c", "Normal")]),
+            "wearable_records": [
+                {"timestamp": "2026-01-02T08:00:00Z", "metric_type": "Glucose"},
+                {"timestamp": "2026-01-03T08:00:00+05:00", "metric_type": "Glucose"},
+            ],
+        }
+    )
+
+    assert len(history) == 3
+    assert history["date"].dt.tz is None
+    # The offset is dropped without shifting the clock, exactly as `_coerce_point` documents.
+    assert str(history["date"].max()) == "2026-01-03 08:00:00"
+
+
+def test_flag_strip_grows_with_its_rows_and_declares_its_legend():
+    """Streamlit fits to the *total* height, so a legend takes its 50px out of the plot.
+
+    `height` is the floor. Hypertension draws six rows now that the strip spans every table; at a
+    fixed 150 they rendered ~5px apart with the top row label outside the chart.
+    """
+    six_rows = condition_charts.flag_history(
+        {
+            "lab_results": _labs([("2026-01-01", 1.1, "Creatinine", "Normal"),
+                                  ("2026-01-02", 4.2, "Potassium", "Normal")]),
+            "wearable_records": [
+                {"timestamp": "2026-01-03", "metric_type": name}
+                for name in ("Blood Pressure Systolic", "Blood Pressure Diastolic", "Weight")
+            ],
+            "medications": [{"start_date": "2026-01-04", "name": "Lisinopril"}],
+        }
+    )
+
+    tall = condition_charts.build_flag_strip(six_rows).to_dict()
+
+    assert six_rows["record"].nunique() == 6
+    assert tall["height"] == 6 * condition_charts._STRIP_ROW_HEIGHT + condition_charts._LEGEND_ALLOWANCE
+    # A strip with too few rows to need the extra keeps the floor, plus the legend when it draws one.
+    one_flagged = condition_charts.flag_history({"lab_results": _labs([("2026-01-01", 5.5, "A1c", "High")])})
+    one_hollow = condition_charts.flag_history({"wearable_records": [{"timestamp": "2026-01-01", "metric_type": "Steps"}]})
+    assert condition_charts.build_flag_strip(one_flagged).to_dict()["height"] == 150 + condition_charts._LEGEND_ALLOWANCE
+    assert condition_charts.build_flag_strip(one_hollow).to_dict()["height"] == 150
+
+
+def test_flag_strip_does_not_call_every_record_a_test():
+    """Medications, wearable metrics and health entries reach this strip too.
+
+    Titling their tooltip "Test" reported a prescription as a lab test -- accurate only while the
+    strip was fed `lab_results` alone.
+    """
+    history = condition_charts.flag_history({"medications": [{"start_date": "2026-01-01", "name": "Lisinopril"}]})
+
+    titles = [tip.get("title") for tip in _tooltips(condition_charts.build_flag_strip(history).to_dict())]
+
+    assert "Test" not in titles
+    assert "Record" in titles

@@ -129,6 +129,17 @@ DATE_FIELDS = {
     "wearable_records": "timestamp",
     "health_entries": "entry_date",
 }
+# What to call a row of each table on an axis. Paired with DATE_FIELDS: a table needs both to appear
+# on the flag strip at all.
+NAME_FIELDS = {
+    "lab_results": "test_name",
+    "medications": "name",
+    "wearable_records": "metric_type",
+    "health_entries": "title",
+}
+# `lab_results` is the only table with a `flag` column (schema.sql), so it is the only source that
+# can report one. Every other table's rows are NOT_FLAGGED by construction, never by inference.
+FLAG_FIELDS = {"lab_results": "flag"}
 
 
 def _empty(columns: list[str]) -> pd.DataFrame:
@@ -280,30 +291,47 @@ def medication_spans(rows: Sequence[dict], as_of: object) -> pd.DataFrame:
     )
 
 
-def flag_history(rows: Sequence[dict]) -> pd.DataFrame:
-    """Every lab result as one dated mark per test, carrying the flag the source recorded.
+def flag_history(records_by_table: Mapping[str, Sequence[dict]]) -> pd.DataFrame:
+    """Every dated record as one mark, carrying the flag its source recorded.
 
     A row whose stored flag is NULL or blank becomes ``NOT_FLAGGED``, the same absence
     ``trend_frame`` records. It previously became ``"Unknown"`` -- which is a real member of
     ``models.LAB_FLAGS``, i.e. a flag a source can actually record -- so a lab nobody flagged was
     drawn identically to one a source explicitly flagged Unknown, under a caption promising "the
     flag the source recorded at the time". Absence is not a flag value.
+
+    Spans every table rather than labs alone. Only ``lab_results`` has a ``flag`` column, so rows
+    from the others arrive NOT_FLAGGED and draw hollow -- an absence, never an inferred status. They
+    are included because a condition tracked mostly through wearables previously rendered a
+    one-row strip that read as a broken chart rather than as "few flagged labs".
     """
 
     history = []
-    for record in rows:
-        date_value = pd.to_datetime(record.get("lab_date"), errors="coerce")
-        if pd.isna(date_value):
+    for table, rows in records_by_table.items():
+        date_column = DATE_FIELDS.get(table)
+        name_column = NAME_FIELDS.get(table)
+        if date_column is None or name_column is None:
             continue
-        raw_flag = record.get("flag")
-        flag = str(raw_flag).strip() if raw_flag is not None else ""
-        history.append(
-            {
-                "record": record.get("test_name"),
-                "date": date_value,
-                "flag": flag or NOT_FLAGGED,
-            }
-        )
+        flag_column = FLAG_FIELDS.get(table)
+        for record in rows:
+            date_value = pd.to_datetime(record.get(date_column), errors="coerce")
+            if pd.isna(date_value):
+                continue
+            # The same wall-clock reduction `_coerce_point` applies, for the same reason: now that
+            # this spans every dated table, a zoned wearable timestamp beside a bare lab date gives
+            # `sort_values` below a column mixing tz-aware and tz-naive values, which raises and
+            # takes out the Tracked Conditions page from this strip down.
+            if date_value.tzinfo is not None:
+                date_value = date_value.tz_localize(None)
+            raw_flag = record.get(flag_column) if flag_column else None
+            flag = str(raw_flag).strip() if raw_flag is not None else ""
+            history.append(
+                {
+                    "record": record.get(name_column),
+                    "date": date_value,
+                    "flag": flag or NOT_FLAGGED,
+                }
+            )
     if not history:
         return _empty(FLAG_HISTORY_COLUMNS)
     return (
@@ -550,7 +578,48 @@ def _value_axis(frame: pd.DataFrame) -> alt.Y:
     return alt.Y("value:Q", title=title, scale=alt.Scale(zero=False))
 
 
-def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
+def units_in(frame: pd.DataFrame) -> list[str]:
+    """The distinct units present, in a stable order. One trend chart is drawn per unit.
+
+    Series are split by unit rather than plotted together because a single linear y scale spanning
+    two of them destroys the smaller: LDL around 130 mg/dL against a step count around 9,000 renders
+    the cholesterol line flat on the axis, which reads as missing data rather than as a scale
+    problem.
+    """
+    if frame.empty:
+        return []
+    return sorted(frame["unit"].fillna("").astype(str).unique())
+
+
+def date_domain(*frames: pd.DataFrame) -> list[str] | None:
+    """Least and greatest date across every frame, as ISO strings, or None when there is none.
+
+    Charts that used to be one concatenated spec are now rendered as siblings; pinning both to this
+    domain is what keeps their time axes aligned, which was the entire point of concatenating them.
+    """
+    stamps = []
+    for frame in frames:
+        for column in ("date", "start", "end"):
+            if not frame.empty and column in frame.columns:
+                stamps.extend(pd.to_datetime(frame[column], errors="coerce").dropna().tolist())
+    if not stamps:
+        return None
+    return [min(stamps).isoformat(), max(stamps).isoformat()]
+
+
+# Streamlit fits a chart to the *total* height it declares, legend included, so a trend that renders
+# a flag legend loses that much from its plot while an unflagged one beside it keeps all of it. The
+# two then read as differently proportioned charts rather than one comparison. Charts that will draw
+# a legend declare this much extra so every plot area ends up the same height.
+_LEGEND_ALLOWANCE = 50
+
+
+def _time_axis(x_domain: list[str] | None) -> alt.X:
+    scale = alt.Scale(domain=x_domain) if x_domain else alt.Undefined
+    return alt.X("date:T", title=None, scale=scale)
+
+
+def build_trend_chart(frame: pd.DataFrame, height: int = 260, x_domain: list[str] | None = None) -> alt.Chart:
     """Line with points coloured and shaped by their stored flag.
 
     Three layers rather than one: a neutral line for the path, filled marks for records that carry a
@@ -559,7 +628,7 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
     """
 
     flags = present_flags(frame[frame["flag"] != NOT_FLAGGED] if not frame.empty else frame)
-    base = alt.Chart(frame).encode(x=alt.X("date:T", title=None))
+    base = alt.Chart(frame).encode(x=_time_axis(x_domain))
     # No flagged rows means no flag scales at all, so Vega emits no legend rather than one listing
     # a vocabulary -- Critical included -- that nothing on the plot uses.
     tooltip = [
@@ -587,10 +656,11 @@ def build_trend_chart(frame: pd.DataFrame, height: int = 260) -> alt.Chart:
         .encode(y=_value_axis(frame), tooltip=tooltip)
     )
     layers = [line, unflagged, flagged] if flags else [line, unflagged]
-    return alt.layer(*layers).properties(height=height)
+    total = height + _LEGEND_ALLOWANCE if flags else height
+    return alt.layer(*layers).properties(height=total)
 
 
-def build_medication_timeline(spans: pd.DataFrame, height: int = 110) -> alt.Chart:
+def build_medication_timeline(spans: pd.DataFrame, height: int = 110, x_domain: list[str] | None = None) -> alt.Chart:
     """One horizontal bar per medication, from start to end date.
 
     Drawn as its own chart so it can be concatenated *under* a trend on a shared time axis rather
@@ -606,7 +676,7 @@ def build_medication_timeline(spans: pd.DataFrame, height: int = 110) -> alt.Cha
         alt.Tooltip("status:N", title="Status"),
     ]
     base = alt.Chart(spans).encode(
-        x=alt.X("start:T", title=None),
+        x=alt.X("start:T", title=None, scale=alt.Scale(domain=x_domain) if x_domain else alt.Undefined),
         x2="end:T",
         y=alt.Y("name:N", title=None, sort="-x"),
         tooltip=tooltip,
@@ -630,28 +700,22 @@ def build_medication_timeline(spans: pd.DataFrame, height: int = 110) -> alt.Cha
     return alt.layer(confirmed, open_ended).properties(height=height)
 
 
-def build_trend_with_medications(frame: pd.DataFrame, spans: pd.DataFrame) -> alt.Chart:
-    """Trend above, medication spans below, sharing one time axis.
-
-    The shared axis is what makes the timing readable at a glance -- and timing is all it shows.
-    The caption in the UI says so outright, because the reading a viewer reaches for is causal and
-    the app has no basis for that.
-    """
-
-    if spans.empty:
-        return build_trend_chart(frame)
-    return alt.vconcat(
-        build_trend_chart(frame),
-        build_medication_timeline(spans),
-        spacing=8,
-    ).resolve_scale(x="shared")
+# Vertical room one strip row needs to stay readable. Rows are named records, and the strip now
+# spans every dated table rather than labs alone, so their number is no longer close to fixed.
+_STRIP_ROW_HEIGHT = 28
 
 
 def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
-    """One mark per result, tests down the side and time across, coloured by stored flag.
+    """One mark per record, records down the side and time across, coloured by stored flag.
 
     Reads at a glance in a way a line chart cannot: a run of amber turning teal is visible across
     several tests at once, without anyone having to compare numbers to a range in their head.
+
+    ``height`` is a floor, not the value. It held the one or two rows labs alone produced; spanning
+    every table takes Hypertension to six, which a fixed 150 crushed to 5px apart with the top row
+    label rendered outside the chart. The plot grows with the rows, and declares the same
+    ``_LEGEND_ALLOWANCE`` ``build_trend_chart`` does, because Streamlit fits to the *total* height
+    and a flag legend would otherwise take its 50px out of the plot.
 
     Layered filled-and-hollow exactly as ``build_trend_chart`` is, and for the same reason: a lab
     row with no stored flag reaches here as ``NOT_FLAGGED`` and must render as an absence, not
@@ -661,12 +725,16 @@ def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
     flags = present_flags(history[history["flag"] != NOT_FLAGGED] if not history.empty else history)
     tooltip = [
         alt.Tooltip("date:T", title="Date"),
-        alt.Tooltip("record:N", title="Test"),
+        # Not "Test": medications, wearable metrics and health entries reach this strip too, and
+        # labelling a prescription as a test misreports what the record is.
+        alt.Tooltip("record:N", title="Record"),
         alt.Tooltip("flag:N", title="Source flag"),
     ]
     base = alt.Chart(history).encode(
         x=alt.X("date:T", title=None),
-        y=alt.Y("record:N", title=None),
+        # Row labels are record names now, not just test names, and the default limit clipped
+        # "Blood Pressure Diastolic" and "Blood Pressure Systolic" to the same visible prefix.
+        y=alt.Y("record:N", title=None, axis=alt.Axis(labelLimit=170)),
         tooltip=tooltip,
     )
     flagged = (
@@ -678,7 +746,10 @@ def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
         filled=False, size=60, stroke=MUTED, strokeWidth=1.2, opacity=0.7
     )
     layers = [unflagged, flagged] if flags else [unflagged]
-    return alt.layer(*layers).properties(height=height)
+    rows = int(history["record"].nunique()) if not history.empty else 0
+    plot = max(height, rows * _STRIP_ROW_HEIGHT)
+    total = plot + _LEGEND_ALLOWANCE if flags else plot
+    return alt.layer(*layers).properties(height=total)
 
 
 def build_density_chart(counts: pd.DataFrame, height: int = 200) -> alt.Chart:
