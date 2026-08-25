@@ -1,6 +1,8 @@
 # Current System
 
-**Verified against the repository:** 2026-08-02, commit `cb7e055`. **Suite:** 206 tests passing on Python 3.12.13.
+**Verified against the repository:** 2026-08-02, commit `cb7e055` (206 tests). Sections 2, 3, 5, 6, 7, 9,
+10 and 11 were rewritten and re-verified against the working tree on 2026-08-24 (527 tests); the
+remaining sections still carry the earlier stamp.
 
 Supersedes `docs/CODEBASE_SWEEP.md`, which remains in the repo as the historical record of the
 P0–P3 audit but is stale by an entire subsystem: it predates `body_map_*`, `components/`, and
@@ -58,34 +60,25 @@ not authorization.
 
 ---
 
-## 2. Files and sizes
+## 2. Files
 
-| Module | Lines | Role | Imports Streamlit? |
-|---|---|---|---|
-| `app.py` | 1690 | All UI, routing, forms, presentation, demo mode | yes |
-| `fhir.py` | 713 | FHIR R4/R5 Bundle export and import | no |
-| `insights.py` | 596 | Deterministic analytics + safety-gated AI reports | no |
-| `ai_chat.py` | 526 | AI chat page: context assembly, HTTP transport, rendering | yes |
-| `body_map_config.py` | 393 | Body-part/system taxonomy and record mapping (static) | no |
-| `db.py` | 383 | Repository: connections, schema init, generic CRUD | no |
-| `services.py` | 392 | Service layer: person-scoped operations, derived reads | no |
-| `body_map_services.py` | 205 | Normalizes records into `NormalizedBodyRecord` per body part | no |
-| `body_map_summary.py` | 196 | Conservative current/historical status summarization | no |
-| `imports_exports.py` | 201 | CSV / JSON-backup / FHIR facade | no |
-| `body_map_ui.py` | 191 | Body-map rendering and state sync | yes |
-| `condition_ui.py` | 424 | Tracked Conditions detail rendering, dashboard preview, state sync | yes |
-| `condition_charts.py` | 625 | Chart frames and Altair specifications for the condition detail view | no |
-| `condition_config.py` | 149 | Condition→record-name mapping and primary metric (static; a cross-agent contract) | no |
-| `condition_services.py` | 96 | Profile-scoped retrieval of records mapped to a condition | no |
-| `ai_config.py` | 138 | Provider config and key lookup | yes |
-| `validation.py` | 139 | Pure field validators | no |
-| `security.py` | 72 | Password hashing + profile unlock state | yes |
-| `models.py` | 67 | Controlled vocabularies only | no |
-| `display_format.py` | 42 | Shared date/datetime display formatting | no |
+**No per-module line counts are recorded here.** They were stale in 14 of 20 rows the last time
+anyone checked -- `fhir.py` by 368 lines -- and a number that must be restated on every commit will
+be wrong again by the next one. Run `wc -l *.py tests/*.py` for current figures. Application code
+and tests are within a few hundred lines of each other.
 
-**7,379 lines of application code; 4,789 lines of tests across 8 files.** Also
-`components/body_map/index.html` (31 lines of vanilla JS, a Streamlit custom component), `schema.sql`,
-and `scripts/verify.sh`.
+Module responsibilities are stated once, in `AGENTS.md` section 3, and are not repeated here.
+
+The one structural fact this file adds is **which modules import Streamlit**, because that is
+precisely what the React migration in `target_architecture.md` has to unpick: `app.py`, `ai_chat.py`,
+`ai_config.py`, `body_map_ui.py`, `condition_ui.py` and `security.py` do. Every other module --
+including all of `db.py`, `services.py`, `insights.py`, `fhir.py`, `condition_charts.py` and the
+`body_map_config`/`_services`/`_summary` trio -- does not, which is why the service boundary in
+section 3 is already well drawn. Verify with
+`grep -lE '^\s*(import|from) streamlit' *.py`.
+
+Beyond the Python there is `components/body_map/index.html` (31 lines of vanilla JS, a Streamlit
+custom component), `schema.sql`, and `scripts/verify.sh`.
 
 ---
 
@@ -210,7 +203,7 @@ dropped; the tests assert one message rather than two.
 
 Direct `db.*` **calls** by module: `app.py` **3** (all bootstrap/demo-seed — `db.init_db()` at
 `app.main`, and `db.init_db` + `db.import_all_tables` for demo seeding in `app.create_demo_database`),
-`imports_exports.py` 2, `fhir.py` 1, and **zero** in `insights.py`, `ai_chat.py`,
+`imports_exports.py` 4, `fhir.py` 5, and **zero** in `insights.py`, `ai_chat.py`,
 `body_map_services.py`, and `body_map_ui.py`. Everything else routes through `services.*`.
 
 The Streamlit → service boundary is therefore already well drawn. `db.py` imports no Streamlit and
@@ -276,10 +269,36 @@ formatted display string.
 | `nav_page` | current page name | `app.page_navigation` |
 | `demo_mode_enabled`, `demo_db_path` | demo toggle and temp DB path | `app.start_demo_mode` |
 | `profile_unlocked_{sha1(db_path)[:12]}_{person_id}` | per-profile unlock bool | `security.unlock_profile` |
-| `show_add_{table}_form` | add-form toggle | `generic_record_page` |
-| `edit_{table}_selection_reset` / `edit_{table}_selection_{n}` | counter used to force-reset the edit selectbox, and the selected id | `generic_record_page` |
+| `{db_path}:{person_id}:{table}:add:open` | add-form toggle, scoped by `app.record_page_scope` | `generic_record_page` |
+| `{scope}:edit:reset` / `{scope}:edit:selection:{n}` | counter used to force-reset the edit selectbox, and the selected id | `generic_record_page` |
+| `show_add_profile_form`, `edit_profile_selection_reset` | the Profiles page equivalents, which need no profile scope | `page_profiles` |
 | `body_map_profile_scope`, `selected_body_part`, `body_map_trend_record` | body-map scope and selection | `body_map_ui` |
-| `ai_chat_history_{person}_{db}` | chat transcript (memory only, never persisted) | `ai_chat._history_key` |
+| `condition_profile_scope` | tracked-condition scope; a change clears the three keys below | `condition_ui.sync_profile_scope` |
+| `selected_condition`, `tracked_condition_series:{condition}`, `tracked_condition_range:{condition}` | condition selection, the trend-chart series, and the Variability chart's series (the constant is named `RANGE_` but it holds a series name; the period is derived from it) — the prefix sweep that pops these **is** the detail view's cross-profile isolation | `condition_ui` |
+| `{history_key}_draft` / `example_question_{history_key}_draft` / `..._draft_applied` | pending chat question, the example-question pills widget, and the guard that stops a cleared draft repopulating | `ai_chat.render_ai_chatbot` |
+| `{history_key}_ai_consent` | per-profile, per-database AI chat consent (AGENTS.md §4) | `ai_chat.render_ai_chatbot` |
+| `{db_path}:{person_id}:insights:ai_consent` | the same consent for Health Insights, scoped through `record_page_scope` | `app.page_insights` |
+| `body_map_selector:{db}:{person_id}` | body-map component value, scoped so a switch cannot replay another profile's selection | `body_map_ui` |
+| `ai_chat_history_{sha1(db_path)[:12]}_{person_id}` | chat transcript (memory only, never persisted) | `ai_chat._history_key` |
+| `import_export:outcome` | the last import's result, popped by the run that renders it | `app.stash_import_outcome` |
+| `import_upload:{scope}:{name}:{n}` / `import_reset:{scope}:{name}` | uploader identity, whose trailing counter `n` is bumped to remount the widget empty after a successful import | `app.import_uploader_key` reads it, `app.clear_import_uploader` bumps it |
+
+**What this table covers:** keys that carry state across reruns, plus every key whose *scoping* is
+load-bearing for profile or database isolation. It deliberately omits the transient widget keys
+Streamlit allocates for form inputs and buttons (`{key_prefix}_dob`, `{state_scope}:add:{name}`,
+`nav_page_{page}`, `confirm_delete_profile_{id}` and the like) — roughly thirty-five of them, and
+listing them would be noise no one could keep current. They are excluded because they belong to a
+widget rather than to the application, **not** because they are transient: a keyed checkbox or text
+input keeps its value across reruns while it is rendered. That persistence is precisely why the ones
+whose staleness would cross a boundary embed the scope in the key itself —
+`{record_scope}:confirm_delete`, `edit_profile_{id}_*`, `confirm_delete_profile_{id}`.
+To check the table rather than trust it, grep for `session_state[` across the `.py` files; every
+write should map to a row above. Three review rounds each found a key missing here, so treat a
+mismatch as the table being stale rather than the code being right.
+
+One scoping gap is real and tracked, not an omission here: `confirm_fhir_clear` and
+`confirm_backup_restore` carry no database or profile scope, unlike `{record_scope}:confirm_delete`.
+That is item L21 in `docs/PR3_AUDIT_FOLLOWUPS.md`.
 
 Identity is recovered by `names.index(selection)` against the label list — unambiguous only because the
 label embeds the id. **The effective tenant key is the pair `(active_db_path(), person["id"])`**, because
@@ -298,9 +317,10 @@ messages and **never raises** — deliberately, so CSV import, backup restore, a
 per-row errors and skip rather than abort.
 
 Primitives: `is_blank`, `require`, `valid_date`, `valid_number`, `normalize_optional_number`,
-`valid_severity`, `valid_choice`, `valid_date_order`.
+`valid_severity`, `valid_choice`, `valid_date_order`, `parse_plain_decimal`.
 Entity validators: `validate_person`, `validate_medication`, `validate_allergy`, `validate_lab`,
-`validate_health_entry`, `validate_appointment`, `validate_reminder`, `validate_wearable`.
+`validate_health_entry`, `validate_appointment`, `validate_reminder`, `validate_wearable`,
+`validate_condition`.
 
 Reused by `imports_exports.BACKUP_VALIDATORS` and `fhir.FHIR_VALIDATORS` — already stack-independent,
 and the cheapest thing in the codebase to port.
@@ -322,9 +342,10 @@ own both halves; resolving this is a decision in `target_architecture.md`.
   clean message rather than a traceback.
 - **Provider failures** — typed: `ZhipuAPIError`, `ZhipuRetryableError`, `AIChatError`,
   `MissingAPIKeyError`, `RateLimitError`, `NetworkAIChatError`, `InvalidAIResponseError`. Model fallback
-  retries capacity failures (429, missing resource package) across candidates but **not** transport
-  timeouts or account errors, so total AI latency stays bounded; rule-based output always remains
-  available.
+  retries a plain 429 across candidates but **not** transport timeouts, so total AI latency stays
+  bounded; rule-based output always remains available. The two paths differ on provider code `1113`
+  (no balance or usable resource package): chat tries the next candidate, `insights` raises at once,
+  since an account-level failure is not something another model can fix.
 - **Database errors in the body map** — explicitly *not* reported as "no data," since an empty state
   reads as clinically meaningful (`test_database_error_is_not_reported_as_no_data`).
 - **Malformed stored data** — unparseable dates are displayed unchanged rather than dropped;
@@ -387,18 +408,23 @@ collapsing six functions into one adapter.
 
 ## 10. Tests
 
-206 tests, `scripts/verify.sh` = fatal `ruff check .` → `compileall` → `pytest -q`.
+`scripts/verify.sh` = fatal `ruff check .` → `compileall` → `pytest -q`.
 
 | File | Covers |
 |---|---|
-| `tests/test_basic.py` (973 lines) | schema init, CRUD, person isolation on reads *and writes*, profile passwords, reminders, insights, JSON backup/restore, CSV import, demo isolation, FHIR round trip, AI safety/retry/scoping |
-| `tests/test_body_map_config.py` (308) | canonical ids, mapping validity, alias collisions, preserved multi-system uncertainty |
-| `tests/test_body_map_services.py` (198) | profile-scoped retrieval, mapping precedence, normalization, error handling |
-| `tests/test_body_map_summary.py` (187) | conservative current/historical status, flag normalization, non-diagnostic language |
-| `tests/test_body_map_ui.py` (361) | Streamlit `AppTest`, component events, state reset, SVG ids |
+| `tests/test_basic.py` | schema init, CRUD, person isolation on reads *and writes*, profile passwords, reminders, insights, JSON backup/restore, CSV import, demo isolation, FHIR round trip, AI safety/retry/scoping, export scoping |
+| `tests/test_conditions.py` | tracked-condition mapping, detail rendering, navigation, profile-scope sync |
+| `tests/test_trend_charts.py` | trend frames, `numeric_value` derivation, chart selection |
+| `tests/test_condition_charts.py` | Altair spec construction, flag colouring, empty states |
+| `tests/test_body_map_config.py` | canonical ids, mapping validity, alias collisions, preserved multi-system uncertainty |
+| `tests/test_body_map_services.py` | profile-scoped retrieval, mapping precedence, normalization, error handling |
+| `tests/test_body_map_summary.py` | conservative current/historical status, flag normalization, non-diagnostic language |
+| `tests/test_body_map_ui.py` | Streamlit `AppTest`, component events, state reset, SVG ids |
+| `tests/test_demo_bundle.py` | the shipped demo FHIR bundle imports and yields the expected records |
 
-**Coverage gap worth knowing:** `app.generic_record_page` — the function rendering seven of the sixteen
-pages — has no direct test. Its service calls are covered; its wiring is not. `services.update_item`
+**Coverage gap worth knowing:** `app.generic_record_page` — the function rendering seven of the seventeen
+pages — has no direct test of its add/edit/delete wiring. `tests/test_conditions.py` drives it
+through `AppTest` far enough to assert its header; its service calls are covered; the CRUD path is not. `services.update_item`
 and `delete_item` therefore take `person_id` and `record_id` as **keyword-only** parameters, so a
 silent argument swap is impossible rather than merely untested
 (`test_person_and_record_ids_are_keyword_only_on_scoped_writes`).

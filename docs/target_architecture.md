@@ -131,7 +131,7 @@ skip-and-report behavior or force duplicate rule definitions.
 
 ## 5. Frontend
 
-`app.FIELD_CONFIGS` is the migration seam. Seven of sixteen pages are already rendered by one
+`app.FIELD_CONFIGS` is the migration seam. Seven of seventeen pages are already rendered by one
 config-driven function (`generic_record_page`); that property must survive. `FIELD_CONFIGS` becomes a
 TypeScript schema driving a generic record page component, so adding a record type stays a config change.
 
