@@ -749,3 +749,72 @@ def test_first_latest_applies_its_own_tie_breaker_on_a_hand_built_frame():
 
     assert (row["first_value"], row["first_flag"]) == (1.1, "Normal")
     assert (row["latest_value"], row["latest_flag"]) == (1.9, "High")
+
+
+# --- regressions from the 2026-08-25 PR review -------------------------------------------------
+
+
+def test_a_zoned_wearable_timestamp_does_not_crash_the_flag_strip():
+    """The twin of `test_a_wearable_timestamp_with_a_zone_does_not_crash_the_page`.
+
+    `flag_history` spans every dated table, so it mixes the same zoned wearable timestamps with
+    bare lab dates that `_coerce_point` already had to reduce. Without the same reduction the sort
+    compared tz-aware against tz-naive and raised, taking the page out from this strip down.
+    """
+    history = condition_charts.flag_history(
+        {
+            "lab_results": _labs([("2026-01-01", 5.5, "Hemoglobin A1c", "Normal")]),
+            "wearable_records": [
+                {"timestamp": "2026-01-02T08:00:00Z", "metric_type": "Glucose"},
+                {"timestamp": "2026-01-03T08:00:00+05:00", "metric_type": "Glucose"},
+            ],
+        }
+    )
+
+    assert len(history) == 3
+    assert history["date"].dt.tz is None
+    # The offset is dropped without shifting the clock, exactly as `_coerce_point` documents.
+    assert str(history["date"].max()) == "2026-01-03 08:00:00"
+
+
+def test_flag_strip_grows_with_its_rows_and_declares_its_legend():
+    """Streamlit fits to the *total* height, so a legend takes its 50px out of the plot.
+
+    `height` is the floor. Hypertension draws six rows now that the strip spans every table; at a
+    fixed 150 they rendered ~5px apart with the top row label outside the chart.
+    """
+    six_rows = condition_charts.flag_history(
+        {
+            "lab_results": _labs([("2026-01-01", 1.1, "Creatinine", "Normal"),
+                                  ("2026-01-02", 4.2, "Potassium", "Normal")]),
+            "wearable_records": [
+                {"timestamp": "2026-01-03", "metric_type": name}
+                for name in ("Blood Pressure Systolic", "Blood Pressure Diastolic", "Weight")
+            ],
+            "medications": [{"start_date": "2026-01-04", "name": "Lisinopril"}],
+        }
+    )
+
+    tall = condition_charts.build_flag_strip(six_rows).to_dict()
+
+    assert six_rows["record"].nunique() == 6
+    assert tall["height"] == 6 * condition_charts._STRIP_ROW_HEIGHT + condition_charts._LEGEND_ALLOWANCE
+    # A strip with too few rows to need the extra keeps the floor, plus the legend when it draws one.
+    one_flagged = condition_charts.flag_history({"lab_results": _labs([("2026-01-01", 5.5, "A1c", "High")])})
+    one_hollow = condition_charts.flag_history({"wearable_records": [{"timestamp": "2026-01-01", "metric_type": "Steps"}]})
+    assert condition_charts.build_flag_strip(one_flagged).to_dict()["height"] == 150 + condition_charts._LEGEND_ALLOWANCE
+    assert condition_charts.build_flag_strip(one_hollow).to_dict()["height"] == 150
+
+
+def test_flag_strip_does_not_call_every_record_a_test():
+    """Medications, wearable metrics and health entries reach this strip too.
+
+    Titling their tooltip "Test" reported a prescription as a lab test -- accurate only while the
+    strip was fed `lab_results` alone.
+    """
+    history = condition_charts.flag_history({"medications": [{"start_date": "2026-01-01", "name": "Lisinopril"}]})
+
+    titles = [tip.get("title") for tip in _tooltips(condition_charts.build_flag_strip(history).to_dict())]
+
+    assert "Test" not in titles
+    assert "Record" in titles

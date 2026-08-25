@@ -317,6 +317,12 @@ def flag_history(records_by_table: Mapping[str, Sequence[dict]]) -> pd.DataFrame
             date_value = pd.to_datetime(record.get(date_column), errors="coerce")
             if pd.isna(date_value):
                 continue
+            # The same wall-clock reduction `_coerce_point` applies, for the same reason: now that
+            # this spans every dated table, a zoned wearable timestamp beside a bare lab date gives
+            # `sort_values` below a column mixing tz-aware and tz-naive values, which raises and
+            # takes out the Tracked Conditions page from this strip down.
+            if date_value.tzinfo is not None:
+                date_value = date_value.tz_localize(None)
             raw_flag = record.get(flag_column) if flag_column else None
             flag = str(raw_flag).strip() if raw_flag is not None else ""
             history.append(
@@ -694,11 +700,22 @@ def build_medication_timeline(spans: pd.DataFrame, height: int = 110, x_domain: 
     return alt.layer(confirmed, open_ended).properties(height=height)
 
 
+# Vertical room one strip row needs to stay readable. Rows are named records, and the strip now
+# spans every dated table rather than labs alone, so their number is no longer close to fixed.
+_STRIP_ROW_HEIGHT = 28
+
+
 def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
-    """One mark per result, tests down the side and time across, coloured by stored flag.
+    """One mark per record, records down the side and time across, coloured by stored flag.
 
     Reads at a glance in a way a line chart cannot: a run of amber turning teal is visible across
     several tests at once, without anyone having to compare numbers to a range in their head.
+
+    ``height`` is a floor, not the value. It held the one or two rows labs alone produced; spanning
+    every table takes Hypertension to six, which a fixed 150 crushed to 5px apart with the top row
+    label rendered outside the chart. The plot grows with the rows, and declares the same
+    ``_LEGEND_ALLOWANCE`` ``build_trend_chart`` does, because Streamlit fits to the *total* height
+    and a flag legend would otherwise take its 50px out of the plot.
 
     Layered filled-and-hollow exactly as ``build_trend_chart`` is, and for the same reason: a lab
     row with no stored flag reaches here as ``NOT_FLAGGED`` and must render as an absence, not
@@ -708,12 +725,16 @@ def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
     flags = present_flags(history[history["flag"] != NOT_FLAGGED] if not history.empty else history)
     tooltip = [
         alt.Tooltip("date:T", title="Date"),
-        alt.Tooltip("record:N", title="Test"),
+        # Not "Test": medications, wearable metrics and health entries reach this strip too, and
+        # labelling a prescription as a test misreports what the record is.
+        alt.Tooltip("record:N", title="Record"),
         alt.Tooltip("flag:N", title="Source flag"),
     ]
     base = alt.Chart(history).encode(
         x=alt.X("date:T", title=None),
-        y=alt.Y("record:N", title=None),
+        # Row labels are record names now, not just test names, and the default limit clipped
+        # "Blood Pressure Diastolic" and "Blood Pressure Systolic" to the same visible prefix.
+        y=alt.Y("record:N", title=None, axis=alt.Axis(labelLimit=170)),
         tooltip=tooltip,
     )
     flagged = (
@@ -725,7 +746,10 @@ def build_flag_strip(history: pd.DataFrame, height: int = 150) -> alt.Chart:
         filled=False, size=60, stroke=MUTED, strokeWidth=1.2, opacity=0.7
     )
     layers = [unflagged, flagged] if flags else [unflagged]
-    return alt.layer(*layers).properties(height=height)
+    rows = int(history["record"].nunique()) if not history.empty else 0
+    plot = max(height, rows * _STRIP_ROW_HEIGHT)
+    total = plot + _LEGEND_ALLOWANCE if flags else plot
+    return alt.layer(*layers).properties(height=total)
 
 
 def build_density_chart(counts: pd.DataFrame, height: int = 200) -> alt.Chart:

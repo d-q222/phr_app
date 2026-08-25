@@ -96,9 +96,12 @@ def get_zhipu_api_key() -> str | None:
         if value:
             return value.strip()
     for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = os.getenv(name)
+        # Strip before the truthiness test, not after. `ZAI_API_KEY="   "` is truthy but strips to
+        # "", and returning that abandoned the remaining tiers: a valid `ZHIPU_API_KEY` or Keychain
+        # entry went unread while the UI reported no key configured.
+        value = (os.getenv(name) or "").strip()
         if value:
-            return value.strip()
+            return value
     keychain_value = _get_keychain_password()
     if keychain_value:
         return keychain_value

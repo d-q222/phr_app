@@ -100,6 +100,28 @@ def test_zhipu_api_key_prefers_streamlit_secret_then_env_then_keychain(monkeypat
     assert ai_config.get_zhipu_api_key() == "keychain-key"
 
 
+def test_a_blank_env_key_falls_through_to_the_remaining_tiers(monkeypatch):
+    """A whitespace-only value is not a configured key, so it must not end the search.
+
+    The truthiness test ran before the strip, so `ZAI_API_KEY="   "` returned `""` and abandoned
+    the remaining tiers: chat reported no key and insights fell back to rule-based output while a
+    valid `ZHIPU_API_KEY` or Keychain entry sat unread.
+    """
+    monkeypatch.setattr(ai_config, "streamlit_secret", lambda name: None)
+    monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: "keychain-key")
+    monkeypatch.setenv("ZAI_API_KEY", "   ")
+    monkeypatch.setenv("ZHIPU_API_KEY", "real-key")
+
+    assert ai_config.get_zhipu_api_key() == "real-key"
+    assert ai_config.zhipu_key_configured() is True
+
+    monkeypatch.delenv("ZHIPU_API_KEY")
+    assert ai_config.get_zhipu_api_key() == "keychain-key"
+
+    monkeypatch.setattr(ai_config, "_get_keychain_password", lambda: None)
+    assert ai_config.get_zhipu_api_key() is None
+
+
 def test_every_navigable_page_has_a_dispatch_branch():
     """A nav entry with no branch in `main` renders an empty content area.
 
