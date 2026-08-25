@@ -100,30 +100,16 @@ def chat_model_candidates(model: str = DEFAULT_CHAT_MODEL) -> list[str]:
     else:
         candidates.extend(ai_config.zhipu_model_candidates())
 
-    deduped = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
-
-
-def _streamlit_secret(name: str) -> str | None:
-    try:
-        value = st.secrets.get(name)
-    except Exception:
-        return None
-    return str(value).strip() if value else None
+    # `if candidate` has no counterpart in `ai_config.zhipu_model_candidates`; model="" needs it here.
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
 
 
 def get_zhipu_api_key() -> str | None:
-    for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = _streamlit_secret(name)
-        if value:
-            return value
-    for name in ("ZAI_API_KEY", "ZHIPU_API_KEY"):
-        value = os.getenv(name)
-        if value:
-            return value.strip()
+    """Delegate to `ai_config`, which owns key lookup (AGENTS.md section 3).
+
+    Kept as a name rather than inlined at the call site: the chat tests patch it here, and patching
+    `ai_config` instead would also redirect `insights`, which calls that function directly.
+    """
     return ai_config.get_zhipu_api_key()
 
 
@@ -398,20 +384,7 @@ def _call_zhipu_chat_model(
     *,
     timeout_seconds: float = CHAT_TIMEOUT_SECONDS,
 ) -> str:
-    request = urllib.request.Request(
-        ai_config.ZHIPU_API_URL,
-        data=json.dumps(
-            {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "thinking": {"type": "disabled"},
-            }
-        ).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    request = ai_config.build_zhipu_request(api_key, model, messages, max_tokens, temperature)
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read(ai_config.ZHIPU_RESPONSE_BYTE_LIMIT + 1)

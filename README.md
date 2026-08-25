@@ -47,7 +47,8 @@ This application is for personal organization and education only. It is not a me
 
 ## Installation
 
-Python 3.12+ is the intended target. The app uses only Streamlit, SQLite, pandas, pytest, and optional python-dotenv.
+Python 3.12+ is the intended target. The app uses only Streamlit, SQLite, pandas, Altair (charts),
+pytest, ruff, and optional python-dotenv -- see `requirements.txt`.
 
 ```bash
 cd phr_app
@@ -164,9 +165,8 @@ Consequences you will see on the page:
   Importing the same bundle twice would otherwise create a duplicate profile.
 - A **failed** import keeps the file queued, so you can fix the cause and retry without browsing for
   it again. Retrying is safe precisely because the failure added nothing.
-- Either way a dialog reports what happened — the reason on failure, and on success what actually
-  landed — and the same summary is shown on the page behind it. FHIR and CSV imports report record
-  counts; a JSON backup restore reports completion without counts, because it restores whole tables
+- Either way a panel on the page reports what happened — the reason on failure, and on success what
+  actually landed. FHIR and CSV imports report record counts; a JSON backup restore reports completion without counts, because it restores whole tables
   rather than counting rows.
 
 ## FHIR Interoperability
@@ -279,7 +279,23 @@ On a hosted deployment with a secrets editor rather than an environment-variable
 AI_REPLAY = "1"
 ```
 
-This exists for hosted demo deployments, which have no API key. No key is required, no network request is made, and no health data leaves the app. Both surfaces label the response as recorded before displaying it, and the consent checkboxes change wording to match. Replay takes precedence over a configured key, so leave it unset for normal use; `AI_PROVIDER=none` still disables AI output entirely.
+This exists for hosted demo deployments, which have no API key. No key is required, no network request is made, and no health data leaves the app. Both surfaces label the response as recorded before displaying it, and the consent checkboxes change wording to match. Replay takes precedence over a configured key, so leave it unset for normal use.
+
+`AI_PROVIDER=none` is **not** a global off switch, despite the name. Health Insights falls back to
+the rule-based report and the Settings connection test refuses outright, but `ai_chat.py` never
+consults it, so AI Chat still reaches the provider if a key is configured and you tick the consent
+box.
+
+`AI_REPLAY=1` stops the two AI *surfaces* calling out: Chat and Health Insights each return recorded
+text before any key lookup. It does **not** cover Settings' "Test BigModel API key", which ignores
+replay entirely -- deliberately, since a connection test that faked success would be worse than one
+that fails. It still refuses without calling out when no key is configured, when `AI_PROVIDER` is not `zhipu`,
+or when both model variables are blanked; otherwise it makes a real request. That request carries only `"Reply with OK."`, never health data. Setting both flags
+gives recorded chat but a rule-based insight report, because the provider check runs before the
+replay check on that path.
+
+To be sure nothing calls out at all, remove the key from every source it is read from: Streamlit
+secrets, `ZAI_API_KEY`/`ZHIPU_API_KEY` in the environment, and on macOS the Keychain entry.
 
 The recorded text is fixed sample content, not a generated answer, and it does not demonstrate provider-output safety validation -- see the `Open P1` note in `AGENTS.md` for that work.
 
