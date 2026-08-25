@@ -383,9 +383,14 @@ def test_tracked_conditions_page_renders_every_section_for_the_imported_profile(
 def test_every_imported_condition_charts_without_error(tmp_path, monkeypatch):
     """Each condition is a different shape, so each is a different chance to raise.
 
-    Sleep Apnea is the one that renders five charts rather than six: it maps no lab, because there
-    is no blood test commonly tracked for it, and mapping one purely to fill the panel would be the
-    fabricated-claim defect this feature exists to avoid. Its empty state says so.
+    The count now turns on medications, not labs. The medication timeline is its own chart rather
+    than a pane concatenated into the trend -- Vega-Lite will not autosize a concatenated spec, so
+    the old one overflowed its column -- which gives a condition with recorded medications one chart
+    more than one without.
+
+    Sleep Apnea maps no lab, and once did render one panel fewer for it. It no longer does: the
+    flag strip spans every dated table, so its wearable and health-entry records appear there,
+    drawn hollow because only lab results carry a source flag. Nothing was mapped to fill the panel.
     """
     _app_with_imported_demo(tmp_path, monkeypatch)
     test_app = AppTest.from_file(str(Path(app.__file__)))
@@ -402,8 +407,18 @@ def test_every_imported_condition_charts_without_error(tmp_path, monkeypatch):
         assert [header.value for header in test_app.header] == [condition]
         rendered[condition] = len(test_app.get("vega_lite_chart"))
 
-    assert rendered["Sleep Apnea"] == 5
-    assert all(count == 6 for name, count in rendered.items() if name != "Sleep Apnea"), rendered
+    # Seven where medications are recorded, six where none are: the difference is the medication
+    # timeline, now a sibling chart. Every condition gets a flag strip, Sleep Apnea included.
+    with_medications = {"Hypothyroidism", "Gout", "Asthma"}
+    assert {name: count for name, count in rendered.items() if name in with_medications} == {
+        "Hypothyroidism": 7,
+        "Gout": 7,
+        "Asthma": 7,
+    }, rendered
+    assert {name: count for name, count in rendered.items() if name not in with_medications} == {
+        "Sleep Apnea": 6,
+        "Chronic Kidney Disease": 6,
+    }, rendered
 
 
 def test_tracked_conditions_page_degrades_for_a_profile_with_thin_data(tmp_path, monkeypatch):

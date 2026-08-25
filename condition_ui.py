@@ -253,8 +253,18 @@ def _render_measurement_trends(
         st.caption("Select at least one series to chart.")
         return
     spans = condition_charts.medication_spans(records_by_table.get("medications", []), date.today().isoformat())
-    chart = condition_charts.build_trend_with_medications(trends[trends["record"].isin(selected)], spans)
-    st.altair_chart(chart, width="stretch")
+    shown = trends[trends["record"].isin(selected)]
+    # One chart per unit, rendered as siblings pinned to a shared time domain. Plotting mg/dL and
+    # step counts on one linear scale flattened the smaller series onto the axis, and the previous
+    # concatenated spec could not be autosized by Vega-Lite, so it overflowed its column.
+    domain = condition_charts.date_domain(shown, spans)
+    for unit in condition_charts.units_in(shown):
+        st.altair_chart(
+            condition_charts.build_trend_chart(shown[shown["unit"].fillna("").astype(str) == unit], x_domain=domain),
+            width="stretch",
+        )
+    if not spans.empty:
+        st.altair_chart(condition_charts.build_medication_timeline(spans, x_domain=domain), width="stretch")
     st.caption(condition_charts.FLAG_CAPTION)
     if not spans.empty:
         st.caption(
@@ -286,17 +296,17 @@ def _render_first_latest(trends: pd.DataFrame) -> None:
 
 def _render_flag_history(records_by_table: Mapping[str, Sequence[dict]]) -> None:
     st.subheader("Source-flag history")
-    history = condition_charts.flag_history(records_by_table.get("lab_results", []))
+    history = condition_charts.flag_history(records_by_table)
     if history.empty:
-        # Some conditions have no lab that is commonly tracked for them at all. Saying so is better
-        # than leaving a gap, and far better than mapping a test just to fill the panel.
-        st.info(
-            "No lab results are linked to this condition. Not every condition has a lab test that "
-            "is commonly tracked for it."
-        )
+        # Reached only when nothing dated is linked at all, now that the strip spans every table.
+        # Saying so is better than leaving a gap, and far better than mapping a record to fill it.
+        st.info("No dated records are linked to this condition yet.")
         return
     st.altair_chart(condition_charts.build_flag_strip(history), width="stretch")
-    st.caption("One mark per result, showing the flag the source recorded at the time.")
+    st.caption(
+        "One mark per record. Only lab results carry a source flag, so records from other tables "
+        "are drawn hollow -- an absence, not a status this app assigned."
+    )
 
 
 def _render_cadence(records_by_table: Mapping[str, Sequence[dict]]) -> None:
