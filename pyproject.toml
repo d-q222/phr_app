@@ -2,6 +2,15 @@
 # 3.9.6 to 3.12 on 2026-08-01, so pyupgrade
 # may now rewrite to 3.12 syntax (e.g. `datetime.UTC`) that the runtime can execute.
 # Keep this in sync with the interpreter — a target ahead of the runtime breaks the suite.
+[project]
+name = "phr-app"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
