@@ -1,6 +1,7 @@
-from fastapi import FastAPI
-from database import SessionLocal
+from fastapi import FastAPI, Depends
+from database import get_db
 from models import People
+from sqlalchemy.orm import Session
 
 app = FastAPI()
 
@@ -9,7 +10,6 @@ def read_root():
     return {"status": "ok"}
 
 @app.get("/people/count")
-def get_people_count():
-    with SessionLocal() as db:
-        people_count = db.query(People).count()
+def get_people_count(db: Session = Depends(get_db)):
+    people_count = db.query(People).count()
     return {'people_count': people_count}

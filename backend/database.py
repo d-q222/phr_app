@@ -7,6 +7,11 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(bind = engine)
 
+def get_db():
+    with SessionLocal() as db:
+        yield db
+
+
 class Base(DeclarativeBase):
     pass
 
