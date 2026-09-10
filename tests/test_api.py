@@ -50,9 +50,24 @@ def test_missing_id(client):
     response = client.get("/people/999")
     assert response.status_code == 404
 
-
-
-
-
-
-
+def test_creating_person(client):
+    client, alice, bob = client
+    new_person_data = {
+        "name": "Charlie",
+        "date_of_birth": "1990-01-01",
+        "sex": "Female",
+        "relationship": "Child",
+        "emergency_contact": "Alice",
+        "notes": "New family member"
+    }
+    response = client.post("/people", json = new_person_data)
+    data = response.json()
+    assert response.status_code == 201
+    assert data['id'] != alice and data['id'] != bob
+    assert data['name'] == "Charlie"
+    assert data['date_of_birth'] == "1990-01-01"
+    assert data['sex'] == "Female"
+    assert data['relationship'] == "Child"
+    assert data['emergency_contact'] == "Alice"
+    assert data['notes'] == "New family member"
+    assert client.get("/people/count").json()['people_count'] == 3

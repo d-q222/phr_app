@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from backend.database import get_db
 from backend.models import People
 from sqlalchemy.orm import Session
-from backend.schemas import PersonOut
+from backend.schemas import PersonOut, PersonCreate
 
 app = FastAPI()
 
@@ -26,3 +26,11 @@ def get_person(person_id: int, db: Session = Depends(get_db)):
     if person is None:
             raise HTTPException(status_code = 404, detail = "Person not found")
     return person
+
+@app.post("/people", response_model = PersonOut, status_code = 201)
+def create_person(body: PersonCreate, db: Session = Depends(get_db)):
+    new_person = People(**body.model_dump())
+    db.add(new_person)
+    db.commit()
+    db.refresh(new_person)
+    return new_person
