@@ -71,3 +71,16 @@ def test_creating_person(client):
     assert data['emergency_contact'] == "Alice"
     assert data['notes'] == "New family member"
     assert client.get("/people/count").json()['people_count'] == 3
+
+def test_create_with_name_only(client):
+    client, alice, bob = client
+    new_person_data = {'name': 'X'}
+    response = client.post("/people", json = new_person_data)
+    data = response.json()
+    assert response.status_code == 201
+
+def test_create_with_empty_data(client):
+    client, alice, bob = client
+    new_person_data = {}
+    response = client.post("/people", json = new_person_data)
+    assert response.status_code == 422
