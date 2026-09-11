@@ -76,7 +76,6 @@ def test_create_with_name_only(client):
     client, alice, bob = client
     new_person_data = {'name': 'X'}
     response = client.post("/people", json = new_person_data)
-    data = response.json()
     assert response.status_code == 201
 
 def test_create_with_empty_data(client):
