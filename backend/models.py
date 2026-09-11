@@ -1,7 +1,10 @@
 from datetime import datetime
-from backend.database import Base
+
 from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
+
+from backend.database import Base
+
 
 def now_iso() -> str:
     return datetime.now().replace(microsecond=0).isoformat()

@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.orm import Session
+
 from backend.database import get_db
 from backend.models import People
-from sqlalchemy.orm import Session
-from backend.schemas import PersonOut, PersonCreate
+from backend.schemas import PersonCreate, PersonOut
 
 app = FastAPI()
 

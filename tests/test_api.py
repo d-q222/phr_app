@@ -1,12 +1,12 @@
 import pytest
 from fastapi.testclient import TestClient
-
-from backend.main import app
-from backend.database import get_db
-from tests.test_basic import _two_profiles_with_allergies
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+from backend.database import get_db
+from backend.main import app
+from tests.test_basic import _two_profiles_with_allergies
+
 
 @pytest.fixture
 def client(tmp_path):
