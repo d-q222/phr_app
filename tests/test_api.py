@@ -1,6 +1,6 @@
 import pytest
-from fastapi import FastAPI, Depends
 from fastapi.testclient import TestClient
+
 from backend.main import app
 from backend.database import get_db
 from tests.test_basic import _two_profiles_with_allergies
