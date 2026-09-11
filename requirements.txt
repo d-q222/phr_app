@@ -4,3 +4,7 @@ altair
 pytest
 python-dotenv
 ruff
+fastapi
+sqlalchemy
+uvicorn
+httpx2
