@@ -24,5 +24,10 @@ uv run pytest tests/test_api.py -v
 
 The fixture isolates a DB by running a test engine within a function that is connected to a helper with a small seeded database from /tests/test_basic.py. The function has a line ```app.dependency_overrides[get_db] = override_get_db ``` that substitutes override_get_db, a session from the test engine, for all instances of get_db so that the tests are isolated. 
 
+Ruff check:
+```
+uv run ruff check --fix
+```
+
 # Next:
 Auth (argon2, JWT, ownership), pagination/errors, point one Streamlit page at the API.
