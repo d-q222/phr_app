@@ -1,6 +1,6 @@
 name = "privacy_safety_reviewer"
 description = "High-assurance read-only reviewer used only for PHR privacy, profile isolation, exports, AI health context, medical-safety output, FHIR patient attachment, or destructive database changes."
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 model_reasoning_effort = "high"
 model_verbosity = "low"
 sandbox_mode = "read-only"
